@@ -425,7 +425,7 @@ impl Compressor {
 
                 choose_literal(
                     &mut self.freqs,
-                    crate::fast_bytes::get_byte(input, in_next),
+                    input[in_next],
                     &mut self.sequences[seq_idx],
                 );
                 in_next += 1;
@@ -509,9 +509,12 @@ impl Compressor {
                     );
                     in_next += length as usize;
                 } else {
-                    let lit = crate::fast_bytes::get_byte(input, in_next);
-                    choose_literal(&mut self.freqs, lit, &mut self.sequences[seq_idx]);
-                    self.split_stats.observe_literal(lit);
+                    choose_literal(
+                        &mut self.freqs,
+                        input[in_next],
+                        &mut self.sequences[seq_idx],
+                    );
+                    self.split_stats.observe_literal(input[in_next]);
                     in_next += 1;
                 }
 
@@ -595,9 +598,12 @@ impl Compressor {
 
                 if cur_len < min_len || (cur_len == DEFLATE_MIN_MATCH_LEN && cur_offset > 8192) {
                     // No usable match — emit literal
-                    let lit = crate::fast_bytes::get_byte(input, in_next);
-                    choose_literal(&mut self.freqs, lit, &mut self.sequences[seq_idx]);
-                    self.split_stats.observe_literal(lit);
+                    choose_literal(
+                        &mut self.freqs,
+                        input[in_next],
+                        &mut self.sequences[seq_idx],
+                    );
+                    self.split_stats.observe_literal(input[in_next]);
                     in_next += 1;
                 } else {
                     // Have a match. Advance past the match start position.
@@ -649,9 +655,12 @@ impl Compressor {
                                 > 2
                         {
                             // Better match at next position — emit literal, adopt new match
-                            let lit = crate::fast_bytes::get_byte(input, in_next - 2);
-                            choose_literal(&mut self.freqs, lit, &mut self.sequences[seq_idx]);
-                            self.split_stats.observe_literal(lit);
+                            choose_literal(
+                                &mut self.freqs,
+                                input[in_next - 2],
+                                &mut self.sequences[seq_idx],
+                            );
+                            self.split_stats.observe_literal(input[in_next - 2]);
                             cur_len = next_len;
                             cur_offset = next_offset;
                             continue; // back to have_cur_match
@@ -678,12 +687,18 @@ impl Compressor {
                                     > 6
                             {
                                 // Much better match 2 ahead — emit 2 literals
-                                let lit1 = crate::fast_bytes::get_byte(input, in_next - 3);
-                                choose_literal(&mut self.freqs, lit1, &mut self.sequences[seq_idx]);
-                                self.split_stats.observe_literal(lit1);
-                                let lit2 = crate::fast_bytes::get_byte(input, in_next - 2);
-                                choose_literal(&mut self.freqs, lit2, &mut self.sequences[seq_idx]);
-                                self.split_stats.observe_literal(lit2);
+                                choose_literal(
+                                    &mut self.freqs,
+                                    input[in_next - 3],
+                                    &mut self.sequences[seq_idx],
+                                );
+                                self.split_stats.observe_literal(input[in_next - 3]);
+                                choose_literal(
+                                    &mut self.freqs,
+                                    input[in_next - 2],
+                                    &mut self.sequences[seq_idx],
+                                );
+                                self.split_stats.observe_literal(input[in_next - 2]);
                                 cur_len = next_len2;
                                 cur_offset = next_offset2;
                                 continue; // back to have_cur_match
@@ -840,8 +855,7 @@ impl Compressor {
                         next_observation = in_next + best_len as usize;
                         ns.new_match_len_freqs[best_len as usize] += 1;
                     } else {
-                        self.split_stats
-                            .observe_literal(crate::fast_bytes::get_byte(input, in_next));
+                        self.split_stats.observe_literal(input[in_next]);
                         next_observation = in_next + 1;
                     }
                 }
@@ -850,7 +864,7 @@ impl Compressor {
                 let num_matches = cache_idx - matches_start;
                 ns.match_cache[cache_idx] = LzMatch {
                     length: num_matches as u16,
-                    offset: crate::fast_bytes::get_byte(input, in_next) as u16,
+                    offset: input[in_next] as u16,
                 };
                 in_next += 1;
                 cache_idx += 1;
@@ -882,7 +896,7 @@ impl Compressor {
                         // Sentinel for skipped position (no matches)
                         ns.match_cache[cache_idx] = LzMatch {
                             length: 0,
-                            offset: crate::fast_bytes::get_byte(input, in_next) as u16,
+                            offset: input[in_next] as u16,
                         };
                         in_next += 1;
                         cache_idx += 1;

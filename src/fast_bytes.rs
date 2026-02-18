@@ -72,53 +72,20 @@ pub(crate) fn get_byte(data: &[u8], idx: usize) -> u8 {
     }
 }
 
-/// Index into a slice, skipping bounds checks in `unchecked` mode.
-#[inline(always)]
-pub(crate) fn idx<T: Copy>(slice: &[T], i: usize) -> T {
-    #[cfg(feature = "unchecked")]
-    {
-        debug_assert!(i < slice.len());
-        // SAFETY: Caller guarantees i < slice.len().
-        unsafe { *slice.get_unchecked(i) }
-    }
-    #[cfg(not(feature = "unchecked"))]
-    {
-        slice[i]
-    }
-}
-
-/// Get a mutable reference into a slice, skipping bounds checks in `unchecked` mode.
-#[inline(always)]
-pub(crate) fn idx_mut<T>(slice: &mut [T], i: usize) -> &mut T {
-    #[cfg(feature = "unchecked")]
-    {
-        debug_assert!(i < slice.len());
-        // SAFETY: Caller guarantees i < slice.len().
-        unsafe { slice.get_unchecked_mut(i) }
-    }
-    #[cfg(not(feature = "unchecked"))]
-    {
-        &mut slice[i]
-    }
-}
-
 /// Prefetch a value for upcoming write access.
 ///
-/// Emits `PREFETCHW` on x86_64 when the `unchecked` feature is enabled,
-/// matching C libdeflate's `__builtin_prefetch(addr, 1)`. Write-intent
-/// prefetch brings the cache line into Modified/Exclusive state, avoiding
-/// a later Read-For-Ownership transition when the hash table entry is
-/// updated. No-op on other platforms or without `unchecked`.
+/// Emits `PREFETCHT0` on x86_64 when the `unchecked` feature is enabled.
+/// The C code uses `PREFETCHW` (write-intent) which is slightly better for
+/// write-heavy patterns, but `PREFETCHT0` still eliminates the main latency
+/// (DRAM/L3 → L1 fetch). No-op on other platforms or without `unchecked`.
 #[inline(always)]
 pub(crate) fn prefetch<T>(_r: &T) {
     #[cfg(all(feature = "unchecked", target_arch = "x86_64"))]
     {
-        // SAFETY: prefetchw is a hint; the pointer comes from a valid reference.
+        // SAFETY: _mm_prefetch is a hint; the pointer comes from a valid reference.
         unsafe {
-            core::arch::asm!(
-                "prefetchw [{}]",
-                in(reg) _r as *const T,
-                options(nostack, preserves_flags),
+            core::arch::x86_64::_mm_prefetch::<{ core::arch::x86_64::_MM_HINT_T0 }>(
+                (_r as *const T) as *const i8,
             );
         }
     }

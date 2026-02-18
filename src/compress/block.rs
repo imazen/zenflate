@@ -118,7 +118,7 @@ const OFFSET_SLOT_SMALL: [u8; 256] = {
 pub(crate) fn get_offset_slot(offset: u32) -> u32 {
     debug_assert!((1..=32768).contains(&offset));
     let n = (256u32.wrapping_sub(offset)) >> 29;
-    crate::fast_bytes::idx(&OFFSET_SLOT_SMALL, ((offset - 1) >> n) as usize) as u32 + (n << 1)
+    OFFSET_SLOT_SMALL[((offset - 1) >> n) as usize] as u32 + (n << 1)
 }
 
 /// Build litlen and offset Huffman codes from frequency tables.
@@ -235,8 +235,6 @@ pub(crate) fn flush_block(
     static_codes: &DeflateCodes,
     is_final_block: bool,
 ) {
-    use crate::fast_bytes::{idx, idx_mut};
-
     let in_data = &block_begin[..block_length];
 
     // ---- Precompute precode items ----
@@ -386,14 +384,13 @@ pub(crate) fn flush_block(
     let mut full_len_codewords = [0u32; DEFLATE_MAX_MATCH_LEN as usize + 1];
     let mut full_len_lens = [0u8; DEFLATE_MAX_MATCH_LEN as usize + 1];
     for len in DEFLATE_MIN_MATCH_LEN..=DEFLATE_MAX_MATCH_LEN {
-        let slot = idx(&LENGTH_SLOT, len as usize) as usize;
+        let slot = LENGTH_SLOT[len as usize] as usize;
         let litlen_sym = DEFLATE_FIRST_LEN_SYM as usize + slot;
-        let extra_bits = len - idx(&DEFLATE_LENGTH_BASE, slot) as u32;
-        *idx_mut(&mut full_len_codewords, len as usize) =
-            idx(&active_codes.codewords_litlen, litlen_sym)
-                | (extra_bits << idx(&active_codes.lens_litlen, litlen_sym));
-        *idx_mut(&mut full_len_lens, len as usize) =
-            idx(&active_codes.lens_litlen, litlen_sym) + idx(&DEFLATE_LENGTH_EXTRA_BITS, slot);
+        let extra_bits = len - DEFLATE_LENGTH_BASE[slot] as u32;
+        full_len_codewords[len as usize] = active_codes.codewords_litlen[litlen_sym]
+            | (extra_bits << active_codes.lens_litlen[litlen_sym]);
+        full_len_lens[len as usize] =
+            active_codes.lens_litlen[litlen_sym] + DEFLATE_LENGTH_EXTRA_BITS[slot];
     }
 
     // ---- Output literals and matches ----
@@ -515,16 +512,16 @@ pub(crate) fn flush_block(
                 // Output match — single flush for all bits
                 let offset_slot = seq.offset_slot as usize;
                 add_bits!(
-                    idx(&full_len_codewords, length as usize),
-                    idx(&full_len_lens, length as usize) as u32
+                    full_len_codewords[length as usize],
+                    full_len_lens[length as usize] as u32
                 );
                 add_bits!(
-                    idx(&active_codes.codewords_offset, offset_slot),
-                    idx(&active_codes.lens_offset, offset_slot) as u32
+                    active_codes.codewords_offset[offset_slot],
+                    active_codes.lens_offset[offset_slot] as u32
                 );
                 add_bits!(
-                    seq.offset as u32 - idx(&DEFLATE_OFFSET_BASE, offset_slot),
-                    idx(&DEFLATE_OFFSET_EXTRA_BITS, offset_slot) as u32
+                    seq.offset as u32 - DEFLATE_OFFSET_BASE[offset_slot],
+                    DEFLATE_OFFSET_EXTRA_BITS[offset_slot] as u32
                 );
                 flush_bits!();
 
@@ -538,7 +535,7 @@ pub(crate) fn flush_block(
         } => {
             let mut cur_idx = 0;
             while cur_idx < bl {
-                let item = idx(nodes, cur_idx).item;
+                let item = nodes[cur_idx].item;
                 let length = item & OPTIMUM_LEN_MASK;
                 let offset = item >> OPTIMUM_OFFSET_SHIFT;
 
@@ -546,24 +543,24 @@ pub(crate) fn flush_block(
                     // Literal
                     let lit = offset as usize;
                     add_bits!(
-                        idx(&active_codes.codewords_litlen, lit),
-                        idx(&active_codes.lens_litlen, lit) as u32
+                        active_codes.codewords_litlen[lit],
+                        active_codes.lens_litlen[lit] as u32
                     );
                     flush_bits!();
                 } else {
                     // Match — single flush for all bits
-                    let os_idx = idx(offset_slot_full, offset as usize) as usize;
+                    let os_idx = offset_slot_full[offset as usize] as usize;
                     add_bits!(
-                        idx(&full_len_codewords, length as usize),
-                        idx(&full_len_lens, length as usize) as u32
+                        full_len_codewords[length as usize],
+                        full_len_lens[length as usize] as u32
                     );
                     add_bits!(
-                        idx(&active_codes.codewords_offset, os_idx),
-                        idx(&active_codes.lens_offset, os_idx) as u32
+                        active_codes.codewords_offset[os_idx],
+                        active_codes.lens_offset[os_idx] as u32
                     );
                     add_bits!(
-                        offset - idx(&DEFLATE_OFFSET_BASE, os_idx),
-                        idx(&DEFLATE_OFFSET_EXTRA_BITS, os_idx) as u32
+                        offset - DEFLATE_OFFSET_BASE[os_idx],
+                        DEFLATE_OFFSET_EXTRA_BITS[os_idx] as u32
                     );
                     flush_bits!();
                 }
@@ -633,24 +630,18 @@ pub(crate) fn choose_match(
     sequences: &mut [Sequence],
     seq_idx: usize,
 ) -> usize {
-    use crate::fast_bytes::{idx, idx_mut};
-
-    let length_slot = idx(&LENGTH_SLOT, length as usize);
+    let length_slot = LENGTH_SLOT[length as usize];
     let offset_slot = get_offset_slot(offset);
 
-    *idx_mut(
-        &mut freqs.litlen,
-        DEFLATE_FIRST_LEN_SYM as usize + length_slot as usize,
-    ) += 1;
-    *idx_mut(&mut freqs.offset, offset_slot as usize) += 1;
+    freqs.litlen[DEFLATE_FIRST_LEN_SYM as usize + length_slot as usize] += 1;
+    freqs.offset[offset_slot as usize] += 1;
 
-    idx_mut(sequences, seq_idx).litrunlen_and_length |=
-        length << super::sequences::SEQ_LENGTH_SHIFT;
-    idx_mut(sequences, seq_idx).offset = offset as u16;
-    idx_mut(sequences, seq_idx).offset_slot = offset_slot as u16;
+    sequences[seq_idx].litrunlen_and_length |= length << super::sequences::SEQ_LENGTH_SHIFT;
+    sequences[seq_idx].offset = offset as u16;
+    sequences[seq_idx].offset_slot = offset_slot as u16;
 
     let next = seq_idx + 1;
-    idx_mut(sequences, next).litrunlen_and_length = 0;
+    sequences[next].litrunlen_and_length = 0;
     next
 }
 
