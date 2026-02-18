@@ -3,7 +3,8 @@
 Pure Rust port of libdeflate. DEFLATE/zlib/gzip compression and decompression.
 
 ## Architecture
-- Port of libdeflate (~14,500 lines C) to safe Rust with `#![forbid(unsafe_code)]`
+- Port of libdeflate (~14,500 lines C) to safe Rust (forbid(unsafe_code) by default)
+- Opt-in `unchecked` feature flag for bounds-check elimination in hot paths
 - SIMD via archmage/magetypes
 - Side-by-side testing against C via `libdeflater` crate
 
@@ -16,6 +17,7 @@ Pure Rust port of libdeflate. DEFLATE/zlib/gzip compression and decompression.
 - `src/checksum/` — Adler-32 and CRC-32 (scalar + SIMD)
 - `src/decompress/` — Decompression (bitstream reader, Huffman tables, inflate loop)
 - `src/compress/` — Compression (bitstream writer, Huffman construction, block flushing, strategies)
+- `src/fast_bytes.rs` — Unchecked byte load/store helpers (cfg-gated)
 - `src/matchfinder/` — Hash table, hash chain, binary tree matchfinders
 - `src/decompress/mod.rs` — gzip/zlib wrappers integrated into Decompressor
 
@@ -38,9 +40,11 @@ These must be re-applied after any `cargo update` of archmage.
 
 ## Compression Speed vs C (1MB data)
 
+### Default (safe, forbid(unsafe_code))
+
 | Level | Data | zenflate | libdeflate C | Ratio |
 |-------|------|----------|-------------|-------|
-| L1 | sequential | 735µs | 650µs | 0.88x |
+| L1 | sequential | 735µs | 655µs | 0.89x |
 | L1 | zeros | 728µs | 1657µs | 2.28x |
 | L1 | mixed | 6360µs | 4833µs | 0.76x |
 | L6 | sequential | 1304µs | 1120µs | 0.86x |
@@ -48,11 +52,21 @@ These must be re-applied after any `cargo update` of archmage.
 | L12 | sequential | 23.0ms | 13.3ms | 0.58x |
 | L12 | mixed | 26.2ms | 17.9ms | 0.68x |
 
-Remaining gap vs C is dominated by safe Rust overhead:
-- Bounds checks in matchfinder (~5%)
-- Register spills from fat pointer temporaries (~11%)
-- Missing software prefetch (unavailable in safe Rust)
-- User approved `unchecked` feature flag for later
+### With --features unchecked
+
+| Level | Data | zenflate | libdeflate C | Ratio | vs safe |
+|-------|------|----------|-------------|-------|---------|
+| L1 | sequential | 656µs | 659µs | **1.00x** | -10.7% |
+| L1 | zeros | 645µs | 1642µs | **2.55x** | -11.5% |
+| L1 | mixed | 6059µs | 4689µs | 0.77x | -4.7% |
+| L6 | sequential | 1144µs | 1109µs | **0.97x** | -12.2% |
+| L6 | zeros | 1066µs | 964µs | 0.90x | -12.5% |
+| L6 | mixed | 7128µs | 6200µs | 0.87x | -7.2% |
+| L12 | sequential | 17.3ms | 13.3ms | 0.77x | -24.6% |
+| L12 | mixed | 24.0ms | 18.1ms | 0.75x | -8.4% |
+
+Remaining gap on mixed data is register pressure from Rust's fat pointers
+(`&[u8]` = ptr+len, 2 regs vs C's 1 reg) and missing software prefetch.
 
 ## Known Bugs
 (none yet)
