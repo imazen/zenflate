@@ -185,8 +185,49 @@ fn bench_checksums(c: &mut Criterion) {
 }
 
 // ---------------------------------------------------------------------------
+// Parallel compression benchmarks
+// ---------------------------------------------------------------------------
+
+fn bench_parallel_compress(c: &mut Criterion) {
+    // Use 4MB to give parallel enough work per thread.
+    let size = 4_000_000;
+    let data = make_mixed(size);
+    let levels = [1u32, 6, 12];
+    let thread_counts = [1, 2, 4];
+
+    for &level in &levels {
+        let mut group = c.benchmark_group(format!("parallel/L{level}"));
+        group.throughput(Throughput::Bytes(data.len() as u64));
+
+        for &threads in &thread_counts {
+            let label = if threads == 1 {
+                "1T (baseline)".to_string()
+            } else {
+                format!("{threads}T")
+            };
+            group.bench_function(&label, |b| {
+                let level = zenflate::CompressionLevel::new(level);
+                let bound = zenflate::Compressor::gzip_compress_bound(data.len()) + threads * 5;
+                let mut out = vec![0u8; bound];
+                b.iter(|| {
+                    zenflate::gzip_compress_parallel(&data, &mut out, level, threads).unwrap();
+                });
+            });
+        }
+
+        group.finish();
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Harness
 // ---------------------------------------------------------------------------
 
-criterion_group!(benches, bench_compress, bench_decompress, bench_checksums);
+criterion_group!(
+    benches,
+    bench_compress,
+    bench_decompress,
+    bench_checksums,
+    bench_parallel_compress
+);
 criterion_main!(benches);
