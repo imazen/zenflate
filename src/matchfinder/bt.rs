@@ -38,6 +38,23 @@ pub(crate) const BT_MATCHFINDER_REQUIRED_NBYTES: u32 = 5;
 /// Window mask for child table indexing.
 const WINDOW_MASK: usize = MATCHFINDER_WINDOW_SIZE as usize - 1;
 
+// Storage types: fixed arrays when `unchecked` (single allocation via Box),
+// Vec when safe (separate heap allocations per field).
+#[cfg(feature = "unchecked")]
+type BtHash3Tab = [i16; BT_HASH3_SIZE * BT_MATCHFINDER_HASH3_WAYS];
+#[cfg(not(feature = "unchecked"))]
+type BtHash3Tab = Vec<i16>;
+
+#[cfg(feature = "unchecked")]
+type BtHash4Tab = [i16; BT_HASH4_SIZE];
+#[cfg(not(feature = "unchecked"))]
+type BtHash4Tab = Vec<i16>;
+
+#[cfg(feature = "unchecked")]
+type BtChildTab = [i16; 2 * MATCHFINDER_WINDOW_SIZE as usize];
+#[cfg(not(feature = "unchecked"))]
+type BtChildTab = Vec<i16>;
+
 /// A match found by the bt_matchfinder.
 #[derive(Clone, Copy, Default)]
 pub(crate) struct LzMatch {
@@ -49,24 +66,48 @@ pub(crate) struct LzMatch {
 
 /// Binary tree matchfinder for near-optimal compression (levels 10-12).
 ///
-/// Uses Vec for tables to avoid stack overflow (~512KB total).
+/// With `unchecked`, uses fixed arrays so the whole NearOptimalState
+/// becomes a single allocation via `Box::new_uninit()`.
+/// Without `unchecked`, uses Vec (separate heap allocations per field).
 pub(crate) struct BtMatchfinder {
     /// Hash table for length 3 matches (2-way). Flat: [BT_HASH3_SIZE * 2].
-    hash3_tab: Vec<i16>,
+    hash3_tab: BtHash3Tab,
     /// Hash table containing roots of binary trees for length 4+ matches.
-    hash4_tab: Vec<i16>,
+    hash4_tab: BtHash4Tab,
     /// Child node references: left child at [2*(pos & WINDOW_MASK)],
     /// right child at [2*(pos & WINDOW_MASK) + 1].
-    child_tab: Vec<i16>,
+    child_tab: BtChildTab,
 }
 
 impl BtMatchfinder {
-    /// Create and initialize a new BtMatchfinder.
+    /// Create and initialize a new BtMatchfinder (safe path, uses Vec).
+    #[cfg(not(feature = "unchecked"))]
     pub fn new() -> Self {
         Self {
             hash3_tab: alloc::vec![MATCHFINDER_INITVAL; BT_HASH3_SIZE * BT_MATCHFINDER_HASH3_WAYS],
             hash4_tab: alloc::vec![MATCHFINDER_INITVAL; BT_HASH4_SIZE],
             child_tab: alloc::vec![MATCHFINDER_INITVAL; 2 * MATCHFINDER_WINDOW_SIZE as usize],
+        }
+    }
+
+    /// Initialize a BtMatchfinder in-place through a raw pointer.
+    ///
+    /// Used by `NearOptimalState::new()` to initialize fields within a
+    /// `Box::new_uninit()` allocation without touching the stack.
+    ///
+    /// # Safety
+    /// `ptr` must point to a valid, writable allocation of `BtMatchfinder`.
+    #[cfg(feature = "unchecked")]
+    pub(crate) unsafe fn init_at(ptr: *mut Self) {
+        unsafe {
+            let h3 = core::ptr::addr_of_mut!((*ptr).hash3_tab) as *mut i16;
+            core::slice::from_raw_parts_mut(h3, BT_HASH3_SIZE * BT_MATCHFINDER_HASH3_WAYS)
+                .fill(MATCHFINDER_INITVAL);
+            let h4 = core::ptr::addr_of_mut!((*ptr).hash4_tab) as *mut i16;
+            core::slice::from_raw_parts_mut(h4, BT_HASH4_SIZE).fill(MATCHFINDER_INITVAL);
+            let ct = core::ptr::addr_of_mut!((*ptr).child_tab) as *mut i16;
+            core::slice::from_raw_parts_mut(ct, 2 * MATCHFINDER_WINDOW_SIZE as usize)
+                .fill(MATCHFINDER_INITVAL);
         }
     }
 

@@ -202,12 +202,12 @@ impl Compressor {
                     11 => (4, 16, 16, 1000),
                     _ => (10, 1, 1, 10000),
                 };
-                Some(Box::new(NearOptimalState::new(
+                Some(NearOptimalState::new(
                     passes,
                     improvement,
                     nonfinal,
                     static_opt,
-                )))
+                ))
             } else {
                 None
             },

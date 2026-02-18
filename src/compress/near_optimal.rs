@@ -54,6 +54,41 @@ pub(crate) const OPTIMUM_OFFSET_SHIFT: u32 = 9;
 /// Mask for length in OptimumNode.item.
 pub(crate) const OPTIMUM_LEN_MASK: u32 = (1 << OPTIMUM_OFFSET_SHIFT) - 1;
 
+/// Total match cache allocation size.
+const MATCH_CACHE_ALLOC_SIZE: usize =
+    MATCH_CACHE_LENGTH + MAX_MATCHES_PER_POS + DEFLATE_MAX_MATCH_LEN as usize - 1;
+
+/// Number of optimum nodes (one per position + sentinel).
+const OPTIMUM_NODES_SIZE: usize = MAX_BLOCK_LENGTH + 1;
+
+/// Size of the full offset-to-slot table.
+const OFFSET_SLOT_FULL_SIZE: usize = DEFLATE_MAX_MATCH_OFFSET as usize + 1;
+
+/// Size of the match length frequency tables.
+const MATCH_LEN_FREQ_SIZE: usize = DEFLATE_MAX_MATCH_LEN as usize + 1;
+
+// Storage types: fixed arrays when `unchecked` (single allocation via Box),
+// Vec when safe (separate heap allocations per field).
+#[cfg(feature = "unchecked")]
+type MatchCacheTab = [LzMatch; MATCH_CACHE_ALLOC_SIZE];
+#[cfg(not(feature = "unchecked"))]
+type MatchCacheTab = Vec<LzMatch>;
+
+#[cfg(feature = "unchecked")]
+type OptimumNodesTab = [OptimumNode; OPTIMUM_NODES_SIZE];
+#[cfg(not(feature = "unchecked"))]
+type OptimumNodesTab = Vec<OptimumNode>;
+
+#[cfg(feature = "unchecked")]
+type OffsetSlotFullTab = [u8; OFFSET_SLOT_FULL_SIZE];
+#[cfg(not(feature = "unchecked"))]
+type OffsetSlotFullTab = Vec<u8>;
+
+#[cfg(feature = "unchecked")]
+type MatchLenFreqTab = [u32; MATCH_LEN_FREQ_SIZE];
+#[cfg(not(feature = "unchecked"))]
+type MatchLenFreqTab = Vec<u32>;
+
 // ---- Data structures ----
 
 /// A node in the optimal parsing graph.
@@ -94,27 +129,31 @@ impl Default for DeflateCosts {
 }
 
 /// All near-optimal-specific state, separate from the main Compressor.
+///
+/// With `unchecked`, all large fields are fixed arrays so `Box<NearOptimalState>`
+/// is a single heap allocation (~9MB), matching libdeflate C's single malloc.
+/// Without `unchecked`, fields use Vec (separate allocations per field).
 pub(crate) struct NearOptimalState {
     /// Binary tree matchfinder.
     pub bt_mf: BtMatchfinder,
     /// Cached matches for the current block.
-    pub match_cache: Vec<LzMatch>,
+    pub match_cache: MatchCacheTab,
     /// Optimum nodes for the DP graph.
-    pub optimum_nodes: Vec<OptimumNode>,
+    pub optimum_nodes: OptimumNodesTab,
     /// Current cost model.
     pub costs: DeflateCosts,
     /// Saved cost model (from the best optimization pass).
     pub costs_saved: DeflateCosts,
     /// Full offset-to-slot mapping table.
-    pub offset_slot_full: Vec<u8>,
+    pub offset_slot_full: OffsetSlotFullTab,
     /// Literal/match statistics saved from previous block.
     pub prev_observations: [u32; NUM_OBSERVATION_TYPES],
     /// Total observations from previous block.
     pub prev_num_observations: u32,
     /// Approximate match length frequencies (new, not yet merged).
-    pub new_match_len_freqs: Vec<u32>,
+    pub new_match_len_freqs: MatchLenFreqTab,
     /// Approximate match length frequencies (merged).
-    pub match_len_freqs: Vec<u32>,
+    pub match_len_freqs: MatchLenFreqTab,
     /// Maximum optimization passes per block.
     pub max_optim_passes: u32,
     /// Minimum cost improvement to continue optimizing.
@@ -127,32 +166,97 @@ pub(crate) struct NearOptimalState {
 
 impl NearOptimalState {
     /// Create a new NearOptimalState with the given parameters.
+    ///
+    /// Returns `Box<Self>` to avoid stack overflow (struct is ~9MB).
+    /// With `unchecked`, this is a single heap allocation matching C's pattern.
+    /// Without `unchecked`, each Vec field is a separate allocation.
+    #[cfg(not(feature = "unchecked"))]
     pub fn new(
         max_optim_passes: u32,
         min_improvement_to_continue: u32,
         min_bits_to_use_nonfinal_path: u32,
         max_len_to_optimize_static_block: u32,
-    ) -> Self {
-        let cache_size =
-            MATCH_CACHE_LENGTH + MAX_MATCHES_PER_POS + DEFLATE_MAX_MATCH_LEN as usize - 1;
-        let mut s = Self {
+    ) -> Box<Self> {
+        let mut s = Box::new(Self {
             bt_mf: BtMatchfinder::new(),
-            match_cache: alloc::vec![LzMatch::default(); cache_size],
-            optimum_nodes: alloc::vec![OptimumNode::default(); MAX_BLOCK_LENGTH + 1],
+            match_cache: alloc::vec![LzMatch::default(); MATCH_CACHE_ALLOC_SIZE],
+            optimum_nodes: alloc::vec![OptimumNode::default(); OPTIMUM_NODES_SIZE],
             costs: DeflateCosts::default(),
             costs_saved: DeflateCosts::default(),
-            offset_slot_full: alloc::vec![0u8; DEFLATE_MAX_MATCH_OFFSET as usize + 1],
+            offset_slot_full: alloc::vec![0u8; OFFSET_SLOT_FULL_SIZE],
             prev_observations: [0; NUM_OBSERVATION_TYPES],
             prev_num_observations: 0,
-            new_match_len_freqs: alloc::vec![0u32; DEFLATE_MAX_MATCH_LEN as usize + 1],
-            match_len_freqs: alloc::vec![0u32; DEFLATE_MAX_MATCH_LEN as usize + 1],
+            new_match_len_freqs: alloc::vec![0u32; MATCH_LEN_FREQ_SIZE],
+            match_len_freqs: alloc::vec![0u32; MATCH_LEN_FREQ_SIZE],
             max_optim_passes,
             min_improvement_to_continue,
             min_bits_to_use_nonfinal_path,
             max_len_to_optimize_static_block,
-        };
+        });
         init_offset_slot_full(&mut s.offset_slot_full);
         s
+    }
+
+    /// Create a new NearOptimalState as a single heap allocation.
+    ///
+    /// Uses `Box::new_uninit()` to allocate ~9MB on the heap, then
+    /// initializes each field through pointers (no stack copies).
+    #[cfg(feature = "unchecked")]
+    pub fn new(
+        max_optim_passes: u32,
+        min_improvement_to_continue: u32,
+        min_bits_to_use_nonfinal_path: u32,
+        max_len_to_optimize_static_block: u32,
+    ) -> Box<Self> {
+        use core::ptr;
+
+        let mut boxed = Box::<Self>::new_uninit();
+        let p = boxed.as_mut_ptr();
+
+        // SAFETY: `p` points to a fresh heap allocation of size_of::<Self>().
+        // We initialize every field before calling assume_init().
+        unsafe {
+            // BtMatchfinder tables
+            BtMatchfinder::init_at(ptr::addr_of_mut!((*p).bt_mf));
+
+            // match_cache — zero-init (LzMatch is two u16 zeros)
+            let mc = ptr::addr_of_mut!((*p).match_cache) as *mut u8;
+            core::ptr::write_bytes(mc, 0, core::mem::size_of::<MatchCacheTab>());
+
+            // optimum_nodes — zero-init (OptimumNode is two u32 zeros)
+            let on = ptr::addr_of_mut!((*p).optimum_nodes) as *mut u8;
+            core::ptr::write_bytes(on, 0, core::mem::size_of::<OptimumNodesTab>());
+
+            // offset_slot_full — init via helper
+            let osf = ptr::addr_of_mut!((*p).offset_slot_full) as *mut u8;
+            let osf_slice = core::slice::from_raw_parts_mut(osf, OFFSET_SLOT_FULL_SIZE);
+            osf_slice.fill(0);
+            init_offset_slot_full(osf_slice);
+
+            // costs + costs_saved
+            ptr::addr_of_mut!((*p).costs).write(DeflateCosts::default());
+            ptr::addr_of_mut!((*p).costs_saved).write(DeflateCosts::default());
+
+            // Scalar fields
+            ptr::addr_of_mut!((*p).prev_observations).write([0; NUM_OBSERVATION_TYPES]);
+            ptr::addr_of_mut!((*p).prev_num_observations).write(0);
+
+            // Frequency tables — zero-init
+            let nmlf = ptr::addr_of_mut!((*p).new_match_len_freqs) as *mut u8;
+            core::ptr::write_bytes(nmlf, 0, core::mem::size_of::<MatchLenFreqTab>());
+            let mlf = ptr::addr_of_mut!((*p).match_len_freqs) as *mut u8;
+            core::ptr::write_bytes(mlf, 0, core::mem::size_of::<MatchLenFreqTab>());
+
+            // Config scalars
+            ptr::addr_of_mut!((*p).max_optim_passes).write(max_optim_passes);
+            ptr::addr_of_mut!((*p).min_improvement_to_continue).write(min_improvement_to_continue);
+            ptr::addr_of_mut!((*p).min_bits_to_use_nonfinal_path)
+                .write(min_bits_to_use_nonfinal_path);
+            ptr::addr_of_mut!((*p).max_len_to_optimize_static_block)
+                .write(max_len_to_optimize_static_block);
+
+            boxed.assume_init()
+        }
     }
 }
 
