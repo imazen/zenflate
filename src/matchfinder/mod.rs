@@ -35,10 +35,9 @@ pub(crate) fn lz_extend(strptr: &[u8], matchptr: &[u8], start_len: u32, max_len:
 
     // Word-at-a-time comparison
     while (len as usize) + 8 <= max {
-        let s = &strptr[len as usize..len as usize + 8];
-        let m = &matchptr[len as usize..len as usize + 8];
-        let sw = u64::from_le_bytes(s.try_into().unwrap());
-        let mw = u64::from_le_bytes(m.try_into().unwrap());
+        let off = len as usize;
+        let sw = u64::from_le_bytes(strptr[off..off + 8].try_into().unwrap());
+        let mw = u64::from_le_bytes(matchptr[off..off + 8].try_into().unwrap());
         let xor = sw ^ mw;
         if xor != 0 {
             len += xor.trailing_zeros() >> 3;
@@ -65,15 +64,11 @@ pub(crate) fn matchfinder_init(data: &mut [i16]) {
 /// Subtracts WINDOW_SIZE from each entry using saturating arithmetic,
 /// clamping to -WINDOW_SIZE (keeping out-of-bounds entries permanently invalid).
 ///
-/// Uses the branchless trick from libdeflate for 32768-byte windows:
-/// `0x8000 | (v & !(v >> 15))` which is equivalent to saturating subtract of 32768.
+/// Written as `saturating_add(i16::MIN)` so LLVM auto-vectorizes to `vpaddsw`.
 #[inline]
 pub(crate) fn matchfinder_rebase(data: &mut [i16]) {
     for entry in data.iter_mut() {
-        // Branchless: clear all bits if already negative, then set sign bit.
-        // This is equivalent to i16::saturating_sub(32768) = saturating_add(-32768).
-        let v = *entry;
-        *entry = (v & !(v >> 15)) | i16::MIN;
+        *entry = entry.saturating_add(i16::MIN);
     }
 }
 

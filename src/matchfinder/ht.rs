@@ -38,17 +38,12 @@ impl HtMatchfinder {
 
     /// Initialize (reset) the matchfinder.
     pub fn init(&mut self) {
-        // Flatten and init — the memory layout is contiguous i16 values
-        for bucket in self.hash_tab.iter_mut() {
-            matchfinder_init(bucket);
-        }
+        matchfinder_init(self.hash_tab.as_flattened_mut());
     }
 
     /// Slide the window by MATCHFINDER_WINDOW_SIZE.
     fn slide_window(&mut self) {
-        for bucket in self.hash_tab.iter_mut() {
-            matchfinder_rebase(bucket);
-        }
+        matchfinder_rebase(self.hash_tab.as_flattened_mut());
     }
 
     /// Find the longest match at position `in_next` within the input buffer.
