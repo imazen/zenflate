@@ -71,3 +71,22 @@ pub(crate) fn get_byte(data: &[u8], idx: usize) -> u8 {
         data[idx]
     }
 }
+
+/// Prefetch a value for upcoming write access.
+///
+/// Emits `PREFETCHT0` on x86_64 when the `unchecked` feature is enabled.
+/// The C code uses `PREFETCHW` (write-intent) which is slightly better for
+/// write-heavy patterns, but `PREFETCHT0` still eliminates the main latency
+/// (DRAM/L3 → L1 fetch). No-op on other platforms or without `unchecked`.
+#[inline(always)]
+pub(crate) fn prefetch<T>(_r: &T) {
+    #[cfg(all(feature = "unchecked", target_arch = "x86_64"))]
+    {
+        // SAFETY: _mm_prefetch is a hint; the pointer comes from a valid reference.
+        unsafe {
+            core::arch::x86_64::_mm_prefetch::<{ core::arch::x86_64::_MM_HINT_T0 }>(
+                (_r as *const T) as *const i8,
+            );
+        }
+    }
+}

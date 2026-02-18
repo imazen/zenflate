@@ -66,7 +66,7 @@ impl HtMatchfinder {
         nice_len: u32,
         next_hash: &mut u32,
     ) -> (u32, u32) {
-        use crate::fast_bytes::load_u32_le;
+        use crate::fast_bytes::{load_u32_le, prefetch};
 
         debug_assert!(max_len >= HT_MATCHFINDER_REQUIRED_NBYTES);
 
@@ -84,9 +84,10 @@ impl HtMatchfinder {
 
         let hash = *next_hash as usize;
 
-        // Precompute next hash from in_next+1
+        // Precompute next hash from in_next+1 and prefetch the bucket
         if in_next + 5 <= input.len() {
             *next_hash = lz_hash(load_u32_le(input, in_next + 1), HT_MATCHFINDER_HASH_ORDER);
+            prefetch(&self.hash_tab[*next_hash as usize]);
         }
 
         // Load 4 bytes at current position for quick comparison
@@ -159,7 +160,7 @@ impl HtMatchfinder {
         count: u32,
         next_hash: &mut u32,
     ) {
-        use crate::fast_bytes::load_u32_le;
+        use crate::fast_bytes::{load_u32_le, prefetch};
 
         if count == 0 {
             return;
@@ -196,6 +197,7 @@ impl HtMatchfinder {
             }
         }
 
+        prefetch(&self.hash_tab[hash]);
         *next_hash = hash as u32;
     }
 }

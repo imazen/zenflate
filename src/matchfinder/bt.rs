@@ -169,7 +169,7 @@ impl BtMatchfinder {
         next_hashes: &mut [u32; 2],
         matches: &mut [LzMatch],
     ) -> usize {
-        use crate::fast_bytes::{get_byte, load_u32_le};
+        use crate::fast_bytes::{get_byte, load_u32_le, prefetch};
 
         let in_next = (in_base_offset as isize + cur_pos as isize) as usize;
         let mut depth_remaining = max_search_depth;
@@ -183,6 +183,8 @@ impl BtMatchfinder {
         let hash4 = next_hashes[1] as usize;
         next_hashes[0] = lz_hash(next_hashseq & 0xFFFFFF, BT_MATCHFINDER_HASH3_ORDER);
         next_hashes[1] = lz_hash(next_hashseq, BT_MATCHFINDER_HASH4_ORDER);
+        prefetch(&self.hash3_tab[next_hashes[0] as usize * BT_MATCHFINDER_HASH3_WAYS]);
+        prefetch(&self.hash4_tab[next_hashes[1] as usize]);
 
         // Hash3: 2-way check for length 3 matches
         let h3 = hash3 * BT_MATCHFINDER_HASH3_WAYS;
