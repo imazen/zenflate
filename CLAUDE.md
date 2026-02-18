@@ -36,5 +36,23 @@ The following files in `~/.cargo/registry/src/` were patched to add `pclmulqdq` 
 - `archmage-0.7.0/src/tokens/generated/x86.rs` — V2 runtime detection + const strings
 These must be re-applied after any `cargo update` of archmage.
 
+## Compression Speed vs C (1MB data)
+
+| Level | Data | zenflate | libdeflate C | Ratio |
+|-------|------|----------|-------------|-------|
+| L1 | sequential | 735µs | 650µs | 0.88x |
+| L1 | zeros | 728µs | 1657µs | 2.28x |
+| L1 | mixed | 6360µs | 4833µs | 0.76x |
+| L6 | sequential | 1304µs | 1120µs | 0.86x |
+| L6 | mixed | 7684µs | 6176µs | 0.80x |
+| L12 | sequential | 23.0ms | 13.3ms | 0.58x |
+| L12 | mixed | 26.2ms | 17.9ms | 0.68x |
+
+Remaining gap vs C is dominated by safe Rust overhead:
+- Bounds checks in matchfinder (~5%)
+- Register spills from fat pointer temporaries (~11%)
+- Missing software prefetch (unavailable in safe Rust)
+- User approved `unchecked` feature flag for later
+
 ## Known Bugs
 (none yet)
