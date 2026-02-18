@@ -59,8 +59,8 @@ pub(crate) fn crc32_combine(crc1: u32, crc2: u32, len2: usize) -> u32 {
     // Operator for one zero bit: CRC-32 polynomial shift
     odd[0] = CRC32_POLY;
     let mut row = 1u32;
-    for i in 1..32 {
-        odd[i] = row;
+    for item in &mut odd[1..] {
+        *item = row;
         row <<= 1;
     }
 

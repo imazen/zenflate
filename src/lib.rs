@@ -45,6 +45,8 @@ pub mod decompress;
 pub(crate) mod matchfinder;
 
 pub use checksum::{adler32, crc32};
+#[cfg(feature = "std")]
+pub use compress::gzip_compress_parallel;
 #[cfg(feature = "alloc")]
 pub use compress::{CompressionLevel, Compressor};
 pub use decompress::Decompressor;

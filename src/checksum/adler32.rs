@@ -44,6 +44,7 @@ pub fn adler32(adler: u32, data: &[u8]) -> u32 {
 /// Given `a1 = adler32(1, data1)` and `a2 = adler32(1, data2)`, returns
 /// `adler32(1, data1 || data2)` in O(1) time without needing the original data.
 /// Used for parallel checksum computation.
+#[allow(dead_code)] // Used by future zlib_compress_parallel
 pub(crate) fn adler32_combine(adler1: u32, adler2: u32, len2: usize) -> u32 {
     let s1_1 = adler1 & 0xFFFF;
     let s2_1 = adler1 >> 16;

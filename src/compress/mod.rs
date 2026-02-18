@@ -127,6 +127,11 @@ pub struct Compressor {
     hc_mf: Option<Box<HcMatchfinder>>,
     /// Near-optimal state for levels 10-12.
     near_optimal: Option<Box<NearOptimalState>>,
+    /// Starting offset: skip dictionary bytes at the start of input.
+    /// Set by `deflate_compress_chunk`; 0 for normal operation.
+    chunk_start: usize,
+    /// Force all blocks to BFINAL=0 (for parallel non-last chunks).
+    force_nonfinal: bool,
 }
 
 impl Compressor {
@@ -206,6 +211,8 @@ impl Compressor {
             } else {
                 None
             },
+            chunk_start: 0,
+            force_nonfinal: false,
         }
     }
 
@@ -364,8 +371,23 @@ impl Compressor {
         mf.init();
 
         let in_end = input.len();
-        let mut in_next = 0usize;
+        let mut in_next = self.chunk_start;
         let mut in_base_offset = 0usize;
+
+        // Dictionary warm-up: seed hash table with positions before chunk_start
+        if self.chunk_start > 0 && in_next + 4 <= in_end {
+            let mut warmup_hash = lz_hash(
+                crate::fast_bytes::load_u32_le(input, 0),
+                HT_MATCHFINDER_HASH_ORDER,
+            );
+            mf.skip_bytes(
+                input,
+                &mut in_base_offset,
+                0,
+                self.chunk_start as u32,
+                &mut warmup_hash,
+            );
+        }
 
         while in_next < in_end && !os.overflow {
             let in_block_begin = in_next;
@@ -432,7 +454,7 @@ impl Compressor {
             }
 
             let block_length = in_next - in_block_begin;
-            let is_final = in_next >= in_end;
+            let is_final = !self.force_nonfinal && in_next >= in_end;
             finish_block(
                 os,
                 &input[in_block_begin..],
@@ -457,12 +479,24 @@ impl Compressor {
         mf.init();
 
         let in_end = input.len();
-        let mut in_next = 0usize;
+        let mut in_next = self.chunk_start;
         let mut in_base_offset = 0usize;
         let mut max_len = DEFLATE_MAX_MATCH_LEN;
         let mut nice_len = max_len.min(self.nice_match_length);
         let mut next_hashes = [0u32; 2];
         let max_search_depth = self.max_search_depth;
+
+        // Dictionary warm-up: seed hash chains with positions before chunk_start
+        if self.chunk_start > 0 && self.chunk_start + 5 <= in_end {
+            mf.skip_bytes(
+                input,
+                &mut in_base_offset,
+                0,
+                in_end,
+                self.chunk_start as u32,
+                &mut next_hashes,
+            );
+        }
 
         while in_next < in_end && !os.overflow {
             let in_block_begin = in_next;
@@ -529,7 +563,7 @@ impl Compressor {
             }
 
             let block_length = in_next - in_block_begin;
-            let is_final = in_next >= in_end;
+            let is_final = !self.force_nonfinal && in_next >= in_end;
             finish_block(
                 os,
                 &input[in_block_begin..],
@@ -555,12 +589,24 @@ impl Compressor {
         mf.init();
 
         let in_end = input.len();
-        let mut in_next = 0usize;
+        let mut in_next = self.chunk_start;
         let mut in_base_offset = 0usize;
         let mut max_len = DEFLATE_MAX_MATCH_LEN;
         let mut nice_len = max_len.min(self.nice_match_length);
         let mut next_hashes = [0u32; 2];
         let max_search_depth = self.max_search_depth;
+
+        // Dictionary warm-up: seed hash chains with positions before chunk_start
+        if self.chunk_start > 0 && self.chunk_start + 5 <= in_end {
+            mf.skip_bytes(
+                input,
+                &mut in_base_offset,
+                0,
+                in_end,
+                self.chunk_start as u32,
+                &mut next_hashes,
+            );
+        }
 
         while in_next < in_end && !os.overflow {
             let in_block_begin = in_next;
@@ -760,7 +806,7 @@ impl Compressor {
             }
 
             let block_length = in_next - in_block_begin;
-            let is_final = in_next >= in_end;
+            let is_final = !self.force_nonfinal && in_next >= in_end;
             finish_block(
                 os,
                 &input[in_block_begin..],
@@ -785,16 +831,39 @@ impl Compressor {
         ns.bt_mf.init();
 
         let in_end = input.len();
-        let mut in_next = 0usize;
+        let mut in_next = self.chunk_start;
         let mut in_base_offset = 0usize;
-        let mut in_next_slide = in_next + (in_end - in_next).min(MATCHFINDER_WINDOW_SIZE as usize);
         let mut max_len = DEFLATE_MAX_MATCH_LEN;
         let mut nice_len = max_len.min(self.nice_match_length);
         let mut cache_idx = 0usize;
         let mut next_hashes = [0u32; 2];
         let mut prev_block_used_only_literals = false;
         let max_search_depth = self.max_search_depth;
-        let mut in_block_begin = 0usize;
+        let mut in_block_begin = self.chunk_start;
+
+        // Dictionary warm-up: seed binary tree with positions before chunk_start
+        if self.chunk_start > 0 {
+            for warm_pos in 0..self.chunk_start {
+                let remaining = in_end - warm_pos;
+                adjust_max_and_nice_len(&mut max_len, &mut nice_len, remaining);
+                if max_len >= BT_MATCHFINDER_REQUIRED_NBYTES {
+                    let cur_pos = warm_pos as i32; // in_base_offset is 0
+                    ns.bt_mf.skip_byte(
+                        input,
+                        in_base_offset,
+                        cur_pos,
+                        nice_len,
+                        max_search_depth,
+                        &mut next_hashes,
+                    );
+                }
+            }
+            // Reset max_len/nice_len for the actual compression
+            max_len = DEFLATE_MAX_MATCH_LEN;
+            nice_len = max_len.min(self.nice_match_length);
+        }
+
+        let mut in_next_slide = in_next + (in_end - in_next).min(MATCHFINDER_WINDOW_SIZE as usize);
 
         init_stats(&mut self.split_stats, &mut ns);
 
@@ -976,7 +1045,7 @@ impl Compressor {
                 // End block at current position (no rewind)
                 let block_length = (in_next - in_block_begin) as u32;
                 let is_first = in_block_begin == 0;
-                let is_final = in_next == in_end;
+                let is_final = !self.force_nonfinal && in_next == in_end;
 
                 merge_stats(&mut self.split_stats, &mut ns);
                 prev_block_used_only_literals = optimize_and_flush_block(
@@ -1006,6 +1075,88 @@ impl Compressor {
         }
 
         self.near_optimal = Some(ns);
+    }
+
+    /// Compress a chunk of input with optional dictionary prefix (for parallel compression).
+    ///
+    /// The input slice contains `[dict_bytes | chunk_bytes]` where dictionary
+    /// bytes are `input[0..chunk_start]` and actual data is `input[chunk_start..]`.
+    /// Only the data portion contributes to the DEFLATE output.
+    ///
+    /// If `is_last_chunk` is false, a sync flush (empty stored block) is appended
+    /// to byte-align the output for concatenation with subsequent chunks.
+    fn deflate_compress_chunk(
+        &mut self,
+        input: &[u8],
+        chunk_start: usize,
+        is_last_chunk: bool,
+        output: &mut [u8],
+    ) -> Result<usize, CompressionError> {
+        // Level 0: no matchfinder, just uncompressed blocks of the data portion.
+        if self.level.level() == 0 {
+            return deflate_compress_none_chunk(&input[chunk_start..], output, is_last_chunk);
+        }
+
+        self.chunk_start = chunk_start;
+        self.force_nonfinal = !is_last_chunk;
+
+        let mut os = OutputBitstream::new(output);
+
+        match self.level.level() {
+            1 => self.compress_fastest(&mut os, input),
+            2..=4 => self.compress_greedy(&mut os, input),
+            5..=7 => self.compress_lazy_generic(&mut os, input, false),
+            8..=9 => self.compress_lazy_generic(&mut os, input, true),
+            10..=12 => self.compress_near_optimal(&mut os, input),
+            _ => self.compress_literals(&mut os, input),
+        }
+
+        if os.overflow {
+            self.chunk_start = 0;
+            self.force_nonfinal = false;
+            return Err(CompressionError::InsufficientSpace);
+        }
+
+        if !is_last_chunk {
+            // Sync flush: empty stored block (BFINAL=0, BTYPE=00) for byte alignment.
+            os.add_bits(0, 3); // BFINAL=0 + BTYPE=00
+            os.flush_bits();
+            if os.bitcount > 0 {
+                if os.pos < os.buf.len() {
+                    os.buf[os.pos] = os.bitbuf as u8;
+                    os.pos += 1;
+                } else {
+                    self.chunk_start = 0;
+                    self.force_nonfinal = false;
+                    return Err(CompressionError::InsufficientSpace);
+                }
+            }
+            // LEN=0, NLEN=0xFFFF
+            os.write_le16(0x0000);
+            os.write_le16(0xFFFF);
+        } else {
+            // Last chunk: write final partial byte.
+            if os.bitcount > 0 {
+                if os.pos < os.buf.len() {
+                    os.buf[os.pos] = os.bitbuf as u8;
+                    os.pos += 1;
+                } else {
+                    self.chunk_start = 0;
+                    self.force_nonfinal = false;
+                    return Err(CompressionError::InsufficientSpace);
+                }
+            }
+        }
+
+        if os.overflow {
+            self.chunk_start = 0;
+            self.force_nonfinal = false;
+            return Err(CompressionError::InsufficientSpace);
+        }
+
+        self.chunk_start = 0;
+        self.force_nonfinal = false;
+        Ok(os.pos)
     }
 
     /// Simple literal-only compressor that exercises the full block flushing path.
@@ -1095,6 +1246,173 @@ fn deflate_compress_none(input: &[u8], output: &mut [u8]) -> Result<usize, Compr
     }
 
     Ok(out_pos)
+}
+
+/// Level 0 chunk variant: output uncompressed blocks with BFINAL control.
+fn deflate_compress_none_chunk(
+    input: &[u8],
+    output: &mut [u8],
+    is_last: bool,
+) -> Result<usize, CompressionError> {
+    if input.is_empty() {
+        if output.len() < 5 {
+            return Err(CompressionError::InsufficientSpace);
+        }
+        let bfinal = if is_last { 1u8 } else { 0 };
+        output[0] = bfinal | (DEFLATE_BLOCKTYPE_UNCOMPRESSED << 1) as u8;
+        output[1..5].copy_from_slice(&[0, 0, 0xFF, 0xFF]);
+        return Ok(5);
+    }
+
+    let mut in_pos = 0;
+    let mut out_pos = 0;
+
+    while in_pos < input.len() {
+        let is_last_block = input.len() - in_pos <= 0xFFFF;
+        let len = (input.len() - in_pos).min(0xFFFF);
+
+        if out_pos + 5 + len > output.len() {
+            return Err(CompressionError::InsufficientSpace);
+        }
+
+        let bfinal = if is_last && is_last_block { 1u8 } else { 0 };
+        output[out_pos] = bfinal | ((DEFLATE_BLOCKTYPE_UNCOMPRESSED as u8) << 1);
+        out_pos += 1;
+
+        output[out_pos..out_pos + 2].copy_from_slice(&(len as u16).to_le_bytes());
+        out_pos += 2;
+        output[out_pos..out_pos + 2].copy_from_slice(&(!(len as u16)).to_le_bytes());
+        out_pos += 2;
+
+        output[out_pos..out_pos + len].copy_from_slice(&input[in_pos..in_pos + len]);
+        out_pos += len;
+        in_pos += len;
+    }
+
+    Ok(out_pos)
+}
+
+/// Compress data in gzip format using multiple threads.
+///
+/// Splits the input into chunks (one per thread), each with a 32KB dictionary
+/// overlap from the previous chunk. All chunks are compressed in parallel, then
+/// concatenated into a valid gzip stream.
+///
+/// The compression ratio is nearly identical to single-threaded compression,
+/// since each chunk uses a full 32KB dictionary window.
+///
+/// Falls back to single-threaded compression for small inputs or `num_threads <= 1`.
+#[cfg(feature = "std")]
+pub fn gzip_compress_parallel(
+    input: &[u8],
+    output: &mut [u8],
+    level: CompressionLevel,
+    num_threads: usize,
+) -> Result<usize, CompressionError> {
+    use crate::checksum::crc32_combine;
+    use alloc::vec;
+    use alloc::vec::Vec;
+
+    let num_threads = num_threads.max(1);
+
+    // For small inputs or single thread, fall back to single-threaded.
+    if num_threads == 1 || input.len() < 32 * 1024 {
+        let mut c = Compressor::new(level);
+        return c.gzip_compress(input, output);
+    }
+
+    const DICT_SIZE: usize = 32 * 1024; // MATCHFINDER_WINDOW_SIZE
+
+    // Split into equal-sized chunks, one per thread. At least 16KB per chunk.
+    let num_chunks = num_threads.min(input.len() / (16 * 1024)).max(1);
+    let chunk_data_size = input.len().div_ceil(num_chunks);
+
+    // Build chunk descriptors: (dict_start, data_start, data_end, is_last)
+    let mut chunks: Vec<(usize, usize, usize, bool)> = Vec::with_capacity(num_chunks);
+    for i in 0..num_chunks {
+        let data_start = i * chunk_data_size;
+        let data_end = ((i + 1) * chunk_data_size).min(input.len());
+        if data_start >= input.len() {
+            break;
+        }
+        let dict_start = data_start.saturating_sub(DICT_SIZE);
+        let is_last = data_end >= input.len();
+        chunks.push((dict_start, data_start, data_end, is_last));
+    }
+
+    // Parallel compression: each thread gets its own Compressor.
+    // Each result is (compressed_bytes, crc32, data_len).
+    #[allow(clippy::type_complexity)]
+    let results: Vec<Result<(Vec<u8>, u32, usize), CompressionError>> = std::thread::scope(|s| {
+        let handles: Vec<_> = chunks
+            .iter()
+            .map(|&(dict_start, data_start, data_end, is_last)| {
+                s.spawn(move || {
+                    let mut c = Compressor::new(level);
+                    let chunk_input = &input[dict_start..data_end];
+                    let chunk_start = data_start - dict_start;
+                    let data_len = data_end - data_start;
+
+                    // CRC-32 of the data portion only.
+                    let chunk_crc = crc32(0, &input[data_start..data_end]);
+
+                    // Compress chunk.
+                    let bound = Compressor::deflate_compress_bound(chunk_input.len()) + 5;
+                    let mut buf = vec![0u8; bound];
+                    let size =
+                        c.deflate_compress_chunk(chunk_input, chunk_start, is_last, &mut buf)?;
+                    buf.truncate(size);
+
+                    Ok((buf, chunk_crc, data_len))
+                })
+            })
+            .collect();
+
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+
+    // Assemble gzip output: 10-byte header + concatenated DEFLATE + 8-byte footer.
+    let mut total_deflate_size = 0usize;
+    let mut combined_crc = 0u32;
+    for result in &results {
+        match result {
+            Ok((buf, chunk_crc, data_len)) => {
+                total_deflate_size += buf.len();
+                combined_crc = crc32_combine(combined_crc, *chunk_crc, *data_len);
+            }
+            Err(e) => return Err(*e),
+        }
+    }
+
+    let total_size = 10 + total_deflate_size + 8;
+    if total_size > output.len() {
+        return Err(CompressionError::InsufficientSpace);
+    }
+
+    // gzip header (10 bytes).
+    output[0] = 0x1F; // ID1
+    output[1] = 0x8B; // ID2
+    output[2] = 0x08; // CM = deflate
+    output[3] = 0x00; // FLG = none
+    output[4..8].copy_from_slice(&[0, 0, 0, 0]); // MTIME
+    output[8] = 0x00; // XFL
+    output[9] = 0xFF; // OS = unknown
+
+    // Concatenate DEFLATE chunks.
+    let mut pos = 10;
+    for result in &results {
+        let (buf, _, _) = result.as_ref().unwrap();
+        output[pos..pos + buf.len()].copy_from_slice(buf);
+        pos += buf.len();
+    }
+
+    // CRC-32 + ISIZE (8 bytes).
+    output[pos..pos + 4].copy_from_slice(&combined_crc.to_le_bytes());
+    pos += 4;
+    output[pos..pos + 4].copy_from_slice(&(input.len() as u32).to_le_bytes());
+    pos += 4;
+
+    Ok(pos)
 }
 
 /// Bit scan reverse: floor(log2(v)). v must be > 0.
@@ -1756,5 +2074,108 @@ mod tests {
             roundtrip_verify(b"Hello", level);
             roundtrip_verify(&[0u8; 100], level);
         }
+    }
+
+    /// Verify parallel gzip compression produces valid output by decompressing
+    /// and comparing to original input.
+    fn parallel_roundtrip(data: &[u8], level: u32, num_threads: usize) {
+        let level = CompressionLevel::new(level);
+        let bound = Compressor::gzip_compress_bound(data.len()) + num_threads * 5;
+        let mut compressed = vec![0u8; bound];
+        let csize = gzip_compress_parallel(data, &mut compressed, level, num_threads).unwrap();
+
+        let mut decompressor = crate::decompress::Decompressor::new();
+        let mut decompressed = vec![0u8; data.len()];
+        let dsize = decompressor
+            .gzip_decompress(&compressed[..csize], &mut decompressed)
+            .unwrap();
+        assert_eq!(dsize, data.len(), "decompressed size mismatch");
+        assert_eq!(&decompressed[..dsize], data, "data mismatch");
+    }
+
+    #[test]
+    fn test_parallel_gzip_level1() {
+        // 256KB of mixed data — enough for 4 chunks
+        let data = make_mixed_data(256 * 1024);
+        parallel_roundtrip(&data, 1, 4);
+    }
+
+    #[test]
+    fn test_parallel_gzip_level6() {
+        let data = make_mixed_data(256 * 1024);
+        parallel_roundtrip(&data, 6, 4);
+    }
+
+    #[test]
+    fn test_parallel_gzip_level12() {
+        let data = make_mixed_data(256 * 1024);
+        parallel_roundtrip(&data, 12, 4);
+    }
+
+    #[test]
+    fn test_parallel_gzip_all_levels() {
+        let data = make_mixed_data(128 * 1024);
+        for level in 0..=12 {
+            for threads in [1, 2, 4] {
+                parallel_roundtrip(&data, level, threads);
+            }
+        }
+    }
+
+    #[test]
+    fn test_parallel_gzip_zeros() {
+        let data = vec![0u8; 256 * 1024];
+        parallel_roundtrip(&data, 1, 4);
+        parallel_roundtrip(&data, 6, 4);
+        parallel_roundtrip(&data, 12, 4);
+    }
+
+    #[test]
+    fn test_parallel_gzip_sequential() {
+        let data: Vec<u8> = (0..256 * 1024).map(|i| (i % 256) as u8).collect();
+        parallel_roundtrip(&data, 1, 4);
+        parallel_roundtrip(&data, 6, 4);
+        parallel_roundtrip(&data, 12, 4);
+    }
+
+    #[test]
+    fn test_parallel_gzip_small_input() {
+        // Small input should fall back to single-threaded
+        let data = b"Hello, World!";
+        parallel_roundtrip(data, 6, 4);
+    }
+
+    #[test]
+    fn test_parallel_gzip_matches_single_threaded_crc() {
+        // Verify the CRC-32 in the parallel output is correct by having
+        // libdeflater (C) decompress it.
+        let data = make_mixed_data(256 * 1024);
+        let level = CompressionLevel::new(6);
+        let bound = Compressor::gzip_compress_bound(data.len()) + 4 * 5;
+        let mut compressed = vec![0u8; bound];
+        let csize = gzip_compress_parallel(&data, &mut compressed, level, 4).unwrap();
+
+        // Decompress with C library to validate the gzip stream.
+        let mut decompressed = vec![0u8; data.len()];
+        let dsize = libdeflater::Decompressor::new()
+            .gzip_decompress(&compressed[..csize], &mut decompressed)
+            .unwrap();
+        assert_eq!(dsize, data.len());
+        assert_eq!(&decompressed[..dsize], &data[..]);
+    }
+
+    /// Generate mixed data that's representative of real workloads.
+    fn make_mixed_data(len: usize) -> Vec<u8> {
+        let mut data = vec![0u8; len];
+        // Mix of patterns: sequential, repeated, random-ish
+        for i in 0..len {
+            data[i] = match i % 1024 {
+                0..=255 => (i % 256) as u8,             // sequential
+                256..=511 => (i / 256 % 256) as u8,     // slow-changing
+                512..=767 => b"Hello, World! "[i % 14], // repeated text
+                _ => ((i * 2654435761) >> 16) as u8,    // pseudo-random
+            };
+        }
+        data
     }
 }
