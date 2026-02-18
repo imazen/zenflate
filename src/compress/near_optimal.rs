@@ -485,14 +485,20 @@ fn tally_item_list(
     let mut cur_idx = 0usize;
     let end = block_length as usize;
     while cur_idx < end {
-        let length = nodes[cur_idx].item & OPTIMUM_LEN_MASK;
-        let offset = nodes[cur_idx].item >> OPTIMUM_OFFSET_SHIFT;
+        let length = crate::fast_bytes::idx(nodes, cur_idx).item & OPTIMUM_LEN_MASK;
+        let offset = crate::fast_bytes::idx(nodes, cur_idx).item >> OPTIMUM_OFFSET_SHIFT;
         if length == 1 {
             freqs.litlen[offset as usize] += 1;
         } else {
-            let len_slot = LENGTH_SLOT[length as usize] as usize;
-            freqs.litlen[DEFLATE_FIRST_LEN_SYM as usize + len_slot] += 1;
-            freqs.offset[offset_slot_full[offset as usize] as usize] += 1;
+            let len_slot = crate::fast_bytes::idx(&LENGTH_SLOT, length as usize) as usize;
+            *crate::fast_bytes::idx_mut(
+                &mut freqs.litlen,
+                DEFLATE_FIRST_LEN_SYM as usize + len_slot,
+            ) += 1;
+            *crate::fast_bytes::idx_mut(
+                &mut freqs.offset,
+                crate::fast_bytes::idx(offset_slot_full, offset as usize) as usize,
+            ) += 1;
         }
         cur_idx += length as usize;
     }
@@ -614,13 +620,14 @@ pub(crate) fn find_min_cost_path(
         cur_idx -= 1;
         cache_idx -= 1;
 
-        let num_matches = match_cache[cache_idx].length as usize;
-        let literal = match_cache[cache_idx].offset as u32;
+        let num_matches = crate::fast_bytes::idx(match_cache, cache_idx).length as usize;
+        let literal = crate::fast_bytes::idx(match_cache, cache_idx).offset as u32;
 
         // Literal option
-        let mut best_cost =
-            costs.literal[literal as usize] + optimum_nodes[cur_idx + 1].cost_to_end;
-        optimum_nodes[cur_idx].item = (literal << OPTIMUM_OFFSET_SHIFT) | 1;
+        let mut best_cost = costs.literal[literal as usize]
+            + crate::fast_bytes::idx(optimum_nodes, cur_idx + 1).cost_to_end;
+        crate::fast_bytes::idx_mut(optimum_nodes, cur_idx).item =
+            (literal << OPTIMUM_OFFSET_SHIFT) | 1;
 
         // Match options
         if num_matches > 0 {
@@ -629,20 +636,21 @@ pub(crate) fn find_min_cost_path(
             let mut len = DEFLATE_MIN_MATCH_LEN;
 
             loop {
-                let offset = match_cache[match_idx].offset as u32;
-                let os_idx = offset_slot_full[offset as usize] as usize;
-                let offset_cost = costs.offset_slot[os_idx];
+                let offset = crate::fast_bytes::idx(match_cache, match_idx).offset as u32;
+                let os_idx = crate::fast_bytes::idx(offset_slot_full, offset as usize) as usize;
+                let offset_cost = crate::fast_bytes::idx(&costs.offset_slot, os_idx);
 
                 loop {
                     let cost = offset_cost
-                        + costs.length[len as usize]
-                        + optimum_nodes[cur_idx + len as usize].cost_to_end;
+                        + crate::fast_bytes::idx(&costs.length, len as usize)
+                        + crate::fast_bytes::idx(optimum_nodes, cur_idx + len as usize).cost_to_end;
                     if cost < best_cost {
                         best_cost = cost;
-                        optimum_nodes[cur_idx].item = len | (offset << OPTIMUM_OFFSET_SHIFT);
+                        crate::fast_bytes::idx_mut(optimum_nodes, cur_idx).item =
+                            len | (offset << OPTIMUM_OFFSET_SHIFT);
                     }
                     len += 1;
-                    if len > match_cache[match_idx].length as u32 {
+                    if len > crate::fast_bytes::idx(match_cache, match_idx).length as u32 {
                         break;
                     }
                 }
@@ -655,7 +663,7 @@ pub(crate) fn find_min_cost_path(
             cache_idx -= num_matches;
         }
 
-        optimum_nodes[cur_idx].cost_to_end = best_cost;
+        crate::fast_bytes::idx_mut(optimum_nodes, cur_idx).cost_to_end = best_cost;
     }
 
     // Tally frequencies from the optimal path and build codes
