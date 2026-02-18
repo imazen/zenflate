@@ -116,12 +116,11 @@ const fn gen_litlen_decode_results() -> [u32; DEFLATE_NUM_LITLEN_SYMS] {
     r[256] = HUFFDEC_EXCEPTIONAL | HUFFDEC_END_OF_BLOCK;
     // Lengths (symbols 257-285)
     let bases: [u16; 29] = [
-        3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31,
-        35, 43, 51, 59, 67, 83, 99, 115, 131, 163, 195, 227, 258,
+        3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59, 67, 83, 99, 115,
+        131, 163, 195, 227, 258,
     ];
     let extra: [u8; 29] = [
-        0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2,
-        3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0,
     ];
     i = 0;
     while i < 29 {
@@ -137,13 +136,12 @@ const fn gen_litlen_decode_results() -> [u32; DEFLATE_NUM_LITLEN_SYMS] {
 const fn gen_offset_decode_results() -> [u32; DEFLATE_NUM_OFFSET_SYMS] {
     let mut r = [0u32; DEFLATE_NUM_OFFSET_SYMS];
     let bases: [u32; 32] = [
-        1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193,
-        257, 385, 513, 769, 1025, 1537, 2049, 3073, 4097, 6145, 8193, 12289,
-        16385, 24577, 24577, 24577,
+        1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193, 257, 385, 513, 769, 1025, 1537,
+        2049, 3073, 4097, 6145, 8193, 12289, 16385, 24577, 24577, 24577,
     ];
     let extra: [u8; 32] = [
-        0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6,
-        7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13, 13, 13,
+        0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12,
+        13, 13, 13, 13,
     ];
     let mut i = 0;
     while i < DEFLATE_NUM_OFFSET_SYMS {
@@ -153,12 +151,9 @@ const fn gen_offset_decode_results() -> [u32; DEFLATE_NUM_OFFSET_SYMS] {
     r
 }
 
-static PRECODE_DECODE_RESULTS: [u32; DEFLATE_NUM_PRECODE_SYMS] =
-    gen_precode_decode_results();
-static LITLEN_DECODE_RESULTS: [u32; DEFLATE_NUM_LITLEN_SYMS] =
-    gen_litlen_decode_results();
-static OFFSET_DECODE_RESULTS: [u32; DEFLATE_NUM_OFFSET_SYMS] =
-    gen_offset_decode_results();
+static PRECODE_DECODE_RESULTS: [u32; DEFLATE_NUM_PRECODE_SYMS] = gen_precode_decode_results();
+static LITLEN_DECODE_RESULTS: [u32; DEFLATE_NUM_LITLEN_SYMS] = gen_litlen_decode_results();
+static OFFSET_DECODE_RESULTS: [u32; DEFLATE_NUM_OFFSET_SYMS] = gen_offset_decode_results();
 
 // ---------------------------------------------------------------------------
 // Decompressor struct
@@ -251,8 +246,7 @@ impl Decompressor {
         }
 
         let deflate_data = &input[2..input.len() - ZLIB_FOOTER_SIZE];
-        let (in_consumed, out_written) =
-            self.deflate_decompress_core(deflate_data, output)?;
+        let (in_consumed, out_written) = self.deflate_decompress_core(deflate_data, output)?;
 
         // Verify Adler-32 (big-endian, after DEFLATE data)
         let footer_start = 2 + in_consumed;
@@ -394,9 +388,7 @@ fn refill_bits(
 ) -> Result<(), DecompressionError> {
     if *in_pos + 8 <= input.len() {
         // Branchless refill: read 8 bytes, merge, advance by consumed bytes
-        let word = u64::from_le_bytes(
-            input[*in_pos..*in_pos + 8].try_into().unwrap(),
-        );
+        let word = u64::from_le_bytes(input[*in_pos..*in_pos + 8].try_into().unwrap());
         *bitbuf |= word << *bitsleft;
         *in_pos += 7 - ((*bitsleft as usize >> 3) & 7);
         *bitsleft |= 56; // MAX_BITSLEFT & !7
@@ -485,9 +477,7 @@ fn build_decode_table(
         let sym = if codespace_used == 0 {
             0u32 // arbitrary
         } else {
-            if codespace_used != (1u32 << (max_codeword_len - 1))
-                || len_counts[1] != 1
-            {
+            if codespace_used != (1u32 << (max_codeword_len - 1)) || len_counts[1] != 1 {
                 return false;
             }
             sorted_syms[sorted_pos] as u32
@@ -508,20 +498,14 @@ fn build_decode_table(
 
     while len <= table_bits {
         loop {
-            decode_table[codeword as usize] = make_decode_table_entry(
-                decode_results,
-                sorted_syms[sorted_pos] as u32,
-                len,
-            );
+            decode_table[codeword as usize] =
+                make_decode_table_entry(decode_results, sorted_syms[sorted_pos] as u32, len);
             sorted_pos += 1;
 
             if codeword == cur_table_end - 1 {
                 // Last codeword (all 1's) — double table to fill remaining
                 while len < table_bits {
-                    decode_table.copy_within(
-                        0..cur_table_end as usize,
-                        cur_table_end as usize,
-                    );
+                    decode_table.copy_within(0..cur_table_end as usize, cur_table_end as usize);
                     cur_table_end <<= 1;
                     len += 1;
                 }
@@ -543,10 +527,7 @@ fn build_decode_table(
         loop {
             len += 1;
             if len <= table_bits {
-                decode_table.copy_within(
-                    0..cur_table_end as usize,
-                    cur_table_end as usize,
-                );
+                decode_table.copy_within(0..cur_table_end as usize, cur_table_end as usize);
                 cur_table_end <<= 1;
             }
             count = len_counts[len as usize];
@@ -571,8 +552,7 @@ fn build_decode_table(
             let mut codespace = count;
             while codespace < (1u32 << subtable_bits) {
                 subtable_bits += 1;
-                codespace = (codespace << 1)
-                    + len_counts[(table_bits + subtable_bits) as usize];
+                codespace = (codespace << 1) + len_counts[(table_bits + subtable_bits) as usize];
             }
             cur_table_end = subtable_start + (1u32 << subtable_bits);
 
@@ -646,18 +626,14 @@ impl Decompressor {
 
             if block_type == DEFLATE_BLOCKTYPE_DYNAMIC_HUFFMAN {
                 // --- Dynamic Huffman block ---
-                let num_litlen_syms =
-                    257 + ((bitbuf >> 3) & bitmask(5)) as usize;
-                let num_offset_syms =
-                    1 + ((bitbuf >> 8) & bitmask(5)) as usize;
-                let num_explicit_precode_lens =
-                    4 + ((bitbuf >> 13) & bitmask(4)) as usize;
+                let num_litlen_syms = 257 + ((bitbuf >> 3) & bitmask(5)) as usize;
+                let num_offset_syms = 1 + ((bitbuf >> 8) & bitmask(5)) as usize;
+                let num_explicit_precode_lens = 4 + ((bitbuf >> 13) & bitmask(4)) as usize;
 
                 self.static_codes_loaded = false;
 
                 // First precode len is packed with the header
-                self.precode_lens
-                    [DEFLATE_PRECODE_LENS_PERMUTATION[0] as usize] =
+                self.precode_lens[DEFLATE_PRECODE_LENS_PERMUTATION[0] as usize] =
                     ((bitbuf >> 17) & 7) as u8;
                 bitbuf >>= 20;
                 bitsleft -= 20;
@@ -671,9 +647,7 @@ impl Decompressor {
                 )?;
 
                 // Remaining precode lens (3 bits each, max 18 more)
-                for &perm in &DEFLATE_PRECODE_LENS_PERMUTATION
-                    [1..num_explicit_precode_lens]
-                {
+                for &perm in &DEFLATE_PRECODE_LENS_PERMUTATION[1..num_explicit_precode_lens] {
                     self.precode_lens[perm as usize] = (bitbuf & 7) as u8;
                     bitbuf >>= 3;
                     bitsleft -= 3;
@@ -713,8 +687,7 @@ impl Decompressor {
                     }
 
                     let entry = self.precode_decode_table
-                        [(bitbuf & bitmask(DEFLATE_MAX_PRE_CODEWORD_LEN))
-                            as usize];
+                        [(bitbuf & bitmask(DEFLATE_MAX_PRE_CODEWORD_LEN)) as usize];
                     bitbuf >>= (entry & 0xFF) as u64;
                     bitsleft -= entry & 0xFF;
                     let presym = (entry >> 16) as usize;
@@ -807,11 +780,8 @@ impl Decompressor {
                 if in_pos + 4 > input.len() {
                     return Err(bad);
                 }
-                let len =
-                    u16::from_le_bytes([input[in_pos], input[in_pos + 1]])
-                        as usize;
-                let nlen =
-                    u16::from_le_bytes([input[in_pos + 2], input[in_pos + 3]]);
+                let len = u16::from_le_bytes([input[in_pos], input[in_pos + 1]]) as usize;
+                let nlen = u16::from_le_bytes([input[in_pos + 2], input[in_pos + 3]]);
                 in_pos += 4;
 
                 if len != (!nlen) as usize {
@@ -824,8 +794,7 @@ impl Decompressor {
                     return Err(bad);
                 }
 
-                output[out_pos..out_pos + len]
-                    .copy_from_slice(&input[in_pos..in_pos + len]);
+                output[out_pos..out_pos + len].copy_from_slice(&input[in_pos..in_pos + len]);
                 in_pos += len;
                 out_pos += len;
 
@@ -900,8 +869,7 @@ impl Decompressor {
                     &mut overread_count,
                 )?;
 
-                let mut entry = self.litlen_decode_table
-                    [(bitbuf & litlen_tablemask) as usize];
+                let mut entry = self.litlen_decode_table[(bitbuf & litlen_tablemask) as usize];
                 let mut saved_bitbuf = bitbuf;
                 bitbuf >>= (entry & 0xFF) as u64;
                 bitsleft -= entry & 0xFF;
@@ -935,8 +903,7 @@ impl Decompressor {
 
                 // Length: base + extra bits
                 let length = value as usize
-                    + (extract_varbits8(saved_bitbuf, entry)
-                        >> ((entry >> 8) as u8 as u64))
+                    + (extract_varbits8(saved_bitbuf, entry) >> ((entry >> 8) as u8 as u64))
                         as usize;
 
                 if length > output.len() - out_pos {
@@ -946,8 +913,8 @@ impl Decompressor {
                 // On 64-bit: CAN_CONSUME(48) is true, no refill needed here
 
                 // Decode offset
-                let mut oentry = self.offset_decode_table
-                    [(bitbuf & bitmask(OFFSET_TABLEBITS)) as usize];
+                let mut oentry =
+                    self.offset_decode_table[(bitbuf & bitmask(OFFSET_TABLEBITS)) as usize];
                 if oentry & HUFFDEC_EXCEPTIONAL != 0 {
                     // Offset requires subtable
                     bitbuf >>= OFFSET_TABLEBITS as u64;
@@ -961,8 +928,7 @@ impl Decompressor {
                 bitsleft -= oentry & 0xFF;
 
                 let offset = (oentry >> 16) as usize
-                    + (extract_varbits8(saved_bitbuf_off, oentry)
-                        >> ((oentry >> 8) as u8 as u64))
+                    + (extract_varbits8(saved_bitbuf_off, oentry) >> ((oentry >> 8) as u8 as u64))
                         as usize;
 
                 // Validate offset
@@ -1003,9 +969,7 @@ mod tests {
     #[test]
     fn test_decompress_empty_static() {
         // Compress empty data with libdeflater, decompress with us
-        let mut c = libdeflater::Compressor::new(
-            libdeflater::CompressionLvl::new(1).unwrap(),
-        );
+        let mut c = libdeflater::Compressor::new(libdeflater::CompressionLvl::new(1).unwrap());
         let bound = c.deflate_compress_bound(0);
         let mut compressed = vec![0u8; bound];
         let csize = c.deflate_compress(&[], &mut compressed).unwrap();
@@ -1021,9 +985,7 @@ mod tests {
     #[test]
     fn test_decompress_hello_world() {
         let data = b"Hello, World!";
-        let mut c = libdeflater::Compressor::new(
-            libdeflater::CompressionLvl::new(6).unwrap(),
-        );
+        let mut c = libdeflater::Compressor::new(libdeflater::CompressionLvl::new(6).unwrap());
         let bound = c.deflate_compress_bound(data.len());
         let mut compressed = vec![0u8; bound];
         let csize = c.deflate_compress(data, &mut compressed).unwrap();
@@ -1041,13 +1003,11 @@ mod tests {
     fn test_decompress_all_levels() {
         let data: Vec<u8> = (0..=255).cycle().take(10_000).collect();
         for level in 1..=12 {
-            let mut c = libdeflater::Compressor::new(
-                libdeflater::CompressionLvl::new(level).unwrap(),
-            );
+            let mut c =
+                libdeflater::Compressor::new(libdeflater::CompressionLvl::new(level).unwrap());
             let bound = c.deflate_compress_bound(data.len());
             let mut compressed = vec![0u8; bound];
-            let csize =
-                c.deflate_compress(&data, &mut compressed).unwrap();
+            let csize = c.deflate_compress(&data, &mut compressed).unwrap();
 
             let mut d = Decompressor::new();
             let mut output = vec![0u8; data.len()];
@@ -1062,9 +1022,7 @@ mod tests {
     #[test]
     fn test_decompress_all_zeros() {
         let data = vec![0u8; 100_000];
-        let mut c = libdeflater::Compressor::new(
-            libdeflater::CompressionLvl::new(6).unwrap(),
-        );
+        let mut c = libdeflater::Compressor::new(libdeflater::CompressionLvl::new(6).unwrap());
         let bound = c.deflate_compress_bound(data.len());
         let mut compressed = vec![0u8; bound];
         let csize = c.deflate_compress(&data, &mut compressed).unwrap();
@@ -1082,9 +1040,7 @@ mod tests {
     fn test_decompress_uncompressed_block() {
         // Level 0 produces uncompressed blocks
         let data = b"Uncompressed block test data!";
-        let mut c = libdeflater::Compressor::new(
-            libdeflater::CompressionLvl::new(0).unwrap(),
-        );
+        let mut c = libdeflater::Compressor::new(libdeflater::CompressionLvl::new(0).unwrap());
         let bound = c.deflate_compress_bound(data.len());
         let mut compressed = vec![0u8; bound];
         let csize = c.deflate_compress(data, &mut compressed).unwrap();
@@ -1101,9 +1057,7 @@ mod tests {
     #[test]
     fn test_zlib_decompress() {
         let data: Vec<u8> = (0..=255).cycle().take(5000).collect();
-        let mut c = libdeflater::Compressor::new(
-            libdeflater::CompressionLvl::new(6).unwrap(),
-        );
+        let mut c = libdeflater::Compressor::new(libdeflater::CompressionLvl::new(6).unwrap());
         let bound = c.zlib_compress_bound(data.len());
         let mut compressed = vec![0u8; bound];
         let csize = c.zlib_compress(&data, &mut compressed).unwrap();
@@ -1120,9 +1074,7 @@ mod tests {
     #[test]
     fn test_gzip_decompress() {
         let data: Vec<u8> = (0..=255).cycle().take(5000).collect();
-        let mut c = libdeflater::Compressor::new(
-            libdeflater::CompressionLvl::new(6).unwrap(),
-        );
+        let mut c = libdeflater::Compressor::new(libdeflater::CompressionLvl::new(6).unwrap());
         let bound = c.gzip_compress_bound(data.len());
         let mut compressed = vec![0u8; bound];
         let csize = c.gzip_compress(&data, &mut compressed).unwrap();
@@ -1139,9 +1091,7 @@ mod tests {
     #[test]
     fn test_decompress_large() {
         let data: Vec<u8> = (0..=255).cycle().take(1_000_000).collect();
-        let mut c = libdeflater::Compressor::new(
-            libdeflater::CompressionLvl::new(6).unwrap(),
-        );
+        let mut c = libdeflater::Compressor::new(libdeflater::CompressionLvl::new(6).unwrap());
         let bound = c.deflate_compress_bound(data.len());
         let mut compressed = vec![0u8; bound];
         let csize = c.deflate_compress(&data, &mut compressed).unwrap();
@@ -1159,13 +1109,10 @@ mod tests {
     fn test_decompress_single_byte() {
         for b in 0..=255u8 {
             let data = [b];
-            let mut c = libdeflater::Compressor::new(
-                libdeflater::CompressionLvl::new(6).unwrap(),
-            );
+            let mut c = libdeflater::Compressor::new(libdeflater::CompressionLvl::new(6).unwrap());
             let bound = c.deflate_compress_bound(1);
             let mut compressed = vec![0u8; bound];
-            let csize =
-                c.deflate_compress(&data, &mut compressed).unwrap();
+            let csize = c.deflate_compress(&data, &mut compressed).unwrap();
 
             let mut d = Decompressor::new();
             let mut output = vec![0u8; 1];
@@ -1181,15 +1128,13 @@ mod tests {
     fn test_all_formats_all_levels() {
         let data: Vec<u8> = (0..=255).cycle().take(50_000).collect();
         for level in 0..=12 {
-            let mut c = libdeflater::Compressor::new(
-                libdeflater::CompressionLvl::new(level).unwrap(),
-            );
+            let mut c =
+                libdeflater::Compressor::new(libdeflater::CompressionLvl::new(level).unwrap());
 
             // DEFLATE
             let bound = c.deflate_compress_bound(data.len());
             let mut compressed = vec![0u8; bound];
-            let csize =
-                c.deflate_compress(&data, &mut compressed).unwrap();
+            let csize = c.deflate_compress(&data, &mut compressed).unwrap();
             let mut d = Decompressor::new();
             let mut output = vec![0u8; data.len()];
             let out_size = d
@@ -1201,8 +1146,7 @@ mod tests {
             // zlib
             let bound = c.zlib_compress_bound(data.len());
             let mut compressed = vec![0u8; bound];
-            let csize =
-                c.zlib_compress(&data, &mut compressed).unwrap();
+            let csize = c.zlib_compress(&data, &mut compressed).unwrap();
             let mut d = Decompressor::new();
             let mut output = vec![0u8; data.len()];
             let out_size = d
@@ -1214,8 +1158,7 @@ mod tests {
             // gzip
             let bound = c.gzip_compress_bound(data.len());
             let mut compressed = vec![0u8; bound];
-            let csize =
-                c.gzip_compress(&data, &mut compressed).unwrap();
+            let csize = c.gzip_compress(&data, &mut compressed).unwrap();
             let mut d = Decompressor::new();
             let mut output = vec![0u8; data.len()];
             let out_size = d

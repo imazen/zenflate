@@ -13,8 +13,12 @@ pub mod constants;
 pub mod error;
 
 pub mod checksum;
+#[cfg(feature = "alloc")]
+pub mod compress;
 pub mod decompress;
 
 pub use checksum::{adler32, crc32};
+#[cfg(feature = "alloc")]
+pub use compress::{CompressionLevel, Compressor};
 pub use decompress::Decompressor;
 pub use error::{CompressionError, DecompressionError};
