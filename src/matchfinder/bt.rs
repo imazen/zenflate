@@ -146,6 +146,7 @@ impl BtMatchfinder {
     ///
     /// Returns the number of matches written to `matches`.
     /// Matches are sorted by strictly increasing length.
+    #[cfg_attr(feature = "unchecked", allow(dead_code))]
     #[inline(always)]
     #[allow(clippy::too_many_arguments)]
     pub fn get_matches(
@@ -172,6 +173,7 @@ impl BtMatchfinder {
     }
 
     /// Skip one byte: maintain the tree structure without recording matches.
+    #[cfg_attr(feature = "unchecked", allow(dead_code))]
     #[inline(always)]
     pub fn skip_byte(
         &mut self,
@@ -198,6 +200,7 @@ impl BtMatchfinder {
     ///
     /// When RECORD_MATCHES=true, finds all matches and writes them to `matches`.
     /// When RECORD_MATCHES=false, only maintains tree structure (skip).
+    #[cfg_attr(feature = "unchecked", allow(dead_code))]
     #[inline(always)]
     #[allow(clippy::too_many_arguments)]
     fn advance_one_byte<const RECORD_MATCHES: bool>(
@@ -401,5 +404,221 @@ impl BtMatchfinder {
                 return match_count;
             }
         }
+    }
+
+    /// Raw-pointer get_matches: eliminates fat-pointer register pressure.
+    ///
+    /// Takes `*const u8` instead of `&[u8]` and `*mut LzMatch` instead of
+    /// `&mut [LzMatch]`, freeing 2 registers in the caller's inlined hot loop.
+    ///
+    /// # Safety
+    ///
+    /// `input_ptr` must be valid for reads of at least `in_base_offset + cur_pos + max_len` bytes.
+    /// `matches_ptr` must be valid for writes of at least `MAX_MATCHES_PER_POS` entries.
+    #[cfg(feature = "unchecked")]
+    #[inline(always)]
+    #[allow(clippy::too_many_arguments)]
+    pub unsafe fn get_matches_raw(
+        &mut self,
+        input_ptr: *const u8,
+        in_base_offset: usize,
+        cur_pos: i32,
+        max_len: u32,
+        nice_len: u32,
+        max_search_depth: u32,
+        next_hashes: &mut [u32; 2],
+        matches_ptr: *mut LzMatch,
+    ) -> usize {
+        unsafe {
+            self.advance_one_byte_raw::<true>(
+                input_ptr,
+                in_base_offset,
+                cur_pos,
+                max_len,
+                nice_len,
+                max_search_depth,
+                next_hashes,
+                matches_ptr,
+            )
+        }
+    }
+
+    /// Raw-pointer skip_byte: maintains tree structure without recording matches.
+    ///
+    /// # Safety
+    ///
+    /// `input_ptr` must be valid for reads of at least `in_base_offset + cur_pos + nice_len` bytes.
+    #[cfg(feature = "unchecked")]
+    #[inline(always)]
+    pub unsafe fn skip_byte_raw(
+        &mut self,
+        input_ptr: *const u8,
+        in_base_offset: usize,
+        cur_pos: i32,
+        nice_len: u32,
+        max_search_depth: u32,
+        next_hashes: &mut [u32; 2],
+    ) {
+        unsafe {
+            self.advance_one_byte_raw::<false>(
+                input_ptr,
+                in_base_offset,
+                cur_pos,
+                nice_len,
+                nice_len,
+                max_search_depth,
+                next_hashes,
+                core::ptr::null_mut(),
+            );
+        }
+    }
+
+    /// Core raw-pointer method: advance one byte with all raw pointer access.
+    ///
+    /// Eliminates all fat pointers and bounds checks. Hash table access uses
+    /// `get_unchecked`, input access uses raw pointer arithmetic.
+    #[cfg(feature = "unchecked")]
+    #[inline(always)]
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn advance_one_byte_raw<const RECORD_MATCHES: bool>(
+        &mut self,
+        input_ptr: *const u8,
+        in_base_offset: usize,
+        cur_pos: i32,
+        max_len: u32,
+        nice_len: u32,
+        max_search_depth: u32,
+        next_hashes: &mut [u32; 2],
+        matches_ptr: *mut LzMatch,
+    ) -> usize {
+        use super::raw::lz_extend_raw;
+        use crate::fast_bytes::{load_u32_le_ptr, prefetch_ptr};
+
+        unsafe {
+            let in_next = (in_base_offset as isize + cur_pos as isize) as usize;
+            let mut depth_remaining = max_search_depth;
+            let cutoff = cur_pos - MATCHFINDER_WINDOW_SIZE as i32;
+            let mut match_count = 0usize;
+            let mut best_len = 3u32;
+
+            // Precompute next position's hashes
+            let next_hashseq = load_u32_le_ptr(input_ptr, in_next + 1);
+            let hash3 = next_hashes[0] as usize;
+            let hash4 = next_hashes[1] as usize;
+            next_hashes[0] = lz_hash(next_hashseq & 0xFFFFFF, BT_MATCHFINDER_HASH3_ORDER);
+            next_hashes[1] = lz_hash(next_hashseq, BT_MATCHFINDER_HASH4_ORDER);
+            prefetch_ptr(
+                self.hash3_tab
+                    .as_ptr()
+                    .add(next_hashes[0] as usize * BT_MATCHFINDER_HASH3_WAYS)
+                    as *const u8,
+            );
+            prefetch_ptr(self.hash4_tab.as_ptr().add(next_hashes[1] as usize) as *const u8);
+
+            // Hash3: 2-way check for length 3 matches
+            let h3 = hash3 * BT_MATCHFINDER_HASH3_WAYS;
+            let cur_node_0 = *self.hash3_tab.get_unchecked(h3) as i32;
+            *self.hash3_tab.get_unchecked_mut(h3) = cur_pos as i16;
+            let cur_node_1 = *self.hash3_tab.get_unchecked(h3 + 1) as i32;
+            *self.hash3_tab.get_unchecked_mut(h3 + 1) = cur_node_0 as i16;
+
+            if RECORD_MATCHES && cur_node_0 > cutoff {
+                let seq3 = load_u32_le_ptr(input_ptr, in_next) & 0xFFFFFF;
+                let match0_pos = (in_base_offset as isize + cur_node_0 as isize) as usize;
+                if seq3 == load_u32_le_ptr(input_ptr, match0_pos) & 0xFFFFFF {
+                    *matches_ptr.add(match_count) = LzMatch {
+                        length: 3,
+                        offset: (in_next - match0_pos) as u16,
+                    };
+                    match_count += 1;
+                } else if cur_node_1 > cutoff {
+                    let match1_pos = (in_base_offset as isize + cur_node_1 as isize) as usize;
+                    if seq3 == load_u32_le_ptr(input_ptr, match1_pos) & 0xFFFFFF {
+                        *matches_ptr.add(match_count) = LzMatch {
+                            length: 3,
+                            offset: (in_next - match1_pos) as u16,
+                        };
+                        match_count += 1;
+                    }
+                }
+            }
+
+            // Hash4: binary tree for length 4+ matches
+            let mut cur_node = *self.hash4_tab.get_unchecked(hash4) as i32;
+            *self.hash4_tab.get_unchecked_mut(hash4) = cur_pos as i16;
+
+            let mut pending_lt_idx = Self::left_child_idx(cur_pos);
+            let mut pending_gt_idx = Self::right_child_idx(cur_pos);
+
+            let child_ptr = self.child_tab.as_mut_ptr();
+
+            if cur_node <= cutoff {
+                *child_ptr.add(pending_lt_idx) = MATCHFINDER_INITVAL;
+                *child_ptr.add(pending_gt_idx) = MATCHFINDER_INITVAL;
+                return match_count;
+            }
+
+            let mut best_lt_len = 0u32;
+            let mut best_gt_len = 0u32;
+            let mut len = 0u32;
+
+            loop {
+                let match_pos = (in_base_offset as isize + cur_node as isize) as usize;
+
+                if *input_ptr.add(match_pos + len as usize)
+                    == *input_ptr.add(in_next + len as usize)
+                {
+                    len = lz_extend_raw(
+                        input_ptr.add(in_next),
+                        input_ptr.add(match_pos),
+                        len + 1,
+                        max_len,
+                    );
+                    if !RECORD_MATCHES || len > best_len {
+                        if RECORD_MATCHES {
+                            best_len = len;
+                            *matches_ptr.add(match_count) = LzMatch {
+                                length: len as u16,
+                                offset: (in_next - match_pos) as u16,
+                            };
+                            match_count += 1;
+                        }
+                        if len >= nice_len {
+                            *child_ptr.add(pending_lt_idx) =
+                                *child_ptr.add(Self::left_child_idx(cur_node));
+                            *child_ptr.add(pending_gt_idx) =
+                                *child_ptr.add(Self::right_child_idx(cur_node));
+                            return match_count;
+                        }
+                    }
+                }
+
+                if *input_ptr.add(match_pos + len as usize) < *input_ptr.add(in_next + len as usize)
+                {
+                    *child_ptr.add(pending_lt_idx) = cur_node as i16;
+                    pending_lt_idx = Self::right_child_idx(cur_node);
+                    cur_node = *child_ptr.add(pending_lt_idx) as i32;
+                    best_lt_len = len;
+                    if best_gt_len < len {
+                        len = best_gt_len;
+                    }
+                } else {
+                    *child_ptr.add(pending_gt_idx) = cur_node as i16;
+                    pending_gt_idx = Self::left_child_idx(cur_node);
+                    cur_node = *child_ptr.add(pending_gt_idx) as i32;
+                    best_gt_len = len;
+                    if best_lt_len < len {
+                        len = best_lt_len;
+                    }
+                }
+
+                depth_remaining -= 1;
+                if cur_node <= cutoff || depth_remaining == 0 {
+                    *child_ptr.add(pending_lt_idx) = MATCHFINDER_INITVAL;
+                    *child_ptr.add(pending_gt_idx) = MATCHFINDER_INITVAL;
+                    return match_count;
+                }
+            }
+        } // unsafe
     }
 }

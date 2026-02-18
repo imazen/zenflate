@@ -864,8 +864,7 @@ pub(crate) fn find_min_cost_path(
                             + (*nodes_ptr.add(cur_idx + len as usize)).cost_to_end;
                         if cost < best_cost {
                             best_cost = cost;
-                            (*nodes_ptr.add(cur_idx)).item =
-                                len | (offset << OPTIMUM_OFFSET_SHIFT);
+                            (*nodes_ptr.add(cur_idx)).item = len | (offset << OPTIMUM_OFFSET_SHIFT);
                         }
                         len += 1;
                         if len > m.length as u32 {

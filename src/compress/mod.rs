@@ -840,6 +840,8 @@ impl Compressor {
         let mut prev_block_used_only_literals = false;
         let max_search_depth = self.max_search_depth;
         let mut in_block_begin = self.chunk_start;
+        #[cfg(feature = "unchecked")]
+        let input_ptr = input.as_ptr();
 
         // Dictionary warm-up: seed binary tree with positions before chunk_start
         if self.chunk_start > 0 {
@@ -848,6 +850,19 @@ impl Compressor {
                 adjust_max_and_nice_len(&mut max_len, &mut nice_len, remaining);
                 if max_len >= BT_MATCHFINDER_REQUIRED_NBYTES {
                     let cur_pos = warm_pos as i32; // in_base_offset is 0
+                    #[cfg(feature = "unchecked")]
+                    // SAFETY: warm_pos + nice_len <= in_end (guarded by adjust_max_and_nice_len)
+                    unsafe {
+                        ns.bt_mf.skip_byte_raw(
+                            input_ptr,
+                            in_base_offset,
+                            cur_pos,
+                            nice_len,
+                            max_search_depth,
+                            &mut next_hashes,
+                        );
+                    }
+                    #[cfg(not(feature = "unchecked"))]
                     ns.bt_mf.skip_byte(
                         input,
                         in_base_offset,
@@ -901,6 +916,22 @@ impl Compressor {
 
                 if max_len >= BT_MATCHFINDER_REQUIRED_NBYTES {
                     let cur_pos = (in_next as isize - in_base_offset as isize) as i32;
+                    #[cfg(feature = "unchecked")]
+                    // SAFETY: in_next + max_len <= in_end (guarded by adjust_max_and_nice_len).
+                    // cache_idx + MAX_MATCHES_PER_POS < match_cache.len() (guarded by cache overflow check).
+                    let num_matches = unsafe {
+                        ns.bt_mf.get_matches_raw(
+                            input_ptr,
+                            in_base_offset,
+                            cur_pos,
+                            max_len,
+                            nice_len,
+                            max_search_depth,
+                            &mut next_hashes,
+                            ns.match_cache.as_mut_ptr().add(cache_idx),
+                        )
+                    };
+                    #[cfg(not(feature = "unchecked"))]
                     let num_matches = ns.bt_mf.get_matches(
                         input,
                         in_base_offset,
@@ -924,16 +955,24 @@ impl Compressor {
                         next_observation = in_next + best_len as usize;
                         ns.new_match_len_freqs[best_len as usize] += 1;
                     } else {
-                        self.split_stats.observe_literal(input[in_next]);
+                        #[cfg(feature = "unchecked")]
+                        let lit = unsafe { *input_ptr.add(in_next) };
+                        #[cfg(not(feature = "unchecked"))]
+                        let lit = input[in_next];
+                        self.split_stats.observe_literal(lit);
                         next_observation = in_next + 1;
                     }
                 }
 
                 // Write sentinel: num_matches and literal value
                 let num_matches = cache_idx - matches_start;
+                #[cfg(feature = "unchecked")]
+                let lit_byte = unsafe { *input_ptr.add(in_next) };
+                #[cfg(not(feature = "unchecked"))]
+                let lit_byte = input[in_next];
                 ns.match_cache[cache_idx] = LzMatch {
                     length: num_matches as u16,
-                    offset: input[in_next] as u16,
+                    offset: lit_byte as u16,
                 };
                 in_next += 1;
                 cache_idx += 1;
@@ -953,6 +992,19 @@ impl Compressor {
                         adjust_max_and_nice_len(&mut max_len, &mut nice_len, remaining);
                         if max_len >= BT_MATCHFINDER_REQUIRED_NBYTES {
                             let cur_pos = (in_next as isize - in_base_offset as isize) as i32;
+                            #[cfg(feature = "unchecked")]
+                            // SAFETY: in_next + nice_len <= in_end
+                            unsafe {
+                                ns.bt_mf.skip_byte_raw(
+                                    input_ptr,
+                                    in_base_offset,
+                                    cur_pos,
+                                    nice_len,
+                                    max_search_depth,
+                                    &mut next_hashes,
+                                );
+                            }
+                            #[cfg(not(feature = "unchecked"))]
                             ns.bt_mf.skip_byte(
                                 input,
                                 in_base_offset,
@@ -963,9 +1015,13 @@ impl Compressor {
                             );
                         }
                         // Sentinel for skipped position (no matches)
+                        #[cfg(feature = "unchecked")]
+                        let skip_lit = unsafe { *input_ptr.add(in_next) };
+                        #[cfg(not(feature = "unchecked"))]
+                        let skip_lit = input[in_next];
                         ns.match_cache[cache_idx] = LzMatch {
                             length: 0,
-                            offset: input[in_next] as u16,
+                            offset: skip_lit as u16,
                         };
                         in_next += 1;
                         cache_idx += 1;

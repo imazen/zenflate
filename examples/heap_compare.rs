@@ -35,9 +35,8 @@ fn main() {
     let zsize = zc.deflate_compress(&data, &mut zout).unwrap();
 
     // --- libdeflate C ---
-    let mut lc = libdeflater::Compressor::new(
-        libdeflater::CompressionLvl::new(level as i32).unwrap(),
-    );
+    let mut lc =
+        libdeflater::Compressor::new(libdeflater::CompressionLvl::new(level as i32).unwrap());
     let lbound = lc.deflate_compress_bound(data.len());
     let mut lout = vec![0u8; lbound];
     let lsize = lc.deflate_compress(&data, &mut lout).unwrap();

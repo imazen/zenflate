@@ -26,9 +26,8 @@ fn main() {
         .and_then(|s| s.parse().ok())
         .unwrap_or(6);
 
-    let mut c = libdeflater::Compressor::new(
-        libdeflater::CompressionLvl::new(level as i32).unwrap(),
-    );
+    let mut c =
+        libdeflater::Compressor::new(libdeflater::CompressionLvl::new(level as i32).unwrap());
     let data = make_mixed(1_000_000);
     let bound = c.deflate_compress_bound(data.len());
     let mut out = vec![0u8; bound];

@@ -72,6 +72,27 @@ pub(crate) fn get_byte(data: &[u8], idx: usize) -> u8 {
     }
 }
 
+/// Load a little-endian `u32` from a raw pointer + offset.
+#[cfg(feature = "unchecked")]
+#[inline(always)]
+pub(crate) unsafe fn load_u32_le_ptr(ptr: *const u8, off: usize) -> u32 {
+    unsafe { u32::from_le_bytes(*(ptr.add(off) as *const [u8; 4])) }
+}
+
+/// Prefetch a cache line at a raw pointer address.
+#[cfg(all(feature = "unchecked", target_arch = "x86_64"))]
+#[inline(always)]
+pub(crate) unsafe fn prefetch_ptr(ptr: *const u8) {
+    unsafe {
+        core::arch::x86_64::_mm_prefetch::<{ core::arch::x86_64::_MM_HINT_T0 }>(ptr as *const i8);
+    }
+}
+
+/// No-op prefetch for non-x86_64 targets.
+#[cfg(all(feature = "unchecked", not(target_arch = "x86_64")))]
+#[inline(always)]
+pub(crate) unsafe fn prefetch_ptr(_ptr: *const u8) {}
+
 /// Prefetch a value for upcoming write access.
 ///
 /// Emits `PREFETCHT0` on x86_64 when the `unchecked` feature is enabled.
