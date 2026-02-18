@@ -11,9 +11,10 @@ pub(crate) mod sequences;
 use crate::checksum::{adler32, crc32};
 use crate::constants::*;
 use crate::error::CompressionError;
+use crate::matchfinder::ht::{HT_MATCHFINDER_REQUIRED_NBYTES, HtMatchfinder};
 
 use self::bitstream::OutputBitstream;
-use self::block::{DeflateCodes, DeflateFreqs, choose_literal, finish_block};
+use self::block::{DeflateCodes, DeflateFreqs, choose_literal, choose_match, finish_block};
 use self::block_split::{BlockSplitStats, MIN_BLOCK_LENGTH};
 use self::sequences::Sequence;
 
@@ -73,7 +74,6 @@ pub struct Compressor {
     #[allow(dead_code)]
     max_search_depth: u32,
     /// "Nice" match length: stop searching if we find a match this long.
-    #[allow(dead_code)]
     nice_match_length: u32,
     /// Inputs shorter than this are passed through as uncompressed blocks.
     max_passthrough_size: usize,
@@ -87,6 +87,8 @@ pub struct Compressor {
     static_codes: DeflateCodes,
     /// Sequence store for greedy/lazy/lazy2/fastest strategies.
     sequences: Vec<Sequence>,
+    /// Hash table matchfinder for level 1.
+    ht_mf: Option<Box<HtMatchfinder>>,
 }
 
 impl Compressor {

@@ -16,6 +16,8 @@ pub mod checksum;
 #[cfg(feature = "alloc")]
 pub mod compress;
 pub mod decompress;
+#[cfg(feature = "alloc")]
+pub(crate) mod matchfinder;
 
 pub use checksum::{adler32, crc32};
 #[cfg(feature = "alloc")]
