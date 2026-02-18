@@ -6,11 +6,14 @@ pub(crate) mod bitstream;
 pub(crate) mod block;
 pub(crate) mod block_split;
 pub(crate) mod huffman;
+pub(crate) mod near_optimal;
 pub(crate) mod sequences;
 
 use crate::checksum::{adler32, crc32};
 use crate::constants::*;
 use crate::error::CompressionError;
+use crate::matchfinder::MATCHFINDER_WINDOW_SIZE;
+use crate::matchfinder::bt::{BT_MATCHFINDER_REQUIRED_NBYTES, LzMatch};
 use crate::matchfinder::hc::HcMatchfinder;
 use crate::matchfinder::ht::{HT_MATCHFINDER_REQUIRED_NBYTES, HtMatchfinder};
 use crate::matchfinder::lz_hash;
@@ -18,6 +21,10 @@ use crate::matchfinder::lz_hash;
 use self::bitstream::OutputBitstream;
 use self::block::{DeflateCodes, DeflateFreqs, choose_literal, choose_match, finish_block};
 use self::block_split::{BlockSplitStats, MIN_BLOCK_LENGTH};
+use self::near_optimal::{
+    MATCH_CACHE_LENGTH, NearOptimalState, clear_old_stats, init_stats, merge_stats,
+    optimize_and_flush_block, save_stats,
+};
 use self::sequences::Sequence;
 
 /// Hash order for the ht_matchfinder (needed for initial hash computation).
@@ -92,8 +99,10 @@ pub struct Compressor {
     sequences: Vec<Sequence>,
     /// Hash table matchfinder for level 1.
     ht_mf: Option<Box<HtMatchfinder>>,
-    /// Hash chains matchfinder for levels 2-9 (and 10-12 fallback).
+    /// Hash chains matchfinder for levels 2-9.
     hc_mf: Option<Box<HcMatchfinder>>,
+    /// Near-optimal state for levels 10-12.
+    near_optimal: Option<Box<NearOptimalState>>,
 }
 
 impl Compressor {
@@ -112,7 +121,10 @@ impl Compressor {
             6 => (35, 65),
             7 => (100, 130),
             8 => (300, DEFLATE_MAX_MATCH_LEN),
-            9..=12 => (600, DEFLATE_MAX_MATCH_LEN),
+            9 => (600, DEFLATE_MAX_MATCH_LEN),
+            10 => (35, 75),
+            11 => (100, 150),
+            12 => (300, DEFLATE_MAX_MATCH_LEN),
             _ => unreachable!(),
         };
 
@@ -124,7 +136,7 @@ impl Compressor {
 
         let seq_capacity = if lvl == 1 {
             FAST_SEQ_STORE_LENGTH + 1
-        } else if lvl >= 2 {
+        } else if (2..=9).contains(&lvl) {
             SEQ_STORE_LENGTH + 1
         } else {
             0
@@ -150,8 +162,23 @@ impl Compressor {
             } else {
                 None
             },
-            hc_mf: if lvl >= 2 {
+            hc_mf: if (2..=9).contains(&lvl) {
                 Some(Box::new(HcMatchfinder::new()))
+            } else {
+                None
+            },
+            near_optimal: if lvl >= 10 {
+                let (passes, improvement, nonfinal, static_opt) = match lvl {
+                    10 => (2, 32, 32, 0),
+                    11 => (4, 16, 16, 1000),
+                    _ => (10, 1, 1, 10000),
+                };
+                Some(Box::new(NearOptimalState::new(
+                    passes,
+                    improvement,
+                    nonfinal,
+                    static_opt,
+                )))
             } else {
                 None
             },
@@ -183,9 +210,11 @@ impl Compressor {
             5..=7 => {
                 self.compress_lazy_generic(&mut os, input, false);
             }
-            8..=12 => {
-                // Levels 8-9: lazy2. Levels 10-12: near-optimal (TODO), using lazy2 fallback.
+            8..=9 => {
                 self.compress_lazy_generic(&mut os, input, true);
+            }
+            10..=12 => {
+                self.compress_near_optimal(&mut os, input);
             }
             _ => {
                 self.compress_literals(&mut os, input);
@@ -721,6 +750,238 @@ impl Compressor {
         }
 
         self.hc_mf = Some(mf);
+    }
+
+    /// Levels 10-12: near-optimal compression using binary tree matchfinder.
+    ///
+    /// Finds all matches at each position, caches them, then uses iterative
+    /// backward DP to find the minimum-cost literal/match path.
+    fn compress_near_optimal(&mut self, os: &mut OutputBitstream<'_>, input: &[u8]) {
+        let mut ns = self.near_optimal.take().unwrap();
+        ns.bt_mf.init();
+
+        let in_end = input.len();
+        let mut in_next = 0usize;
+        let mut in_base_offset = 0usize;
+        let mut in_next_slide = in_next + (in_end - in_next).min(MATCHFINDER_WINDOW_SIZE as usize);
+        let mut max_len = DEFLATE_MAX_MATCH_LEN;
+        let mut nice_len = max_len.min(self.nice_match_length);
+        let mut cache_idx = 0usize;
+        let mut next_hashes = [0u32; 2];
+        let mut prev_block_used_only_literals = false;
+        let max_search_depth = self.max_search_depth;
+        let mut in_block_begin = 0usize;
+
+        init_stats(&mut self.split_stats, &mut ns);
+
+        loop {
+            // Starting a new DEFLATE block
+            let in_max_block_end =
+                choose_max_block_end(in_block_begin, in_end, SOFT_MAX_BLOCK_LENGTH);
+            let mut prev_end_block_check: Option<usize> = None;
+            let mut change_detected = false;
+            let mut next_observation = in_next;
+
+            // Use min_match_len heuristic for observation statistics only.
+            // The actual DP parse considers all match lengths.
+            let min_len = if prev_block_used_only_literals {
+                DEFLATE_MAX_MATCH_LEN + 1
+            } else {
+                calculate_min_match_len(&input[in_block_begin..in_max_block_end], max_search_depth)
+            };
+
+            // Find matches until we decide to end the block
+            loop {
+                let remaining = in_end - in_next;
+
+                // Slide the window forward if needed
+                if in_next == in_next_slide {
+                    ns.bt_mf.slide_window();
+                    in_base_offset = in_next;
+                    in_next_slide = in_next + remaining.min(MATCHFINDER_WINDOW_SIZE as usize);
+                }
+
+                // Find matches at current position
+                let matches_start = cache_idx;
+                let mut best_len = 0u32;
+                adjust_max_and_nice_len(&mut max_len, &mut nice_len, remaining);
+
+                if max_len >= BT_MATCHFINDER_REQUIRED_NBYTES {
+                    let cur_pos = (in_next as isize - in_base_offset as isize) as i32;
+                    let num_matches = ns.bt_mf.get_matches(
+                        input,
+                        in_base_offset,
+                        cur_pos,
+                        max_len,
+                        nice_len,
+                        max_search_depth,
+                        &mut next_hashes,
+                        &mut ns.match_cache[cache_idx..],
+                    );
+                    cache_idx += num_matches;
+                    if num_matches > 0 {
+                        best_len = ns.match_cache[cache_idx - 1].length as u32;
+                    }
+                }
+
+                // Track observations for block splitting
+                if in_next >= next_observation {
+                    if best_len >= min_len {
+                        self.split_stats.observe_match(best_len);
+                        next_observation = in_next + best_len as usize;
+                        ns.new_match_len_freqs[best_len as usize] += 1;
+                    } else {
+                        self.split_stats.observe_literal(input[in_next]);
+                        next_observation = in_next + 1;
+                    }
+                }
+
+                // Write sentinel: num_matches and literal value
+                let num_matches = cache_idx - matches_start;
+                ns.match_cache[cache_idx] = LzMatch {
+                    length: num_matches as u16,
+                    offset: input[in_next] as u16,
+                };
+                in_next += 1;
+                cache_idx += 1;
+
+                // Skip bytes covered by a nice-length match.
+                // Avoids degenerate behavior on highly redundant data.
+                if best_len >= DEFLATE_MIN_MATCH_LEN && best_len >= nice_len {
+                    let mut skip = best_len - 1;
+                    while skip > 0 {
+                        let remaining = in_end - in_next;
+                        if in_next == in_next_slide {
+                            ns.bt_mf.slide_window();
+                            in_base_offset = in_next;
+                            in_next_slide =
+                                in_next + remaining.min(MATCHFINDER_WINDOW_SIZE as usize);
+                        }
+                        adjust_max_and_nice_len(&mut max_len, &mut nice_len, remaining);
+                        if max_len >= BT_MATCHFINDER_REQUIRED_NBYTES {
+                            let cur_pos = (in_next as isize - in_base_offset as isize) as i32;
+                            ns.bt_mf.skip_byte(
+                                input,
+                                in_base_offset,
+                                cur_pos,
+                                nice_len,
+                                max_search_depth,
+                                &mut next_hashes,
+                            );
+                        }
+                        // Sentinel for skipped position (no matches)
+                        ns.match_cache[cache_idx] = LzMatch {
+                            length: 0,
+                            offset: input[in_next] as u16,
+                        };
+                        in_next += 1;
+                        cache_idx += 1;
+                        skip -= 1;
+                    }
+                }
+
+                // Maximum block length or end of input reached?
+                if in_next >= in_max_block_end {
+                    break;
+                }
+                // Match cache overflowed?
+                if cache_idx >= MATCH_CACHE_LENGTH {
+                    break;
+                }
+                // Not ready to check block end?
+                if !self
+                    .split_stats
+                    .ready_to_check(in_block_begin, in_next, in_end)
+                {
+                    continue;
+                }
+                // Check if it would be worthwhile to end the block
+                if self
+                    .split_stats
+                    .do_end_block_check((in_next - in_block_begin) as u32)
+                {
+                    change_detected = true;
+                    break;
+                }
+                // Not ending — merge stats and record checkpoint
+                merge_stats(&mut self.split_stats, &mut ns);
+                prev_end_block_check = Some(in_next);
+            }
+
+            // All matches for this block have been cached. Flush.
+            if let (true, Some(in_block_end)) = (change_detected, prev_end_block_check) {
+                // Rewind to just before the differing chunk.
+                let block_length = (in_block_end - in_block_begin) as u32;
+                let is_first = in_block_begin == 0;
+                let num_bytes_to_rewind = in_next - in_block_end;
+
+                // Rewind the match cache
+                let orig_cache_idx = cache_idx;
+                let mut rewind_count = num_bytes_to_rewind;
+                while rewind_count > 0 {
+                    cache_idx -= 1; // sentinel
+                    cache_idx -= ns.match_cache[cache_idx].length as usize;
+                    rewind_count -= 1;
+                }
+                let cache_len_rewound = orig_cache_idx - cache_idx;
+
+                prev_block_used_only_literals = optimize_and_flush_block(
+                    &mut ns,
+                    os,
+                    &input[in_block_begin..],
+                    block_length,
+                    cache_idx,
+                    is_first,
+                    false,
+                    &mut self.freqs,
+                    &mut self.codes,
+                    &self.static_codes,
+                    &self.split_stats,
+                    max_search_depth,
+                );
+
+                // Move remaining cache entries to beginning
+                ns.match_cache
+                    .copy_within(cache_idx..cache_idx + cache_len_rewound, 0);
+                cache_idx = cache_len_rewound;
+
+                save_stats(&self.split_stats, &mut ns);
+                clear_old_stats(&mut self.split_stats, &mut ns);
+                in_block_begin = in_block_end;
+            } else {
+                // End block at current position (no rewind)
+                let block_length = (in_next - in_block_begin) as u32;
+                let is_first = in_block_begin == 0;
+                let is_final = in_next == in_end;
+
+                merge_stats(&mut self.split_stats, &mut ns);
+                prev_block_used_only_literals = optimize_and_flush_block(
+                    &mut ns,
+                    os,
+                    &input[in_block_begin..],
+                    block_length,
+                    cache_idx,
+                    is_first,
+                    is_final,
+                    &mut self.freqs,
+                    &mut self.codes,
+                    &self.static_codes,
+                    &self.split_stats,
+                    max_search_depth,
+                );
+
+                cache_idx = 0;
+                save_stats(&self.split_stats, &mut ns);
+                init_stats(&mut self.split_stats, &mut ns);
+                in_block_begin = in_next;
+            }
+
+            if in_next >= in_end || os.overflow {
+                break;
+            }
+        }
+
+        self.near_optimal = Some(ns);
     }
 
     /// Simple literal-only compressor that exercises the full block flushing path.
@@ -1278,13 +1539,57 @@ mod tests {
         }
     }
 
+    // ---- Near-optimal strategy tests (levels 10-12) ----
+
+    #[test]
+    fn test_near_optimal_small() {
+        for level in 10..=12 {
+            roundtrip_verify(b"Hello, World!", level);
+        }
+    }
+
+    #[test]
+    fn test_near_optimal_repetitive() {
+        let data: Vec<u8> = b"abcabcabcabcabcabcabc".repeat(100);
+        for level in 10..=12 {
+            roundtrip_verify(&data, level);
+        }
+    }
+
+    #[test]
+    fn test_near_optimal_zeros() {
+        let data = vec![0u8; 100_000];
+        for level in 10..=12 {
+            roundtrip_verify(&data, level);
+        }
+    }
+
+    #[test]
+    fn test_near_optimal_sequential() {
+        let data: Vec<u8> = (0..=255u8).cycle().take(100_000).collect();
+        for level in 10..=12 {
+            roundtrip_verify(&data, level);
+        }
+    }
+
+    #[test]
+    fn test_near_optimal_large() {
+        let mut data = Vec::with_capacity(500_000);
+        for i in 0..500_000u32 {
+            data.push(((i * 7 + 13) % 256) as u8);
+        }
+        for level in 10..=12 {
+            roundtrip_verify(&data, level);
+        }
+    }
+
     // ---- Cross-level tests ----
 
     #[test]
     fn test_all_levels_roundtrip() {
-        // Test all levels 0-9 with the same data
+        // Test all levels 0-12 with the same data
         let data: Vec<u8> = (0..=255u8).cycle().take(50_000).collect();
-        for level in 0..=9 {
+        for level in 0..=12 {
             roundtrip_verify(&data, level);
         }
     }
@@ -1293,7 +1598,7 @@ mod tests {
     fn test_all_levels_cross_decompress_c() {
         // Compress with C libdeflate at each level, decompress with zenflate
         let data: Vec<u8> = (0..=255u8).cycle().take(50_000).collect();
-        for level in 1..=9 {
+        for level in 1..=12 {
             let mut lc = libdeflater::Compressor::new(
                 libdeflater::CompressionLvl::new(level as i32).unwrap(),
             );
@@ -1321,7 +1626,7 @@ mod tests {
         // Higher levels should generally compress at least as well (or better)
         let data = vec![0u8; 50_000];
         let mut prev_size = None;
-        for level in 1..=9 {
+        for level in 1..=12 {
             let mut c = Compressor::new(CompressionLevel::new(level));
             let bound = Compressor::deflate_compress_bound(data.len());
             let mut compressed = vec![0u8; bound];
@@ -1343,7 +1648,7 @@ mod tests {
         let data =
             b"Test zlib compression at all levels with sufficient input data for matchfinding.";
         let data = data.repeat(50);
-        for level in 0..=9 {
+        for level in 0..=12 {
             let mut c = Compressor::new(CompressionLevel::new(level));
             let bound = Compressor::zlib_compress_bound(data.len());
             let mut compressed = vec![0u8; bound];
@@ -1369,7 +1674,7 @@ mod tests {
         let data =
             b"Test gzip compression at all levels with sufficient input data for matchfinding.";
         let data = data.repeat(50);
-        for level in 0..=9 {
+        for level in 0..=12 {
             let mut c = Compressor::new(CompressionLevel::new(level));
             let bound = Compressor::gzip_compress_bound(data.len());
             let mut compressed = vec![0u8; bound];
@@ -1398,7 +1703,7 @@ mod tests {
         for i in 0..100_000u32 {
             data.push((i % 251) as u8); // prime modulus for less obvious patterns
         }
-        for level in 1..=9 {
+        for level in 1..=12 {
             roundtrip_verify(&data, level);
         }
     }
@@ -1411,7 +1716,7 @@ mod tests {
         data.extend(core::iter::repeat(0u8).take(50_000));
         // Second half: high entropy (sequential)
         data.extend((0..=255u8).cycle().take(50_000));
-        for level in 2..=9 {
+        for level in 2..=12 {
             roundtrip_verify(&data, level);
         }
     }
@@ -1419,7 +1724,7 @@ mod tests {
     #[test]
     fn test_short_inputs() {
         // Test various short inputs that exercise edge cases
-        for level in 1..=9 {
+        for level in 1..=12 {
             roundtrip_verify(b"", level);
             roundtrip_verify(b"a", level);
             roundtrip_verify(b"ab", level);

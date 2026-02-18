@@ -12,7 +12,8 @@ const NUM_LITERAL_OBSERVATION_TYPES: usize = 8;
 const NUM_MATCH_OBSERVATION_TYPES: usize = 2;
 
 /// Total number of observation types.
-const NUM_OBSERVATION_TYPES: usize = NUM_LITERAL_OBSERVATION_TYPES + NUM_MATCH_OBSERVATION_TYPES;
+pub(crate) const NUM_OBSERVATION_TYPES: usize =
+    NUM_LITERAL_OBSERVATION_TYPES + NUM_MATCH_OBSERVATION_TYPES;
 
 /// Number of observations between block-end checks.
 const NUM_OBSERVATIONS_PER_BLOCK_CHECK: u32 = 512;
@@ -56,7 +57,7 @@ impl BlockSplitStats {
     }
 
     /// Merge new observations into the accumulated totals.
-    fn merge_new_observations(&mut self) {
+    pub(crate) fn merge_new_observations(&mut self) {
         for i in 0..NUM_OBSERVATION_TYPES {
             self.observations[i] += self.new_observations[i];
             self.new_observations[i] = 0;
@@ -89,7 +90,7 @@ impl BlockSplitStats {
     }
 
     /// Core block-end check: compare old vs new observation distributions.
-    fn do_end_block_check(&mut self, block_length: u32) -> bool {
+    pub(crate) fn do_end_block_check(&mut self, block_length: u32) -> bool {
         if self.num_observations > 0 {
             let mut total_delta = 0u64;
 

@@ -7,7 +7,20 @@ use crate::constants::*;
 
 use super::bitstream::OutputBitstream;
 use super::huffman::make_huffman_code;
+use super::near_optimal::{OPTIMUM_LEN_MASK, OPTIMUM_OFFSET_SHIFT, OptimumNode};
 use super::sequences::Sequence;
+
+/// Source of output items for block flushing.
+pub(crate) enum BlockOutput<'a> {
+    /// Traditional sequence-based output (greedy/lazy/fastest).
+    Sequences(&'a [Sequence]),
+    /// Near-optimal output: walk optimum_nodes directly.
+    Optimum {
+        nodes: &'a [OptimumNode],
+        block_length: usize,
+        offset_slot_full: &'a [u8],
+    },
+}
 
 /// Codes: Huffman codewords and lengths for litlen + offset alphabets.
 #[derive(Clone)]
@@ -53,12 +66,12 @@ impl DeflateFreqs {
 }
 
 /// Extra bits for each precode symbol.
-const EXTRA_PRECODE_BITS: [u8; DEFLATE_NUM_PRECODE_SYMS as usize] =
+pub(crate) const EXTRA_PRECODE_BITS: [u8; DEFLATE_NUM_PRECODE_SYMS as usize] =
     [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 3, 7];
 
 /// Length slot for each match length (3..=258).
 #[rustfmt::skip]
-const LENGTH_SLOT: [u8; DEFLATE_MAX_MATCH_LEN as usize + 1] = {
+pub(crate) const LENGTH_SLOT: [u8; DEFLATE_MAX_MATCH_LEN as usize + 1] = {
     let mut table = [0u8; DEFLATE_MAX_MATCH_LEN as usize + 1];
     // Fill from the length base/extra tables
     let mut slot = 0u8;
@@ -142,7 +155,7 @@ pub(crate) fn init_static_codes(freqs: &mut DeflateFreqs, codes: &mut DeflateCod
 /// Compute RLE-encoded precode items for the combined lens array.
 ///
 /// Returns the number of items written to `precode_items`.
-fn compute_precode_items(
+pub(crate) fn compute_precode_items(
     lens: &[u8],
     precode_freqs: &mut [u32; DEFLATE_NUM_PRECODE_SYMS as usize],
     precode_items: &mut [u32],
@@ -216,7 +229,7 @@ pub(crate) fn flush_block(
     os: &mut OutputBitstream<'_>,
     block_begin: &[u8],
     block_length: usize,
-    sequences: &[Sequence],
+    output: BlockOutput<'_>,
     freqs: &DeflateFreqs,
     codes: &DeflateCodes,
     static_codes: &DeflateCodes,
@@ -380,49 +393,91 @@ pub(crate) fn flush_block(
             active_codes.lens_litlen[litlen_sym] + DEFLATE_LENGTH_EXTRA_BITS[slot];
     }
 
-    // ---- Output literals and matches from sequences ----
-    let mut in_pos = 0usize;
-    for seq in sequences {
-        let litrunlen = seq.litrunlen();
-        let length = seq.length();
+    // ---- Output literals and matches ----
+    match output {
+        BlockOutput::Sequences(sequences) => {
+            let mut in_pos = 0usize;
+            for seq in sequences {
+                let litrunlen = seq.litrunlen();
+                let length = seq.length();
 
-        // Output literal run
-        for _ in 0..litrunlen {
-            let lit = in_data[in_pos] as usize;
-            in_pos += 1;
-            os.add_bits(
-                active_codes.codewords_litlen[lit],
-                active_codes.lens_litlen[lit] as u32,
-            );
-            os.flush_bits();
+                // Output literal run
+                for _ in 0..litrunlen {
+                    let lit = in_data[in_pos] as usize;
+                    in_pos += 1;
+                    os.add_bits(
+                        active_codes.codewords_litlen[lit],
+                        active_codes.lens_litlen[lit] as u32,
+                    );
+                    os.flush_bits();
+                }
+
+                if length == 0 {
+                    break;
+                }
+
+                // Output match: length symbol + extra bits
+                os.add_bits(
+                    full_len_codewords[length as usize],
+                    full_len_lens[length as usize] as u32,
+                );
+                os.flush_bits();
+
+                // Output match: offset symbol + extra bits
+                let offset_slot = seq.offset_slot as usize;
+                os.add_bits(
+                    active_codes.codewords_offset[offset_slot],
+                    active_codes.lens_offset[offset_slot] as u32,
+                );
+                let extra_offset_bits = seq.offset as u32 - DEFLATE_OFFSET_BASE[offset_slot];
+                os.add_bits(
+                    extra_offset_bits,
+                    DEFLATE_OFFSET_EXTRA_BITS[offset_slot] as u32,
+                );
+                os.flush_bits();
+
+                in_pos += length as usize;
+            }
         }
+        BlockOutput::Optimum {
+            nodes,
+            block_length: bl,
+            offset_slot_full,
+        } => {
+            let mut cur_idx = 0;
+            while cur_idx < bl {
+                let item = nodes[cur_idx].item;
+                let length = item & OPTIMUM_LEN_MASK;
+                let offset = item >> OPTIMUM_OFFSET_SHIFT;
 
-        if length == 0 {
-            // Last sequence
-            break;
+                if length == 1 {
+                    // Literal
+                    let lit = offset as usize;
+                    os.add_bits(
+                        active_codes.codewords_litlen[lit],
+                        active_codes.lens_litlen[lit] as u32,
+                    );
+                    os.flush_bits();
+                } else {
+                    // Match
+                    os.add_bits(
+                        full_len_codewords[length as usize],
+                        full_len_lens[length as usize] as u32,
+                    );
+                    os.flush_bits();
+
+                    let os_idx = offset_slot_full[offset as usize] as usize;
+                    os.add_bits(
+                        active_codes.codewords_offset[os_idx],
+                        active_codes.lens_offset[os_idx] as u32,
+                    );
+                    let extra_offset_bits = offset - DEFLATE_OFFSET_BASE[os_idx];
+                    os.add_bits(extra_offset_bits, DEFLATE_OFFSET_EXTRA_BITS[os_idx] as u32);
+                    os.flush_bits();
+                }
+                cur_idx += length as usize;
+            }
         }
-
-        // Output match: length symbol + extra bits
-        os.add_bits(
-            full_len_codewords[length as usize],
-            full_len_lens[length as usize] as u32,
-        );
-        os.flush_bits();
-
-        // Output match: offset symbol + extra bits
-        let offset_slot = seq.offset_slot as usize;
-        os.add_bits(
-            active_codes.codewords_offset[offset_slot],
-            active_codes.lens_offset[offset_slot] as u32,
-        );
-        let extra_offset_bits = seq.offset as u32 - DEFLATE_OFFSET_BASE[offset_slot];
-        os.add_bits(
-            extra_offset_bits,
-            DEFLATE_OFFSET_EXTRA_BITS[offset_slot] as u32,
-        );
-        os.flush_bits();
-
-        in_pos += length as usize;
     }
 
     // Output end-of-block symbol
@@ -515,7 +570,7 @@ pub(crate) fn finish_block(
         os,
         block_begin,
         block_length,
-        sequences,
+        BlockOutput::Sequences(sequences),
         freqs,
         codes,
         static_codes,

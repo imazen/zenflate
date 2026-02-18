@@ -2,6 +2,7 @@
 //!
 //! Ported from libdeflate's `matchfinder_common.h`.
 
+pub(crate) mod bt;
 pub(crate) mod hc;
 pub(crate) mod ht;
 
