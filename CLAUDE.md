@@ -24,8 +24,11 @@ Pure Rust port of libdeflate. DEFLATE/zlib/gzip compression and decompression.
 - [x] Phase 2: Decompression (generic loop, all 3 formats, 10 parity tests at all levels)
 - [x] Phase 3: Compression Core (bitstream writer, Huffman construction, block flushing, 55 tests)
 - [x] Phase 4: Compression Strategies (levels 0-12: fastest, greedy, lazy, lazy2, near-optimal; 97 tests)
-- [x] Phase 5: SIMD Acceleration (Adler-32 AVX2, CRC-32 PCLMULQDQ folding VL=16)
-- [x] Phase 6: Benchmarks + Polish (criterion benchmarks, README, doc examples, decompression copy optimization, #[non_exhaustive] errors)
+- [x] Phase 5: SIMD Acceleration
+  - Adler-32: AVX2 (v3) + AVX-512 VNNI (modern) — 99 GiB/s (0.82x C)
+  - CRC-32: PCLMULQDQ 128-bit (v2) + VPCLMULQDQ 512-bit zmm (modern) — 78 GiB/s (1.00x C)
+  - Decompression fastloop + optimized match copy
+- [x] Phase 6: Benchmarks + Polish (criterion benchmarks, README, doc examples, #[non_exhaustive] errors)
 
 ## Archmage Patches (local only)
 The following files in `~/.cargo/registry/src/` were patched to add `pclmulqdq` to X64V2Token:
