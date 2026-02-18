@@ -15,8 +15,9 @@ std = ["alloc", "archmage/std", "magetypes/std"]
 alloc = []
 
 [dependencies]
-archmage = { version = "0.7", default-features = false }
+archmage = { version = "0.7", default-features = false, features = ["macros", "safe_unaligned_simd"] }
 magetypes = { version = "0.7", default-features = false }
+safe_unaligned_simd = { version = "0.2", default-features = false }
 
 [dev-dependencies]
 libdeflater = "1.25"

@@ -1600,7 +1600,7 @@ mod tests {
         let data: Vec<u8> = (0..=255u8).cycle().take(50_000).collect();
         for level in 1..=12 {
             let mut lc = libdeflater::Compressor::new(
-                libdeflater::CompressionLvl::new(level as i32).unwrap(),
+                libdeflater::CompressionLvl::new(level).unwrap(),
             );
             let bound = lc.deflate_compress_bound(data.len());
             let mut c_compressed = vec![0u8; bound];
@@ -1713,7 +1713,7 @@ mod tests {
         // Data with distinct distributions to trigger block splitting
         let mut data = Vec::with_capacity(100_000);
         // First half: low entropy (mostly zeros)
-        data.extend(core::iter::repeat(0u8).take(50_000));
+        data.extend(core::iter::repeat_n(0u8, 50_000));
         // Second half: high entropy (sequential)
         data.extend((0..=255u8).cycle().take(50_000));
         for level in 2..=12 {

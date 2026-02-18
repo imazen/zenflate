@@ -14,6 +14,7 @@ const HT_MATCHFINDER_HASH_ORDER: u32 = 15;
 const HT_MATCHFINDER_BUCKET_SIZE: usize = 2;
 
 /// Minimum match length for the ht_matchfinder.
+#[allow(dead_code)]
 pub(crate) const HT_MATCHFINDER_MIN_MATCH_LEN: u32 = 4;
 
 /// Minimum value of max_len for longest_match().
