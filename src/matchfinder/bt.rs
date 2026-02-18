@@ -169,6 +169,8 @@ impl BtMatchfinder {
         next_hashes: &mut [u32; 2],
         matches: &mut [LzMatch],
     ) -> usize {
+        use crate::fast_bytes::{get_byte, load_u32_le};
+
         let in_next = (in_base_offset as isize + cur_pos as isize) as usize;
         let mut depth_remaining = max_search_depth;
         let cutoff = cur_pos - MATCHFINDER_WINDOW_SIZE as i32;
@@ -176,7 +178,7 @@ impl BtMatchfinder {
         let mut best_len = 3u32;
 
         // Precompute next position's hashes
-        let next_hashseq = u32::from_le_bytes(input[in_next + 1..in_next + 5].try_into().unwrap());
+        let next_hashseq = load_u32_le(input, in_next + 1);
         let hash3 = next_hashes[0] as usize;
         let hash4 = next_hashes[1] as usize;
         next_hashes[0] = lz_hash(next_hashseq & 0xFFFFFF, BT_MATCHFINDER_HASH3_ORDER);
@@ -190,9 +192,10 @@ impl BtMatchfinder {
         self.hash3_tab[h3 + 1] = cur_node_0 as i16;
 
         if RECORD_MATCHES && cur_node_0 > cutoff {
-            let seq3 = load_u24(input, in_next);
+            // Load 4 bytes and mask to 3 — matches C pattern and requires only one load
+            let seq3 = load_u32_le(input, in_next) & 0xFFFFFF;
             let match0_pos = (in_base_offset as isize + cur_node_0 as isize) as usize;
-            if seq3 == load_u24(input, match0_pos) {
+            if seq3 == load_u32_le(input, match0_pos) & 0xFFFFFF {
                 matches[match_count] = LzMatch {
                     length: 3,
                     offset: (in_next - match0_pos) as u16,
@@ -200,7 +203,7 @@ impl BtMatchfinder {
                 match_count += 1;
             } else if cur_node_1 > cutoff {
                 let match1_pos = (in_base_offset as isize + cur_node_1 as isize) as usize;
-                if seq3 == load_u24(input, match1_pos) {
+                if seq3 == load_u32_le(input, match1_pos) & 0xFFFFFF {
                     matches[match_count] = LzMatch {
                         length: 3,
                         offset: (in_next - match1_pos) as u16,
@@ -230,7 +233,8 @@ impl BtMatchfinder {
         loop {
             let match_pos = (in_base_offset as isize + cur_node as isize) as usize;
 
-            if input[match_pos + len as usize] == input[in_next + len as usize] {
+            if get_byte(input, match_pos + len as usize) == get_byte(input, in_next + len as usize)
+            {
                 len = lz_extend(&input[in_next..], &input[match_pos..], len + 1, max_len);
                 if !RECORD_MATCHES || len > best_len {
                     if RECORD_MATCHES {
@@ -251,7 +255,7 @@ impl BtMatchfinder {
                 }
             }
 
-            if input[match_pos + len as usize] < input[in_next + len as usize] {
+            if get_byte(input, match_pos + len as usize) < get_byte(input, in_next + len as usize) {
                 self.child_tab[pending_lt_idx] = cur_node as i16;
                 pending_lt_idx = Self::right_child_idx(cur_node);
                 cur_node = self.child_tab[pending_lt_idx] as i32;
@@ -277,10 +281,4 @@ impl BtMatchfinder {
             }
         }
     }
-}
-
-/// Load 3 bytes as a u32 (little-endian, upper byte zero).
-#[inline(always)]
-fn load_u24(data: &[u8], pos: usize) -> u32 {
-    (data[pos] as u32) | ((data[pos + 1] as u32) << 8) | ((data[pos + 2] as u32) << 16)
 }

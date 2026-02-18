@@ -379,7 +379,7 @@ impl Compressor {
             // Precompute first hash for this block
             let mut next_hash = if in_next + 4 <= in_end {
                 lz_hash(
-                    u32::from_le_bytes(input[in_next..in_next + 4].try_into().unwrap()),
+                    crate::fast_bytes::load_u32_le(input, in_next),
                     HT_MATCHFINDER_HASH_ORDER,
                 )
             } else {

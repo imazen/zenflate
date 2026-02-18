@@ -77,6 +77,8 @@ impl HcMatchfinder {
         max_search_depth: u32,
         next_hashes: &mut [u32; 2],
     ) -> (u32, u32) {
+        use crate::fast_bytes::load_u32_le;
+
         let mut best_len = best_len;
         let mut best_offset = 0u32;
         let mut depth_remaining = max_search_depth;
@@ -106,7 +108,7 @@ impl HcMatchfinder {
 
         // Precompute next hashes
         if in_next + 5 <= input.len() {
-            let next_seq = u32::from_le_bytes(input[in_next + 1..in_next + 5].try_into().unwrap());
+            let next_seq = load_u32_le(input, in_next + 1);
             next_hashes[0] = lz_hash(next_seq & 0xFFFFFF, HC_MATCHFINDER_HASH3_ORDER);
             next_hashes[1] = lz_hash(next_seq, HC_MATCHFINDER_HASH4_ORDER);
         }
@@ -126,13 +128,12 @@ impl HcMatchfinder {
                 return (best_len, best_offset);
             }
 
-            let seq4 = u32::from_le_bytes(input[in_next..in_next + 4].try_into().unwrap());
+            let seq4 = load_u32_le(input, in_next);
 
             // Check for a length 3 match (hash3 is a singleton, not a chain)
             if best_len < 3 {
                 let match_pos = (in_base as isize + cur_node3 as isize) as usize;
-                let match_seq =
-                    u32::from_le_bytes(input[match_pos..match_pos + 4].try_into().unwrap());
+                let match_seq = load_u32_le(input, match_pos);
                 if (match_seq & 0xFFFFFF) == (seq4 & 0xFFFFFF) {
                     best_len = 3;
                     best_offset = (in_next - match_pos) as u32;
@@ -146,8 +147,7 @@ impl HcMatchfinder {
 
             loop {
                 let match_pos = (in_base as isize + cur_node4 as isize) as usize;
-                let match_seq =
-                    u32::from_le_bytes(input[match_pos..match_pos + 4].try_into().unwrap());
+                let match_seq = load_u32_le(input, match_pos);
 
                 if match_seq == seq4 {
                     // Found length 4+ match — extend it
@@ -187,21 +187,12 @@ impl HcMatchfinder {
 
             // Quick rejection: check last 4 bytes and first 4 bytes
             let tail_off = (best_len - 3) as usize;
-            let m_tail = u32::from_le_bytes(
-                input[match_pos + tail_off..match_pos + tail_off + 4]
-                    .try_into()
-                    .unwrap(),
-            );
-            let s_tail = u32::from_le_bytes(
-                input[in_next + tail_off..in_next + tail_off + 4]
-                    .try_into()
-                    .unwrap(),
-            );
+            let m_tail = load_u32_le(input, match_pos + tail_off);
+            let s_tail = load_u32_le(input, in_next + tail_off);
 
             if m_tail == s_tail {
-                let m_head =
-                    u32::from_le_bytes(input[match_pos..match_pos + 4].try_into().unwrap());
-                let s_head = u32::from_le_bytes(input[in_next..in_next + 4].try_into().unwrap());
+                let m_head = load_u32_le(input, match_pos);
+                let s_head = load_u32_le(input, in_next);
                 if m_head == s_head {
                     // Full extension
                     let len = lz_extend(&input[in_next..], &input[match_pos..], 4, max_len);
@@ -236,6 +227,8 @@ impl HcMatchfinder {
         count: u32,
         next_hashes: &mut [u32; 2],
     ) {
+        use crate::fast_bytes::load_u32_le;
+
         if count as usize + 5 > in_end - in_next {
             return;
         }
@@ -262,7 +255,7 @@ impl HcMatchfinder {
             cur_pos += 1;
             remaining -= 1;
 
-            let next_seq = u32::from_le_bytes(input[pos..pos + 4].try_into().unwrap());
+            let next_seq = load_u32_le(input, pos);
             hash3 = lz_hash(next_seq & 0xFFFFFF, HC_MATCHFINDER_HASH3_ORDER) as usize;
             hash4 = lz_hash(next_seq, HC_MATCHFINDER_HASH4_ORDER) as usize;
 

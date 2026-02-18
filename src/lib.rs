@@ -26,7 +26,7 @@
 //! assert_eq!(&output[..dsize], &data[..]);
 //! ```
 
-#![forbid(unsafe_code)]
+#![cfg_attr(not(feature = "unchecked"), forbid(unsafe_code))]
 #![cfg_attr(not(feature = "std"), no_std)]
 
 #[cfg(feature = "alloc")]
@@ -34,6 +34,8 @@ extern crate alloc;
 
 pub mod constants;
 pub mod error;
+
+pub(crate) mod fast_bytes;
 
 pub mod checksum;
 #[cfg(feature = "alloc")]

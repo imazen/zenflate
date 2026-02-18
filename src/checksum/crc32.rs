@@ -105,7 +105,7 @@ macro_rules! barrett_reduce {
 #[arcane]
 #[allow(clippy::incompatible_msrv)] // avx512 feature requires rustc 1.89+
 fn crc32_impl_modern(_token: Avx512ModernToken, crc: u32, data: &[u8]) -> u32 {
-    use safe_unaligned_simd::x86_64::{_mm512_loadu_si512, _mm256_loadu_si256, _mm_loadu_si128};
+    use safe_unaligned_simd::x86_64::{_mm_loadu_si128, _mm256_loadu_si256, _mm512_loadu_si512};
 
     let len = data.len();
 
@@ -116,33 +116,51 @@ fn crc32_impl_modern(_token: Avx512ModernToken, crc: u32, data: &[u8]) -> u32 {
 
     // 512-bit multiplier vectors (replicated across four 128-bit lanes)
     let mults_8v = _mm512_set_epi64(
-        CRC32_X4063_MODG, CRC32_X4127_MODG,
-        CRC32_X4063_MODG, CRC32_X4127_MODG,
-        CRC32_X4063_MODG, CRC32_X4127_MODG,
-        CRC32_X4063_MODG, CRC32_X4127_MODG,
+        CRC32_X4063_MODG,
+        CRC32_X4127_MODG,
+        CRC32_X4063_MODG,
+        CRC32_X4127_MODG,
+        CRC32_X4063_MODG,
+        CRC32_X4127_MODG,
+        CRC32_X4063_MODG,
+        CRC32_X4127_MODG,
     );
     let mults_4v = _mm512_set_epi64(
-        CRC32_X2015_MODG, CRC32_X2079_MODG,
-        CRC32_X2015_MODG, CRC32_X2079_MODG,
-        CRC32_X2015_MODG, CRC32_X2079_MODG,
-        CRC32_X2015_MODG, CRC32_X2079_MODG,
+        CRC32_X2015_MODG,
+        CRC32_X2079_MODG,
+        CRC32_X2015_MODG,
+        CRC32_X2079_MODG,
+        CRC32_X2015_MODG,
+        CRC32_X2079_MODG,
+        CRC32_X2015_MODG,
+        CRC32_X2079_MODG,
     );
     let mults_2v = _mm512_set_epi64(
-        CRC32_X991_MODG, CRC32_X1055_MODG,
-        CRC32_X991_MODG, CRC32_X1055_MODG,
-        CRC32_X991_MODG, CRC32_X1055_MODG,
-        CRC32_X991_MODG, CRC32_X1055_MODG,
+        CRC32_X991_MODG,
+        CRC32_X1055_MODG,
+        CRC32_X991_MODG,
+        CRC32_X1055_MODG,
+        CRC32_X991_MODG,
+        CRC32_X1055_MODG,
+        CRC32_X991_MODG,
+        CRC32_X1055_MODG,
     );
     let mults_1v = _mm512_set_epi64(
-        CRC32_X479_MODG, CRC32_X543_MODG,
-        CRC32_X479_MODG, CRC32_X543_MODG,
-        CRC32_X479_MODG, CRC32_X543_MODG,
-        CRC32_X479_MODG, CRC32_X543_MODG,
+        CRC32_X479_MODG,
+        CRC32_X543_MODG,
+        CRC32_X479_MODG,
+        CRC32_X543_MODG,
+        CRC32_X479_MODG,
+        CRC32_X543_MODG,
+        CRC32_X479_MODG,
+        CRC32_X543_MODG,
     );
     // 256-bit constants for 512→256 reduction (256-bit distance between halves)
     let mults_256b = _mm256_set_epi64x(
-        CRC32_X223_MODG, CRC32_X287_MODG,
-        CRC32_X223_MODG, CRC32_X287_MODG,
+        CRC32_X223_MODG,
+        CRC32_X287_MODG,
+        CRC32_X223_MODG,
+        CRC32_X287_MODG,
     );
     // 128-bit constants for 256→128 and Barrett reduction
     let mults_128b = _mm_set_epi64x(CRC32_X95_MODG, CRC32_X159_MODG);
@@ -192,11 +210,8 @@ fn crc32_impl_modern(_token: Avx512ModernToken, crc: u32, data: &[u8]) -> u32 {
     let mut p = data;
 
     // Initialize: load first 64 bytes, XOR CRC into low 32 bits
-    let crc_v = _mm512_set_epi32(0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0, crc as i32);
-    let mut x0 = _mm512_xor_si512(
-        _mm512_loadu_si512(ld64(p, 0)),
-        crc_v,
-    );
+    let crc_v = _mm512_set_epi32(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, crc as i32);
+    let mut x0 = _mm512_xor_si512(_mm512_loadu_si512(ld64(p, 0)), crc_v);
     p = &p[64..];
 
     if p.len() >= 448 {

@@ -30,14 +30,16 @@ pub(crate) fn lz_hash(seq: u32, num_bits: u32) -> u32 {
 /// word-at-a-time XOR for speed.
 #[inline(always)]
 pub(crate) fn lz_extend(strptr: &[u8], matchptr: &[u8], start_len: u32, max_len: u32) -> u32 {
+    use crate::fast_bytes::{get_byte, load_u64_le};
+
     let mut len = start_len;
     let max = max_len as usize;
 
     // Word-at-a-time comparison
     while (len as usize) + 8 <= max {
         let off = len as usize;
-        let sw = u64::from_le_bytes(strptr[off..off + 8].try_into().unwrap());
-        let mw = u64::from_le_bytes(matchptr[off..off + 8].try_into().unwrap());
+        let sw = load_u64_le(strptr, off);
+        let mw = load_u64_le(matchptr, off);
         let xor = sw ^ mw;
         if xor != 0 {
             len += xor.trailing_zeros() >> 3;
@@ -47,7 +49,8 @@ pub(crate) fn lz_extend(strptr: &[u8], matchptr: &[u8], start_len: u32, max_len:
     }
 
     // Byte-at-a-time for remainder
-    while (len as usize) < max && strptr[len as usize] == matchptr[len as usize] {
+    while (len as usize) < max && get_byte(strptr, len as usize) == get_byte(matchptr, len as usize)
+    {
         len += 1;
     }
     len

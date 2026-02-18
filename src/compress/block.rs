@@ -425,7 +425,7 @@ pub(crate) fn flush_block(
     macro_rules! flush_bits {
         () => {{
             if os.pos + 8 <= os.buf.len() {
-                os.buf[os.pos..os.pos + 8].copy_from_slice(&bitbuf.to_le_bytes());
+                crate::fast_bytes::store_u64_le(os.buf, os.pos, bitbuf);
                 os.pos += (bitcount >> 3) as usize;
                 bitbuf >>= bitcount & !7;
                 bitcount &= 7;
@@ -454,10 +454,10 @@ pub(crate) fn flush_block(
 
                 // Output literal run — batch 4 per flush
                 while litrunlen >= 4 {
-                    let lit0 = in_data[in_pos] as usize;
-                    let lit1 = in_data[in_pos + 1] as usize;
-                    let lit2 = in_data[in_pos + 2] as usize;
-                    let lit3 = in_data[in_pos + 3] as usize;
+                    let lit0 = crate::fast_bytes::get_byte(in_data, in_pos) as usize;
+                    let lit1 = crate::fast_bytes::get_byte(in_data, in_pos + 1) as usize;
+                    let lit2 = crate::fast_bytes::get_byte(in_data, in_pos + 2) as usize;
+                    let lit3 = crate::fast_bytes::get_byte(in_data, in_pos + 3) as usize;
                     add_bits!(
                         active_codes.codewords_litlen[lit0],
                         active_codes.lens_litlen[lit0] as u32
@@ -480,21 +480,21 @@ pub(crate) fn flush_block(
                 }
                 // Remainder (0..3 literals)
                 if litrunlen > 0 {
-                    let lit = in_data[in_pos] as usize;
+                    let lit = crate::fast_bytes::get_byte(in_data, in_pos) as usize;
                     in_pos += 1;
                     add_bits!(
                         active_codes.codewords_litlen[lit],
                         active_codes.lens_litlen[lit] as u32
                     );
                     if litrunlen > 1 {
-                        let lit = in_data[in_pos] as usize;
+                        let lit = crate::fast_bytes::get_byte(in_data, in_pos) as usize;
                         in_pos += 1;
                         add_bits!(
                             active_codes.codewords_litlen[lit],
                             active_codes.lens_litlen[lit] as u32
                         );
                         if litrunlen > 2 {
-                            let lit = in_data[in_pos] as usize;
+                            let lit = crate::fast_bytes::get_byte(in_data, in_pos) as usize;
                             in_pos += 1;
                             add_bits!(
                                 active_codes.codewords_litlen[lit],

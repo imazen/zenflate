@@ -54,7 +54,7 @@ impl<'a> OutputBitstream<'a> {
     pub fn flush_bits(&mut self) {
         // Fast path: write a full u64 word if there's room
         if self.pos + 8 <= self.buf.len() {
-            self.buf[self.pos..self.pos + 8].copy_from_slice(&self.bitbuf.to_le_bytes());
+            crate::fast_bytes::store_u64_le(self.buf, self.pos, self.bitbuf);
             self.pos += (self.bitcount >> 3) as usize;
             self.bitbuf >>= self.bitcount & !7;
             self.bitcount &= 7;
