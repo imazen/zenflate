@@ -12,6 +12,14 @@ use super::tables::CRC32_SLICE8_TABLE;
 ///
 /// This matches `libdeflate_crc32` semantics: the internal CRC state
 /// is inverted before and after processing.
+///
+/// ```
+/// use zenflate::crc32;
+///
+/// let checksum = crc32(0, b"Hello");
+/// // Continue with more data:
+/// let checksum = crc32(checksum, b" World");
+/// ```
 pub fn crc32(crc: u32, data: &[u8]) -> u32 {
     if data.is_empty() {
         return crc;

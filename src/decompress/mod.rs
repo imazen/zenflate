@@ -166,6 +166,23 @@ const LENS_SIZE: usize =
 ///
 /// Reusable across multiple decompression calls. Caches static Huffman
 /// decode tables between calls for efficiency.
+///
+/// ```
+/// use zenflate::{Compressor, CompressionLevel, Decompressor};
+///
+/// // Compress some data
+/// let data = b"The quick brown fox jumps over the lazy dog.";
+/// let mut c = Compressor::new(CompressionLevel::FASTEST);
+/// let bound = Compressor::deflate_compress_bound(data.len());
+/// let mut compressed = vec![0u8; bound];
+/// let csize = c.deflate_compress(data, &mut compressed).unwrap();
+///
+/// // Decompress it back
+/// let mut d = Decompressor::new();
+/// let mut output = vec![0u8; data.len()];
+/// let dsize = d.deflate_decompress(&compressed[..csize], &mut output).unwrap();
+/// assert_eq!(&output[..dsize], &data[..]);
+/// ```
 pub struct Decompressor {
     precode_lens: [u8; DEFLATE_NUM_PRECODE_SYMS],
     precode_decode_table: [u32; PRECODE_ENOUGH],

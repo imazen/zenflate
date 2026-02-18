@@ -43,6 +43,18 @@ const FAST_SOFT_MAX_BLOCK_LENGTH: usize = 65535;
 const FAST_SEQ_STORE_LENGTH: usize = 8192;
 
 /// Compression level (0-12).
+///
+/// Higher levels produce smaller output but take longer. Level 6 is a good default.
+///
+/// ```
+/// use zenflate::CompressionLevel;
+///
+/// let level = CompressionLevel::DEFAULT; // level 6
+/// assert_eq!(level.level(), 6);
+///
+/// // Out-of-range values are clamped
+/// assert_eq!(CompressionLevel::new(99).level(), 12);
+/// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CompressionLevel(u32);
 
@@ -78,6 +90,18 @@ impl Default for CompressionLevel {
 /// DEFLATE/zlib/gzip compressor.
 ///
 /// Reuse across multiple compressions for best performance (avoids re-initialization).
+///
+/// ```
+/// use zenflate::{Compressor, CompressionLevel};
+///
+/// let mut compressor = Compressor::new(CompressionLevel::DEFAULT);
+///
+/// let data = b"Hello, World! Hello, World! Hello, World!";
+/// let bound = Compressor::deflate_compress_bound(data.len());
+/// let mut out = vec![0u8; bound];
+/// let size = compressor.deflate_compress(data, &mut out).unwrap();
+/// assert!(size < data.len()); // compressed
+/// ```
 pub struct Compressor {
     /// Compression level.
     level: CompressionLevel,

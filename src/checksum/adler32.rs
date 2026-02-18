@@ -16,6 +16,14 @@ const MAX_CHUNK_LEN: usize = 5552;
 ///
 /// To compute from scratch, pass `adler = 1` (the Adler-32 initial value).
 /// To continue a running checksum, pass the previous return value.
+///
+/// ```
+/// use zenflate::adler32;
+///
+/// let checksum = adler32(1, b"Hello");
+/// // Continue with more data:
+/// let checksum = adler32(checksum, b" World");
+/// ```
 #[allow(unexpected_cfgs)]
 pub fn adler32(adler: u32, data: &[u8]) -> u32 {
     incant!(adler32_impl(adler, data))
