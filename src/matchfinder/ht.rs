@@ -109,7 +109,7 @@ impl HtMatchfinder {
             return (0, 0);
         }
 
-        let match_pos = in_base + cur_node as usize;
+        let match_pos = (in_base as isize + cur_node as isize) as usize;
         let matchptr_seq = u32::from_le_bytes(
             input[match_pos..match_pos + 4].try_into().unwrap(),
         );
@@ -134,7 +134,7 @@ impl HtMatchfinder {
                 return (best_len, best_offset);
             }
 
-            let match_pos2 = in_base + cur_node2 as usize;
+            let match_pos2 = (in_base as isize + cur_node2 as isize) as usize;
             let matchptr2_seq = u32::from_le_bytes(
                 input[match_pos2..match_pos2 + 4].try_into().unwrap(),
             );
@@ -169,7 +169,7 @@ impl HtMatchfinder {
             if cur_node2 <= cutoff {
                 return (0, 0);
             }
-            let match_pos2 = in_base + cur_node2 as usize;
+            let match_pos2 = (in_base as isize + cur_node2 as isize) as usize;
             let matchptr2_seq = u32::from_le_bytes(
                 input[match_pos2..match_pos2 + 4].try_into().unwrap(),
             );

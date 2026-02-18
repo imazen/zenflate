@@ -12,11 +12,15 @@ use crate::checksum::{adler32, crc32};
 use crate::constants::*;
 use crate::error::CompressionError;
 use crate::matchfinder::ht::{HT_MATCHFINDER_REQUIRED_NBYTES, HtMatchfinder};
+use crate::matchfinder::lz_hash;
 
 use self::bitstream::OutputBitstream;
 use self::block::{DeflateCodes, DeflateFreqs, choose_literal, choose_match, finish_block};
 use self::block_split::{BlockSplitStats, MIN_BLOCK_LENGTH};
 use self::sequences::Sequence;
+
+/// Hash order for the ht_matchfinder (needed for initial hash computation).
+const HT_MATCHFINDER_HASH_ORDER: u32 = 15;
 
 /// Soft maximum block length (uncompressed bytes). Blocks are ended around here.
 const SOFT_MAX_BLOCK_LENGTH: usize = 300000;
@@ -71,7 +75,6 @@ pub struct Compressor {
     /// Compression level.
     level: CompressionLevel,
     /// Maximum search depth for matchfinding.
-    #[allow(dead_code)]
     max_search_depth: u32,
     /// "Nice" match length: stop searching if we find a match this long.
     nice_match_length: u32,
@@ -140,7 +143,11 @@ impl Compressor {
             codes: DeflateCodes::default(),
             static_codes,
             sequences: alloc::vec![Sequence::default(); seq_capacity],
-            ht_mf: None,
+            ht_mf: if lvl == 1 {
+                Some(Box::new(HtMatchfinder::new()))
+            } else {
+                None
+            },
         }
     }
 
@@ -160,11 +167,11 @@ impl Compressor {
             0 => {
                 return deflate_compress_none(input, output);
             }
-            // For now, all levels 1-12 use the greedy strategy.
-            // Matchfinders will be added in Phase 4.
-            // For now we implement a simple literal-only compressor that still
-            // exercises the full block flushing path.
+            1 => {
+                self.compress_fastest(&mut os, input);
+            }
             _ => {
+                // Levels 2-12: literal-only placeholder until hc/bt matchfinders are done
                 self.compress_literals(&mut os, input);
             }
         }
@@ -279,8 +286,100 @@ impl Compressor {
         Self::deflate_compress_bound(input_len) + 10 + 8 // header + crc32 + isize
     }
 
+    /// Level 1: fastest compression using hash table matchfinder.
+    ///
+    /// Simple greedy: find longest match, take it or emit literal.
+    /// No block splitting (uses fixed FAST_SOFT_MAX_BLOCK_LENGTH).
+    fn compress_fastest(&mut self, os: &mut OutputBitstream<'_>, input: &[u8]) {
+        let mut mf = self.ht_mf.take().unwrap();
+        mf.init();
+
+        let in_end = input.len();
+        let mut in_next = 0usize;
+        let mut in_base_offset = 0usize;
+
+        while in_next < in_end && !os.overflow {
+            let in_block_begin = in_next;
+            let in_max_block_end =
+                choose_max_block_end(in_next, in_end, FAST_SOFT_MAX_BLOCK_LENGTH);
+            let mut seq_idx = 0;
+
+            self.freqs.reset();
+            self.sequences[0].litrunlen_and_length = 0;
+
+            // Precompute first hash for this block
+            let mut next_hash = if in_next + 4 <= in_end {
+                lz_hash(
+                    u32::from_le_bytes(input[in_next..in_next + 4].try_into().unwrap()),
+                    HT_MATCHFINDER_HASH_ORDER,
+                )
+            } else {
+                0
+            };
+
+            while in_next < in_max_block_end && seq_idx < FAST_SEQ_STORE_LENGTH {
+                let remaining = in_end - in_next;
+                let max_len = remaining.min(DEFLATE_MAX_MATCH_LEN as usize) as u32;
+                let nice_len = max_len.min(self.nice_match_length);
+
+                if max_len >= HT_MATCHFINDER_REQUIRED_NBYTES {
+                    let (length, offset) = mf.longest_match(
+                        input,
+                        &mut in_base_offset,
+                        in_next,
+                        max_len,
+                        nice_len,
+                        &mut next_hash,
+                    );
+
+                    if length > 0 {
+                        seq_idx = choose_match(
+                            &mut self.freqs,
+                            length,
+                            offset,
+                            &mut self.sequences,
+                            seq_idx,
+                        );
+                        if length > 1 {
+                            mf.skip_bytes(
+                                input,
+                                &mut in_base_offset,
+                                in_next + 1,
+                                length - 1,
+                                &mut next_hash,
+                            );
+                        }
+                        in_next += length as usize;
+                        continue;
+                    }
+                }
+
+                choose_literal(
+                    &mut self.freqs,
+                    input[in_next],
+                    &mut self.sequences[seq_idx],
+                );
+                in_next += 1;
+            }
+
+            let block_length = in_next - in_block_begin;
+            let is_final = in_next >= in_end;
+            finish_block(
+                os,
+                &input[in_block_begin..],
+                block_length,
+                &self.sequences[..=seq_idx],
+                &mut self.freqs,
+                &mut self.codes,
+                &self.static_codes,
+                is_final,
+            );
+        }
+
+        self.ht_mf = Some(mf);
+    }
+
     /// Simple literal-only compressor that exercises the full block flushing path.
-    /// This will be replaced with proper matchfinding strategies in Phase 4.
     fn compress_literals(&mut self, os: &mut OutputBitstream<'_>, input: &[u8]) {
         let mut pos = 0;
 
@@ -509,6 +608,106 @@ mod tests {
         let mut decompressed = vec![0u8; data.len()];
         let dsize = d
             .deflate_decompress(&compressed[..csize], &mut decompressed)
+            .unwrap();
+        assert_eq!(&decompressed[..dsize], &data[..]);
+    }
+
+    /// Helper: compress with zenflate, decompress with both zenflate and libdeflater.
+    fn roundtrip_verify(data: &[u8], level: u32) {
+        let mut c = Compressor::new(CompressionLevel::new(level));
+        let bound = Compressor::deflate_compress_bound(data.len());
+        let mut compressed = vec![0u8; bound];
+        let csize = c
+            .deflate_compress(data, &mut compressed)
+            .unwrap_or_else(|e| panic!("level {level}: compress failed: {e}"));
+
+        // Verify with our own decompressor
+        let mut d = crate::Decompressor::new();
+        let mut decompressed = vec![0u8; data.len()];
+        let dsize = d
+            .deflate_decompress(&compressed[..csize], &mut decompressed)
+            .unwrap_or_else(|e| panic!("level {level}: zenflate decompress failed: {e}"));
+        assert_eq!(
+            &decompressed[..dsize],
+            data,
+            "level {level}: zenflate roundtrip mismatch"
+        );
+
+        // Verify with libdeflater
+        let mut ld = libdeflater::Decompressor::new();
+        let mut ld_decompressed = vec![0u8; data.len()];
+        let ld_dsize = ld
+            .deflate_decompress(&compressed[..csize], &mut ld_decompressed)
+            .unwrap_or_else(|e| panic!("level {level}: libdeflater decompress failed: {e}"));
+        assert_eq!(
+            &ld_decompressed[..ld_dsize],
+            data,
+            "level {level}: libdeflater roundtrip mismatch"
+        );
+    }
+
+    #[test]
+    fn test_fastest_small() {
+        roundtrip_verify(b"Hello, World!", 1);
+    }
+
+    #[test]
+    fn test_fastest_repetitive() {
+        let data: Vec<u8> = b"abcabcabcabcabcabcabc".repeat(100);
+        roundtrip_verify(&data, 1);
+    }
+
+    #[test]
+    fn test_fastest_zeros() {
+        let data = vec![0u8; 100_000];
+        roundtrip_verify(&data, 1);
+    }
+
+    #[test]
+    fn test_fastest_sequential() {
+        let data: Vec<u8> = (0..=255u8).cycle().take(100_000).collect();
+        roundtrip_verify(&data, 1);
+    }
+
+    #[test]
+    fn test_fastest_large() {
+        // Mix of repetitive and varied data
+        let mut data = Vec::with_capacity(500_000);
+        for i in 0..500_000u32 {
+            data.push(((i * 7 + 13) % 256) as u8);
+        }
+        roundtrip_verify(&data, 1);
+    }
+
+    #[test]
+    fn test_fastest_actually_compresses() {
+        // Verify level 1 actually produces smaller output than literal-only
+        let data = vec![0u8; 10_000];
+        let mut c = Compressor::new(CompressionLevel::FASTEST);
+        let bound = Compressor::deflate_compress_bound(data.len());
+        let mut compressed = vec![0u8; bound];
+        let csize = c.deflate_compress(&data, &mut compressed).unwrap();
+        // All zeros should compress very well
+        assert!(
+            csize < data.len() / 10,
+            "Level 1 should compress all-zeros well: {csize} >= {}",
+            data.len() / 10
+        );
+    }
+
+    #[test]
+    fn test_fastest_cross_decompress_c() {
+        // Compress with C libdeflate level 1, decompress with zenflate
+        let data: Vec<u8> = (0..=255u8).cycle().take(50_000).collect();
+        let mut lc = libdeflater::Compressor::new(libdeflater::CompressionLvl::new(1).unwrap());
+        let bound = lc.deflate_compress_bound(data.len());
+        let mut c_compressed = vec![0u8; bound];
+        let c_csize = lc.deflate_compress(&data, &mut c_compressed).unwrap();
+
+        let mut d = crate::Decompressor::new();
+        let mut decompressed = vec![0u8; data.len()];
+        let dsize = d
+            .deflate_decompress(&c_compressed[..c_csize], &mut decompressed)
             .unwrap();
         assert_eq!(&decompressed[..dsize], &data[..]);
     }
