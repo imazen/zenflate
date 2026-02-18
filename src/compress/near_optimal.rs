@@ -580,6 +580,7 @@ pub(crate) fn set_costs_from_codes(costs: &mut DeflateCosts, codes: &DeflateCode
 // ---- Path finding ----
 
 /// Walk the optimum path and tally symbol frequencies.
+#[cfg(not(feature = "unchecked"))]
 fn tally_item_list(
     nodes: &[OptimumNode],
     block_length: u32,
@@ -599,6 +600,38 @@ fn tally_item_list(
             freqs.offset[offset_slot_full[offset as usize] as usize] += 1;
         }
         cur_idx += length as usize;
+    }
+    freqs.litlen[DEFLATE_END_OF_BLOCK as usize] += 1;
+}
+
+/// Walk the optimum path and tally symbol frequencies (raw-pointer variant).
+#[cfg(feature = "unchecked")]
+fn tally_item_list(
+    nodes: &[OptimumNode],
+    block_length: u32,
+    offset_slot_full: &[u8],
+    freqs: &mut DeflateFreqs,
+) {
+    let nodes_ptr = nodes.as_ptr();
+    let osf_ptr = offset_slot_full.as_ptr();
+    let mut cur_idx = 0usize;
+    let end = block_length as usize;
+    // SAFETY: cur_idx bounded by block_length <= MAX_BLOCK_LENGTH < nodes.len().
+    // offset bounded by DEFLATE_MAX_MATCH_OFFSET < offset_slot_full.len().
+    unsafe {
+        while cur_idx < end {
+            let node = &*nodes_ptr.add(cur_idx);
+            let length = node.item & OPTIMUM_LEN_MASK;
+            let offset = node.item >> OPTIMUM_OFFSET_SHIFT;
+            if length == 1 {
+                freqs.litlen[offset as usize] += 1;
+            } else {
+                let len_slot = LENGTH_SLOT[length as usize] as usize;
+                freqs.litlen[DEFLATE_FIRST_LEN_SYM as usize + len_slot] += 1;
+                freqs.offset[*osf_ptr.add(offset as usize) as usize] += 1;
+            }
+            cur_idx += length as usize;
+        }
     }
     freqs.litlen[DEFLATE_END_OF_BLOCK as usize] += 1;
 }
@@ -697,6 +730,7 @@ fn compute_true_cost(freqs: &DeflateFreqs, codes: &DeflateCodes) -> u32 {
 ///
 /// Uses backward dynamic programming. After completion, `optimum_nodes[0].item`
 /// starts the optimal path. Also sets freqs and codes from the path.
+#[cfg(not(feature = "unchecked"))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn find_min_cost_path(
     optimum_nodes: &mut [OptimumNode],
@@ -760,6 +794,95 @@ pub(crate) fn find_min_cost_path(
         }
 
         optimum_nodes[cur_idx].cost_to_end = best_cost;
+    }
+
+    // Tally frequencies from the optimal path and build codes
+    freqs.reset();
+    tally_item_list(optimum_nodes, block_length, offset_slot_full, freqs);
+    make_huffman_codes(freqs, codes);
+}
+
+/// Find the minimum-cost literal/match path (raw-pointer variant).
+///
+/// Eliminates 3 fat pointers (optimum_nodes, match_cache, offset_slot_full)
+/// from the inner DP loop, freeing 6 registers on x86-64.
+#[cfg(feature = "unchecked")]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn find_min_cost_path(
+    optimum_nodes: &mut [OptimumNode],
+    costs: &DeflateCosts,
+    offset_slot_full: &[u8],
+    block_length: u32,
+    match_cache: &[LzMatch],
+    cache_end: usize,
+    freqs: &mut DeflateFreqs,
+    codes: &mut DeflateCodes,
+) {
+    let end = block_length as usize;
+
+    let nodes_ptr = optimum_nodes.as_mut_ptr();
+    let cache_ptr = match_cache.as_ptr();
+    let osf_ptr = offset_slot_full.as_ptr();
+
+    // SAFETY: All indices are bounded by block_length <= MAX_BLOCK_LENGTH
+    // (< optimum_nodes.len()), cache_end <= match_cache.len(), and
+    // offsets <= DEFLATE_MAX_MATCH_OFFSET (< offset_slot_full.len()).
+    // The costs arrays use fixed-size types with known bounds.
+    unsafe {
+        (*nodes_ptr.add(end)).cost_to_end = 0;
+
+        let mut cache_idx = cache_end;
+        let mut cur_idx = end;
+
+        while cur_idx > 0 {
+            cur_idx -= 1;
+            cache_idx -= 1;
+
+            let cache_entry = &*cache_ptr.add(cache_idx);
+            let num_matches = cache_entry.length as usize;
+            let literal = cache_entry.offset as u32;
+
+            // Literal option
+            let mut best_cost = *costs.literal.get_unchecked(literal as usize)
+                + (*nodes_ptr.add(cur_idx + 1)).cost_to_end;
+            (*nodes_ptr.add(cur_idx)).item = (literal << OPTIMUM_OFFSET_SHIFT) | 1;
+
+            // Match options
+            if num_matches > 0 {
+                let mut match_idx = cache_idx - num_matches;
+                let mut len = DEFLATE_MIN_MATCH_LEN;
+
+                loop {
+                    let m = &*cache_ptr.add(match_idx);
+                    let offset = m.offset as u32;
+                    let os_idx = *osf_ptr.add(offset as usize) as usize;
+                    let offset_cost = *costs.offset_slot.get_unchecked(os_idx);
+
+                    loop {
+                        let cost = offset_cost
+                            + *costs.length.get_unchecked(len as usize)
+                            + (*nodes_ptr.add(cur_idx + len as usize)).cost_to_end;
+                        if cost < best_cost {
+                            best_cost = cost;
+                            (*nodes_ptr.add(cur_idx)).item =
+                                len | (offset << OPTIMUM_OFFSET_SHIFT);
+                        }
+                        len += 1;
+                        if len > m.length as u32 {
+                            break;
+                        }
+                    }
+
+                    match_idx += 1;
+                    if match_idx == cache_idx {
+                        break;
+                    }
+                }
+                cache_idx -= num_matches;
+            }
+
+            (*nodes_ptr.add(cur_idx)).cost_to_end = best_cost;
+        }
     }
 
     // Tally frequencies from the optimal path and build codes
