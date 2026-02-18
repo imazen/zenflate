@@ -62,11 +62,12 @@ These must be re-applied after any `cargo update` of archmage.
 | L6 | sequential | 1144µs | 1109µs | **0.97x** | -12.2% |
 | L6 | zeros | 1066µs | 964µs | 0.90x | -12.5% |
 | L6 | mixed | 7128µs | 6200µs | 0.87x | -7.2% |
-| L12 | sequential | 17.3ms | 13.3ms | 0.77x | -24.6% |
-| L12 | mixed | 24.0ms | 18.1ms | 0.75x | -8.4% |
+| L12 | sequential | 16.1ms | 13.7ms | **0.85x** | -30.0% |
+| L12 | mixed | 22.5ms | 18.3ms | **0.81x** | -14.0% |
 
-Remaining gap on mixed data is register pressure from Rust's fat pointers
-(`&[u8]` = ptr+len, 2 regs vs C's 1 reg) and missing software prefetch.
+L12 improvement from raw-pointer bt_matchfinder inner loop (eliminates
+fat-pointer register pressure in the tree traversal). Remaining gap is
+fat pointers in outer strategy loop and hc_matchfinder (L5-9).
 
 ### Parallel Compression (4MB mixed data, --features unchecked)
 
