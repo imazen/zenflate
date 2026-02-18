@@ -23,7 +23,7 @@ Pure Rust port of libdeflate. DEFLATE/zlib/gzip compression and decompression.
 - [x] Phase 1: Foundation + Checksums (Adler-32, CRC-32 scalar, 23 parity tests)
 - [x] Phase 2: Decompression (generic loop, all 3 formats, 10 parity tests at all levels)
 - [x] Phase 3: Compression Core (bitstream writer, Huffman construction, block flushing, 55 tests)
-- [ ] Phase 4: Compression Strategies
+- [x] Phase 4: Compression Strategies (levels 0-9: fastest, greedy, lazy, lazy2; 92 tests)
 - [ ] Phase 5: SIMD Acceleration
 - [ ] Phase 6: Benchmarks + Polish
 
