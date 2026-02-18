@@ -2,6 +2,7 @@
 
 /// Error returned when compression fails.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum CompressionError {
     /// The output buffer is too small to hold the compressed data.
     InsufficientSpace,
@@ -9,6 +10,7 @@ pub enum CompressionError {
 
 /// Error returned when decompression fails.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum DecompressionError {
     /// The compressed data is invalid or corrupt.
     BadData,
