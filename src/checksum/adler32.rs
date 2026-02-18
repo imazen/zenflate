@@ -39,6 +39,30 @@ pub fn adler32(adler: u32, data: &[u8]) -> u32 {
     }
 }
 
+/// Combine two Adler-32 checksums.
+///
+/// Given `a1 = adler32(1, data1)` and `a2 = adler32(1, data2)`, returns
+/// `adler32(1, data1 || data2)` in O(1) time without needing the original data.
+/// Used for parallel checksum computation.
+pub(crate) fn adler32_combine(adler1: u32, adler2: u32, len2: usize) -> u32 {
+    let s1_1 = adler1 & 0xFFFF;
+    let s2_1 = adler1 >> 16;
+    let s1_2 = adler2 & 0xFFFF;
+    let s2_2 = adler2 >> 16;
+
+    // s1 of combined = (s1_1 + s1_2 - 1) mod DIVISOR
+    // (subtract 1 because adler32(1, data2) starts s1 at 1, but we want continuation)
+    let s1 = (s1_1 + s1_2 + DIVISOR - 1) % DIVISOR;
+
+    // s2 of combined = (s2_1 + s2_2 + s1_1 * len2 - len2) mod DIVISOR
+    // The s1_1 * len2 term accounts for s2 accumulating s1_1 for each of the len2 bytes
+    // The -len2 removes the initial s1=1 contribution from adler2's computation
+    let rem = (len2 % DIVISOR as usize) as u32;
+    let s2 = (s2_1 + s2_2 + rem * s1_1 + DIVISOR * 2 - rem) % DIVISOR;
+
+    (s2 << 16) | s1
+}
+
 // ---------------------------------------------------------------------------
 // AVX-512 VNNI implementation (x86_64-v4x: Avx512ModernToken = AVX-512 + VNNI)
 //
@@ -504,5 +528,38 @@ mod parity {
     fn parity_large() {
         let data: alloc::vec::Vec<u8> = (0..=255).cycle().take(1_000_000).collect();
         check_parity(&data);
+    }
+
+    #[test]
+    fn test_adler32_combine_basic() {
+        let data1 = b"Hello, ";
+        let data2 = b"World!";
+        let full = b"Hello, World!";
+
+        let adler_full = super::adler32(1, full);
+        let a1 = super::adler32(1, data1);
+        let a2 = super::adler32(1, data2);
+        let combined = super::adler32_combine(a1, a2, data2.len());
+        assert_eq!(combined, adler_full);
+    }
+
+    #[test]
+    fn test_adler32_combine_large() {
+        let data: alloc::vec::Vec<u8> = (0..=255).cycle().take(100_000).collect();
+        for split in [1, 100, 1000, 32768, 50000, 99999] {
+            let (a, b) = data.split_at(split);
+            let adler_full = super::adler32(1, &data);
+            let a1 = super::adler32(1, a);
+            let a2 = super::adler32(1, b);
+            let combined = super::adler32_combine(a1, a2, b.len());
+            assert_eq!(combined, adler_full, "failed at split={split}");
+        }
+    }
+
+    #[test]
+    fn test_adler32_combine_empty() {
+        let data = b"test data";
+        let adler = super::adler32(1, data);
+        assert_eq!(super::adler32_combine(adler, 1, 0), adler);
     }
 }
