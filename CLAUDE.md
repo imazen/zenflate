@@ -68,5 +68,16 @@ These must be re-applied after any `cargo update` of archmage.
 Remaining gap on mixed data is register pressure from Rust's fat pointers
 (`&[u8]` = ptr+len, 2 regs vs C's 1 reg) and missing software prefetch.
 
+### Parallel Compression (4MB mixed data, --features unchecked)
+
+| Level | 1 thread | 2 threads | 4 threads | Speedup (4T) | Ratio overhead |
+|-------|----------|-----------|-----------|--------------|----------------|
+| L1 | 24.6ms | 13.4ms | 7.7ms | **3.19x** | +0.00% |
+| L6 | 30.3ms | 16.5ms | 9.9ms | **3.06x** | +0.00% |
+| L12 | 99.3ms | 53.0ms | 28.5ms | **3.48x** | +0.27% |
+
+Parallel compression uses pigz-style chunking: equal-sized chunks with 32KB
+dictionary overlap, sync flush at boundaries, combined CRC-32 via GF(2) matrix.
+
 ## Known Bugs
 (none yet)
