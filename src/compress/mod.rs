@@ -11,6 +11,7 @@ pub(crate) mod sequences;
 use crate::checksum::{adler32, crc32};
 use crate::constants::*;
 use crate::error::CompressionError;
+use crate::matchfinder::hc::HcMatchfinder;
 use crate::matchfinder::ht::{HT_MATCHFINDER_REQUIRED_NBYTES, HtMatchfinder};
 use crate::matchfinder::lz_hash;
 
@@ -29,7 +30,6 @@ const SOFT_MAX_BLOCK_LENGTH: usize = 300000;
 const SEQ_STORE_LENGTH: usize = 50000;
 
 /// Soft maximum block length for the fastest strategy.
-#[allow(dead_code)]
 const FAST_SOFT_MAX_BLOCK_LENGTH: usize = 65535;
 
 /// Maximum number of sequences for the fastest strategy.
@@ -92,6 +92,8 @@ pub struct Compressor {
     sequences: Vec<Sequence>,
     /// Hash table matchfinder for level 1.
     ht_mf: Option<Box<HtMatchfinder>>,
+    /// Hash chains matchfinder for levels 2-9 (and 10-12 fallback).
+    hc_mf: Option<Box<HcMatchfinder>>,
 }
 
 impl Compressor {
@@ -148,6 +150,11 @@ impl Compressor {
             } else {
                 None
             },
+            hc_mf: if lvl >= 2 {
+                Some(Box::new(HcMatchfinder::new()))
+            } else {
+                None
+            },
         }
     }
 
@@ -170,8 +177,17 @@ impl Compressor {
             1 => {
                 self.compress_fastest(&mut os, input);
             }
+            2..=4 => {
+                self.compress_greedy(&mut os, input);
+            }
+            5..=7 => {
+                self.compress_lazy_generic(&mut os, input, false);
+            }
+            8..=12 => {
+                // Levels 8-9: lazy2. Levels 10-12: near-optimal (TODO), using lazy2 fallback.
+                self.compress_lazy_generic(&mut os, input, true);
+            }
             _ => {
-                // Levels 2-12: literal-only placeholder until hc/bt matchfinders are done
                 self.compress_literals(&mut os, input);
             }
         }
@@ -379,6 +395,334 @@ impl Compressor {
         self.ht_mf = Some(mf);
     }
 
+    /// Levels 2-4: greedy compression using hash chains matchfinder.
+    ///
+    /// Always takes the longest match at each position. Uses block splitting
+    /// and adaptive min_match_len heuristic.
+    fn compress_greedy(&mut self, os: &mut OutputBitstream<'_>, input: &[u8]) {
+        let mut mf = self.hc_mf.take().unwrap();
+        mf.init();
+
+        let in_end = input.len();
+        let mut in_next = 0usize;
+        let mut in_base_offset = 0usize;
+        let mut max_len = DEFLATE_MAX_MATCH_LEN;
+        let mut nice_len = max_len.min(self.nice_match_length);
+        let mut next_hashes = [0u32; 2];
+        let max_search_depth = self.max_search_depth;
+
+        while in_next < in_end && !os.overflow {
+            let in_block_begin = in_next;
+            let in_max_block_end = choose_max_block_end(in_next, in_end, SOFT_MAX_BLOCK_LENGTH);
+            let mut seq_idx = 0;
+
+            self.split_stats = BlockSplitStats::new();
+            self.freqs.reset();
+            self.sequences[0].litrunlen_and_length = 0;
+
+            let min_len =
+                calculate_min_match_len(&input[in_next..in_max_block_end], max_search_depth);
+
+            loop {
+                adjust_max_and_nice_len(&mut max_len, &mut nice_len, in_end - in_next);
+
+                let (length, offset) = mf.longest_match(
+                    input,
+                    &mut in_base_offset,
+                    in_next,
+                    min_len - 1,
+                    max_len,
+                    nice_len,
+                    max_search_depth,
+                    &mut next_hashes,
+                );
+
+                if length >= min_len && (length > DEFLATE_MIN_MATCH_LEN || offset <= 4096) {
+                    seq_idx = choose_match(
+                        &mut self.freqs,
+                        length,
+                        offset,
+                        &mut self.sequences,
+                        seq_idx,
+                    );
+                    self.split_stats.observe_match(length);
+                    mf.skip_bytes(
+                        input,
+                        &mut in_base_offset,
+                        in_next + 1,
+                        in_end,
+                        length - 1,
+                        &mut next_hashes,
+                    );
+                    in_next += length as usize;
+                } else {
+                    choose_literal(
+                        &mut self.freqs,
+                        input[in_next],
+                        &mut self.sequences[seq_idx],
+                    );
+                    self.split_stats.observe_literal(input[in_next]);
+                    in_next += 1;
+                }
+
+                if in_next >= in_max_block_end
+                    || seq_idx >= SEQ_STORE_LENGTH
+                    || self
+                        .split_stats
+                        .should_end_block(in_block_begin, in_next, in_end)
+                {
+                    break;
+                }
+            }
+
+            let block_length = in_next - in_block_begin;
+            let is_final = in_next >= in_end;
+            finish_block(
+                os,
+                &input[in_block_begin..],
+                block_length,
+                &self.sequences[..=seq_idx],
+                &mut self.freqs,
+                &mut self.codes,
+                &self.static_codes,
+                is_final,
+            );
+        }
+
+        self.hc_mf = Some(mf);
+    }
+
+    /// Levels 5-9: lazy/lazy2 compression using hash chains matchfinder.
+    ///
+    /// Before committing to a match, looks ahead 1 position (lazy) or 2
+    /// positions (lazy2) for a better match. Uses block splitting and
+    /// adaptive min_match_len with periodic recalculation.
+    fn compress_lazy_generic(&mut self, os: &mut OutputBitstream<'_>, input: &[u8], lazy2: bool) {
+        let mut mf = self.hc_mf.take().unwrap();
+        mf.init();
+
+        let in_end = input.len();
+        let mut in_next = 0usize;
+        let mut in_base_offset = 0usize;
+        let mut max_len = DEFLATE_MAX_MATCH_LEN;
+        let mut nice_len = max_len.min(self.nice_match_length);
+        let mut next_hashes = [0u32; 2];
+        let max_search_depth = self.max_search_depth;
+
+        while in_next < in_end && !os.overflow {
+            let in_block_begin = in_next;
+            let in_max_block_end = choose_max_block_end(in_next, in_end, SOFT_MAX_BLOCK_LENGTH);
+            let mut seq_idx = 0;
+            let mut next_recalc_min_len = in_next + (in_end - in_next).min(10000);
+
+            self.split_stats = BlockSplitStats::new();
+            self.freqs.reset();
+            self.sequences[0].litrunlen_and_length = 0;
+
+            let mut min_len =
+                calculate_min_match_len(&input[in_next..in_max_block_end], max_search_depth);
+
+            loop {
+                // Recalculate min_len periodically based on actual frequency distribution
+                if in_next >= next_recalc_min_len {
+                    min_len = recalculate_min_match_len(&self.freqs, max_search_depth);
+                    next_recalc_min_len +=
+                        (in_end - next_recalc_min_len).min(in_next - in_block_begin);
+                }
+
+                // Find match at current position
+                adjust_max_and_nice_len(&mut max_len, &mut nice_len, in_end - in_next);
+                let (mut cur_len, mut cur_offset) = mf.longest_match(
+                    input,
+                    &mut in_base_offset,
+                    in_next,
+                    min_len - 1,
+                    max_len,
+                    nice_len,
+                    max_search_depth,
+                    &mut next_hashes,
+                );
+
+                if cur_len < min_len || (cur_len == DEFLATE_MIN_MATCH_LEN && cur_offset > 8192) {
+                    // No usable match — emit literal
+                    choose_literal(
+                        &mut self.freqs,
+                        input[in_next],
+                        &mut self.sequences[seq_idx],
+                    );
+                    self.split_stats.observe_literal(input[in_next]);
+                    in_next += 1;
+                } else {
+                    // Have a match. Advance past the match start position.
+                    in_next += 1;
+
+                    // Lazy evaluation loop (simulates C goto have_cur_match)
+                    // Invariant: match at (in_next - 1), length cur_len, offset cur_offset
+                    loop {
+                        if cur_len >= nice_len {
+                            // Very long match — take it immediately
+                            seq_idx = choose_match(
+                                &mut self.freqs,
+                                cur_len,
+                                cur_offset,
+                                &mut self.sequences,
+                                seq_idx,
+                            );
+                            self.split_stats.observe_match(cur_len);
+                            mf.skip_bytes(
+                                input,
+                                &mut in_base_offset,
+                                in_next,
+                                in_end,
+                                cur_len - 1,
+                                &mut next_hashes,
+                            );
+                            in_next += (cur_len - 1) as usize;
+                            break;
+                        }
+
+                        // Look ahead: try to find a better match at the next position.
+                        // Use half the search depth for the lookahead.
+                        adjust_max_and_nice_len(&mut max_len, &mut nice_len, in_end - in_next);
+                        let (next_len, next_offset) = mf.longest_match(
+                            input,
+                            &mut in_base_offset,
+                            in_next,
+                            cur_len - 1,
+                            max_len,
+                            nice_len,
+                            max_search_depth >> 1,
+                            &mut next_hashes,
+                        );
+                        in_next += 1;
+
+                        if next_len >= cur_len
+                            && 4 * (next_len as i32 - cur_len as i32)
+                                + (bsr32(cur_offset) as i32 - bsr32(next_offset) as i32)
+                                > 2
+                        {
+                            // Better match at next position — emit literal, adopt new match
+                            choose_literal(
+                                &mut self.freqs,
+                                input[in_next - 2],
+                                &mut self.sequences[seq_idx],
+                            );
+                            self.split_stats.observe_literal(input[in_next - 2]);
+                            cur_len = next_len;
+                            cur_offset = next_offset;
+                            continue; // back to have_cur_match
+                        }
+
+                        if lazy2 {
+                            // Second lookahead with quarter search depth
+                            adjust_max_and_nice_len(&mut max_len, &mut nice_len, in_end - in_next);
+                            let (next_len2, next_offset2) = mf.longest_match(
+                                input,
+                                &mut in_base_offset,
+                                in_next,
+                                cur_len - 1,
+                                max_len,
+                                nice_len,
+                                max_search_depth >> 2,
+                                &mut next_hashes,
+                            );
+                            in_next += 1;
+
+                            if next_len2 >= cur_len
+                                && 4 * (next_len2 as i32 - cur_len as i32)
+                                    + (bsr32(cur_offset) as i32 - bsr32(next_offset2) as i32)
+                                    > 6
+                            {
+                                // Much better match 2 ahead — emit 2 literals
+                                choose_literal(
+                                    &mut self.freqs,
+                                    input[in_next - 3],
+                                    &mut self.sequences[seq_idx],
+                                );
+                                self.split_stats.observe_literal(input[in_next - 3]);
+                                choose_literal(
+                                    &mut self.freqs,
+                                    input[in_next - 2],
+                                    &mut self.sequences[seq_idx],
+                                );
+                                self.split_stats.observe_literal(input[in_next - 2]);
+                                cur_len = next_len2;
+                                cur_offset = next_offset2;
+                                continue; // back to have_cur_match
+                            }
+
+                            // No better match — take the original
+                            seq_idx = choose_match(
+                                &mut self.freqs,
+                                cur_len,
+                                cur_offset,
+                                &mut self.sequences,
+                                seq_idx,
+                            );
+                            self.split_stats.observe_match(cur_len);
+                            if cur_len > 3 {
+                                mf.skip_bytes(
+                                    input,
+                                    &mut in_base_offset,
+                                    in_next,
+                                    in_end,
+                                    cur_len - 3,
+                                    &mut next_hashes,
+                                );
+                                in_next += (cur_len - 3) as usize;
+                            }
+                        } else {
+                            // No better match — take the original (lazy, not lazy2)
+                            seq_idx = choose_match(
+                                &mut self.freqs,
+                                cur_len,
+                                cur_offset,
+                                &mut self.sequences,
+                                seq_idx,
+                            );
+                            self.split_stats.observe_match(cur_len);
+                            mf.skip_bytes(
+                                input,
+                                &mut in_base_offset,
+                                in_next,
+                                in_end,
+                                cur_len - 2,
+                                &mut next_hashes,
+                            );
+                            in_next += (cur_len - 2) as usize;
+                        }
+                        break;
+                    }
+                }
+
+                // Check if block should end
+                if in_next >= in_max_block_end
+                    || seq_idx >= SEQ_STORE_LENGTH
+                    || self
+                        .split_stats
+                        .should_end_block(in_block_begin, in_next, in_end)
+                {
+                    break;
+                }
+            }
+
+            let block_length = in_next - in_block_begin;
+            let is_final = in_next >= in_end;
+            finish_block(
+                os,
+                &input[in_block_begin..],
+                block_length,
+                &self.sequences[..=seq_idx],
+                &mut self.freqs,
+                &mut self.codes,
+                &self.static_codes,
+                is_final,
+            );
+        }
+
+        self.hc_mf = Some(mf);
+    }
+
     /// Simple literal-only compressor that exercises the full block flushing path.
     fn compress_literals(&mut self, os: &mut OutputBitstream<'_>, input: &[u8]) {
         let mut pos = 0;
@@ -466,6 +810,82 @@ fn deflate_compress_none(input: &[u8], output: &mut [u8]) -> Result<usize, Compr
     }
 
     Ok(out_pos)
+}
+
+/// Bit scan reverse: floor(log2(v)). v must be > 0.
+#[inline(always)]
+fn bsr32(v: u32) -> u32 {
+    debug_assert!(v > 0);
+    31 - v.leading_zeros()
+}
+
+/// Minimum match length lookup table indexed by number of distinct literal values.
+///
+/// Fewer distinct literals → longer min_match (short matches aren't worth the overhead
+/// when the literal alphabet is small, e.g. DNA or binary data).
+const MIN_MATCH_LEN_TABLE: [u8; 80] = [
+    9, 9, 9, 9, 9, 9, 8, 8, 7, 7, 6, 6, 6, 6, 6, 6, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5,
+    5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4,
+    4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4,
+];
+
+/// Choose minimum match length based on literal diversity and search depth.
+fn choose_min_match_len(num_used_literals: u32, max_search_depth: u32) -> u32 {
+    let mut min_len = if (num_used_literals as usize) >= MIN_MATCH_LEN_TABLE.len() {
+        DEFLATE_MIN_MATCH_LEN
+    } else {
+        MIN_MATCH_LEN_TABLE[num_used_literals as usize] as u32
+    };
+
+    // With low max_search_depth, it may be too hard to find long matches.
+    if max_search_depth < 16 {
+        if max_search_depth < 5 {
+            min_len = min_len.min(4);
+        } else if max_search_depth < 10 {
+            min_len = min_len.min(5);
+        } else {
+            min_len = min_len.min(7);
+        }
+    }
+    min_len
+}
+
+/// Calculate initial minimum match length by scanning literal diversity in the data.
+fn calculate_min_match_len(data: &[u8], max_search_depth: u32) -> u32 {
+    // For very short inputs, static Huffman has a good chance of being best.
+    if data.len() < 512 {
+        return DEFLATE_MIN_MATCH_LEN;
+    }
+
+    // Scan first 4 KiB to estimate literal diversity.
+    let scan_len = data.len().min(4096);
+    let mut used = [false; 256];
+    for &b in &data[..scan_len] {
+        used[b as usize] = true;
+    }
+    let num_used_literals = used.iter().filter(|&&u| u).count() as u32;
+    choose_min_match_len(num_used_literals, max_search_depth)
+}
+
+/// Recalculate minimum match length based on actual frequency distribution.
+fn recalculate_min_match_len(freqs: &DeflateFreqs, max_search_depth: u32) -> u32 {
+    let literal_freq: u32 = freqs.litlen[..DEFLATE_NUM_LITERALS as usize].iter().sum();
+    let cutoff = literal_freq >> 10; // Ignore rarely used literals
+
+    let num_used_literals = freqs.litlen[..DEFLATE_NUM_LITERALS as usize]
+        .iter()
+        .filter(|&&f| f > cutoff)
+        .count() as u32;
+    choose_min_match_len(num_used_literals, max_search_depth)
+}
+
+/// Adjust max_len and nice_len when approaching the end of input.
+#[inline(always)]
+fn adjust_max_and_nice_len(max_len: &mut u32, nice_len: &mut u32, remaining: usize) {
+    if remaining < DEFLATE_MAX_MATCH_LEN as usize {
+        *max_len = remaining as u32;
+        *nice_len = (*nice_len).min(*max_len);
+    }
 }
 
 /// Choose the maximum block end position.
@@ -724,5 +1144,289 @@ mod tests {
         let bound = Compressor::deflate_compress_bound(1_000_000);
         assert!(bound >= 1_000_000);
         assert!(bound < 1_002_000); // shouldn't be too much larger
+    }
+
+    // ---- Greedy strategy tests (levels 2-4) ----
+
+    #[test]
+    fn test_greedy_small() {
+        for level in 2..=4 {
+            roundtrip_verify(b"Hello, World!", level);
+        }
+    }
+
+    #[test]
+    fn test_greedy_repetitive() {
+        let data: Vec<u8> = b"abcabcabcabcabcabcabc".repeat(100);
+        for level in 2..=4 {
+            roundtrip_verify(&data, level);
+        }
+    }
+
+    #[test]
+    fn test_greedy_zeros() {
+        let data = vec![0u8; 100_000];
+        for level in 2..=4 {
+            roundtrip_verify(&data, level);
+        }
+    }
+
+    #[test]
+    fn test_greedy_sequential() {
+        let data: Vec<u8> = (0..=255u8).cycle().take(100_000).collect();
+        for level in 2..=4 {
+            roundtrip_verify(&data, level);
+        }
+    }
+
+    #[test]
+    fn test_greedy_large() {
+        let mut data = Vec::with_capacity(500_000);
+        for i in 0..500_000u32 {
+            data.push(((i * 7 + 13) % 256) as u8);
+        }
+        for level in 2..=4 {
+            roundtrip_verify(&data, level);
+        }
+    }
+
+    // ---- Lazy strategy tests (levels 5-7) ----
+
+    #[test]
+    fn test_lazy_small() {
+        for level in 5..=7 {
+            roundtrip_verify(b"Hello, World!", level);
+        }
+    }
+
+    #[test]
+    fn test_lazy_repetitive() {
+        let data: Vec<u8> = b"abcabcabcabcabcabcabc".repeat(100);
+        for level in 5..=7 {
+            roundtrip_verify(&data, level);
+        }
+    }
+
+    #[test]
+    fn test_lazy_zeros() {
+        let data = vec![0u8; 100_000];
+        for level in 5..=7 {
+            roundtrip_verify(&data, level);
+        }
+    }
+
+    #[test]
+    fn test_lazy_sequential() {
+        let data: Vec<u8> = (0..=255u8).cycle().take(100_000).collect();
+        for level in 5..=7 {
+            roundtrip_verify(&data, level);
+        }
+    }
+
+    #[test]
+    fn test_lazy_large() {
+        let mut data = Vec::with_capacity(500_000);
+        for i in 0..500_000u32 {
+            data.push(((i * 7 + 13) % 256) as u8);
+        }
+        for level in 5..=7 {
+            roundtrip_verify(&data, level);
+        }
+    }
+
+    // ---- Lazy2 strategy tests (levels 8-9) ----
+
+    #[test]
+    fn test_lazy2_small() {
+        for level in 8..=9 {
+            roundtrip_verify(b"Hello, World!", level);
+        }
+    }
+
+    #[test]
+    fn test_lazy2_repetitive() {
+        let data: Vec<u8> = b"abcabcabcabcabcabcabc".repeat(100);
+        for level in 8..=9 {
+            roundtrip_verify(&data, level);
+        }
+    }
+
+    #[test]
+    fn test_lazy2_zeros() {
+        let data = vec![0u8; 100_000];
+        for level in 8..=9 {
+            roundtrip_verify(&data, level);
+        }
+    }
+
+    #[test]
+    fn test_lazy2_sequential() {
+        let data: Vec<u8> = (0..=255u8).cycle().take(100_000).collect();
+        for level in 8..=9 {
+            roundtrip_verify(&data, level);
+        }
+    }
+
+    #[test]
+    fn test_lazy2_large() {
+        let mut data = Vec::with_capacity(500_000);
+        for i in 0..500_000u32 {
+            data.push(((i * 7 + 13) % 256) as u8);
+        }
+        for level in 8..=9 {
+            roundtrip_verify(&data, level);
+        }
+    }
+
+    // ---- Cross-level tests ----
+
+    #[test]
+    fn test_all_levels_roundtrip() {
+        // Test all levels 0-9 with the same data
+        let data: Vec<u8> = (0..=255u8).cycle().take(50_000).collect();
+        for level in 0..=9 {
+            roundtrip_verify(&data, level);
+        }
+    }
+
+    #[test]
+    fn test_all_levels_cross_decompress_c() {
+        // Compress with C libdeflate at each level, decompress with zenflate
+        let data: Vec<u8> = (0..=255u8).cycle().take(50_000).collect();
+        for level in 1..=9 {
+            let mut lc = libdeflater::Compressor::new(
+                libdeflater::CompressionLvl::new(level as i32).unwrap(),
+            );
+            let bound = lc.deflate_compress_bound(data.len());
+            let mut c_compressed = vec![0u8; bound];
+            let c_csize = lc.deflate_compress(&data, &mut c_compressed).unwrap();
+
+            let mut d = crate::Decompressor::new();
+            let mut decompressed = vec![0u8; data.len()];
+            let dsize = d
+                .deflate_decompress(&c_compressed[..c_csize], &mut decompressed)
+                .unwrap_or_else(|e| {
+                    panic!("level {level}: zenflate decompress of C output failed: {e}")
+                });
+            assert_eq!(
+                &decompressed[..dsize],
+                &data[..],
+                "level {level}: C→Rust cross-decompression mismatch"
+            );
+        }
+    }
+
+    #[test]
+    fn test_compression_improves_with_level() {
+        // Higher levels should generally compress at least as well (or better)
+        let data = vec![0u8; 50_000];
+        let mut prev_size = None;
+        for level in 1..=9 {
+            let mut c = Compressor::new(CompressionLevel::new(level));
+            let bound = Compressor::deflate_compress_bound(data.len());
+            let mut compressed = vec![0u8; bound];
+            let csize = c.deflate_compress(&data, &mut compressed).unwrap();
+            // Allow some tolerance — strategy transitions might not always improve
+            if let Some(prev) = prev_size {
+                assert!(
+                    csize <= prev + 100,
+                    "level {level} ({csize}) much worse than level {} ({prev})",
+                    level - 1
+                );
+            }
+            prev_size = Some(csize);
+        }
+    }
+
+    #[test]
+    fn test_zlib_all_levels() {
+        let data =
+            b"Test zlib compression at all levels with sufficient input data for matchfinding.";
+        let data = data.repeat(50);
+        for level in 0..=9 {
+            let mut c = Compressor::new(CompressionLevel::new(level));
+            let bound = Compressor::zlib_compress_bound(data.len());
+            let mut compressed = vec![0u8; bound];
+            let csize = c
+                .zlib_compress(&data, &mut compressed)
+                .unwrap_or_else(|e| panic!("level {level}: zlib compress failed: {e}"));
+
+            let mut d = crate::Decompressor::new();
+            let mut decompressed = vec![0u8; data.len()];
+            let dsize = d
+                .zlib_decompress(&compressed[..csize], &mut decompressed)
+                .unwrap_or_else(|e| panic!("level {level}: zlib decompress failed: {e}"));
+            assert_eq!(
+                &decompressed[..dsize],
+                &data[..],
+                "level {level}: zlib roundtrip mismatch"
+            );
+        }
+    }
+
+    #[test]
+    fn test_gzip_all_levels() {
+        let data =
+            b"Test gzip compression at all levels with sufficient input data for matchfinding.";
+        let data = data.repeat(50);
+        for level in 0..=9 {
+            let mut c = Compressor::new(CompressionLevel::new(level));
+            let bound = Compressor::gzip_compress_bound(data.len());
+            let mut compressed = vec![0u8; bound];
+            let csize = c
+                .gzip_compress(&data, &mut compressed)
+                .unwrap_or_else(|e| panic!("level {level}: gzip compress failed: {e}"));
+
+            let mut d = crate::Decompressor::new();
+            let mut decompressed = vec![0u8; data.len()];
+            let dsize = d
+                .gzip_decompress(&compressed[..csize], &mut decompressed)
+                .unwrap_or_else(|e| panic!("level {level}: gzip decompress failed: {e}"));
+            assert_eq!(
+                &decompressed[..dsize],
+                &data[..],
+                "level {level}: gzip roundtrip mismatch"
+            );
+        }
+    }
+
+    #[test]
+    fn test_window_boundary_crossing() {
+        // Data larger than the 32K matchfinder window to test window sliding
+        let mut data = Vec::with_capacity(100_000);
+        // Create data with repeating patterns at distances > 32K
+        for i in 0..100_000u32 {
+            data.push((i % 251) as u8); // prime modulus for less obvious patterns
+        }
+        for level in 1..=9 {
+            roundtrip_verify(&data, level);
+        }
+    }
+
+    #[test]
+    fn test_block_splitting() {
+        // Data with distinct distributions to trigger block splitting
+        let mut data = Vec::with_capacity(100_000);
+        // First half: low entropy (mostly zeros)
+        data.extend(core::iter::repeat(0u8).take(50_000));
+        // Second half: high entropy (sequential)
+        data.extend((0..=255u8).cycle().take(50_000));
+        for level in 2..=9 {
+            roundtrip_verify(&data, level);
+        }
+    }
+
+    #[test]
+    fn test_short_inputs() {
+        // Test various short inputs that exercise edge cases
+        for level in 1..=9 {
+            roundtrip_verify(b"", level);
+            roundtrip_verify(b"a", level);
+            roundtrip_verify(b"ab", level);
+            roundtrip_verify(b"abc", level);
+            roundtrip_verify(b"abcd", level);
+            roundtrip_verify(b"Hello", level);
+            roundtrip_verify(&[0u8; 100], level);
+        }
     }
 }

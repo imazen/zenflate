@@ -2,6 +2,7 @@
 //!
 //! Ported from libdeflate's `matchfinder_common.h`.
 
+pub(crate) mod hc;
 pub(crate) mod ht;
 
 /// Matchfinder window order (log2 of window size).
@@ -39,7 +40,7 @@ pub(crate) fn lz_extend(strptr: &[u8], matchptr: &[u8], start_len: u32, max_len:
         let mw = u64::from_le_bytes(m.try_into().unwrap());
         let xor = sw ^ mw;
         if xor != 0 {
-            len += (xor.trailing_zeros() >> 3) as u32;
+            len += xor.trailing_zeros() >> 3;
             return len.min(max_len);
         }
         len += 8;
