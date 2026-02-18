@@ -395,6 +395,9 @@ pub(crate) fn flush_block(
 
     // ---- Output literals and matches ----
     //
+    // Use local bitbuf/bitcount to avoid aliasing-induced stores on every add_bits.
+    // The C code uses local variables via ADD_BITS/FLUSH_BITS macros for the same reason.
+    //
     // Compile-time capacity checks (matching libdeflate's CAN_BUFFER):
     //   4 literals:    7 + 4*14 = 63 ≤ 63  ✓
     //   full match:    7 + 14+5+15+13 = 54 ≤ 63  ✓
@@ -406,6 +409,41 @@ pub(crate) fn flush_block(
             + DEFLATE_MAX_EXTRA_OFFSET_BITS
             <= BITBUF_NBITS
     );
+
+    let mut bitbuf = os.bitbuf;
+    let mut bitcount = os.bitcount;
+
+    // Local add_bits: accumulate into register-resident locals
+    macro_rules! add_bits {
+        ($bits:expr, $n:expr) => {{
+            bitbuf |= ($bits as u64) << bitcount;
+            bitcount += $n;
+        }};
+    }
+
+    // Local flush_bits: write through os.buf, keep bitbuf/bitcount local
+    macro_rules! flush_bits {
+        () => {{
+            if os.pos + 8 <= os.buf.len() {
+                os.buf[os.pos..os.pos + 8].copy_from_slice(&bitbuf.to_le_bytes());
+                os.pos += (bitcount >> 3) as usize;
+                bitbuf >>= bitcount & !7;
+                bitcount &= 7;
+            } else {
+                while bitcount >= 8 {
+                    if os.pos < os.buf.len() {
+                        os.buf[os.pos] = bitbuf as u8;
+                        os.pos += 1;
+                        bitcount -= 8;
+                        bitbuf >>= 8;
+                    } else {
+                        os.overflow = true;
+                        break;
+                    }
+                }
+            }
+        }};
+    }
 
     match output {
         BlockOutput::Sequences(sequences) => {
@@ -420,23 +458,23 @@ pub(crate) fn flush_block(
                     let lit1 = in_data[in_pos + 1] as usize;
                     let lit2 = in_data[in_pos + 2] as usize;
                     let lit3 = in_data[in_pos + 3] as usize;
-                    os.add_bits(
+                    add_bits!(
                         active_codes.codewords_litlen[lit0],
-                        active_codes.lens_litlen[lit0] as u32,
+                        active_codes.lens_litlen[lit0] as u32
                     );
-                    os.add_bits(
+                    add_bits!(
                         active_codes.codewords_litlen[lit1],
-                        active_codes.lens_litlen[lit1] as u32,
+                        active_codes.lens_litlen[lit1] as u32
                     );
-                    os.add_bits(
+                    add_bits!(
                         active_codes.codewords_litlen[lit2],
-                        active_codes.lens_litlen[lit2] as u32,
+                        active_codes.lens_litlen[lit2] as u32
                     );
-                    os.add_bits(
+                    add_bits!(
                         active_codes.codewords_litlen[lit3],
-                        active_codes.lens_litlen[lit3] as u32,
+                        active_codes.lens_litlen[lit3] as u32
                     );
-                    os.flush_bits();
+                    flush_bits!();
                     in_pos += 4;
                     litrunlen -= 4;
                 }
@@ -444,27 +482,27 @@ pub(crate) fn flush_block(
                 if litrunlen > 0 {
                     let lit = in_data[in_pos] as usize;
                     in_pos += 1;
-                    os.add_bits(
+                    add_bits!(
                         active_codes.codewords_litlen[lit],
-                        active_codes.lens_litlen[lit] as u32,
+                        active_codes.lens_litlen[lit] as u32
                     );
                     if litrunlen > 1 {
                         let lit = in_data[in_pos] as usize;
                         in_pos += 1;
-                        os.add_bits(
+                        add_bits!(
                             active_codes.codewords_litlen[lit],
-                            active_codes.lens_litlen[lit] as u32,
+                            active_codes.lens_litlen[lit] as u32
                         );
                         if litrunlen > 2 {
                             let lit = in_data[in_pos] as usize;
                             in_pos += 1;
-                            os.add_bits(
+                            add_bits!(
                                 active_codes.codewords_litlen[lit],
-                                active_codes.lens_litlen[lit] as u32,
+                                active_codes.lens_litlen[lit] as u32
                             );
                         }
                     }
-                    os.flush_bits();
+                    flush_bits!();
                 }
 
                 if length == 0 {
@@ -473,19 +511,19 @@ pub(crate) fn flush_block(
 
                 // Output match — single flush for all bits
                 let offset_slot = seq.offset_slot as usize;
-                os.add_bits(
+                add_bits!(
                     full_len_codewords[length as usize],
-                    full_len_lens[length as usize] as u32,
+                    full_len_lens[length as usize] as u32
                 );
-                os.add_bits(
+                add_bits!(
                     active_codes.codewords_offset[offset_slot],
-                    active_codes.lens_offset[offset_slot] as u32,
+                    active_codes.lens_offset[offset_slot] as u32
                 );
-                os.add_bits(
+                add_bits!(
                     seq.offset as u32 - DEFLATE_OFFSET_BASE[offset_slot],
-                    DEFLATE_OFFSET_EXTRA_BITS[offset_slot] as u32,
+                    DEFLATE_OFFSET_EXTRA_BITS[offset_slot] as u32
                 );
-                os.flush_bits();
+                flush_bits!();
 
                 in_pos += length as usize;
             }
@@ -504,27 +542,27 @@ pub(crate) fn flush_block(
                 if length == 1 {
                     // Literal
                     let lit = offset as usize;
-                    os.add_bits(
+                    add_bits!(
                         active_codes.codewords_litlen[lit],
-                        active_codes.lens_litlen[lit] as u32,
+                        active_codes.lens_litlen[lit] as u32
                     );
-                    os.flush_bits();
+                    flush_bits!();
                 } else {
                     // Match — single flush for all bits
                     let os_idx = offset_slot_full[offset as usize] as usize;
-                    os.add_bits(
+                    add_bits!(
                         full_len_codewords[length as usize],
-                        full_len_lens[length as usize] as u32,
+                        full_len_lens[length as usize] as u32
                     );
-                    os.add_bits(
+                    add_bits!(
                         active_codes.codewords_offset[os_idx],
-                        active_codes.lens_offset[os_idx] as u32,
+                        active_codes.lens_offset[os_idx] as u32
                     );
-                    os.add_bits(
+                    add_bits!(
                         offset - DEFLATE_OFFSET_BASE[os_idx],
-                        DEFLATE_OFFSET_EXTRA_BITS[os_idx] as u32,
+                        DEFLATE_OFFSET_EXTRA_BITS[os_idx] as u32
                     );
-                    os.flush_bits();
+                    flush_bits!();
                 }
                 cur_idx += length as usize;
             }
@@ -532,11 +570,15 @@ pub(crate) fn flush_block(
     }
 
     // Output end-of-block symbol
-    os.add_bits(
+    add_bits!(
         active_codes.codewords_litlen[DEFLATE_END_OF_BLOCK as usize],
-        active_codes.lens_litlen[DEFLATE_END_OF_BLOCK as usize] as u32,
+        active_codes.lens_litlen[DEFLATE_END_OF_BLOCK as usize] as u32
     );
-    os.flush_bits();
+    flush_bits!();
+
+    // Sync local state back to output bitstream
+    os.bitbuf = bitbuf;
+    os.bitcount = bitcount;
 }
 
 /// Write uncompressed block(s), splitting at UINT16_MAX boundaries.
