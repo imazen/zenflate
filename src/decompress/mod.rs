@@ -25,8 +25,8 @@ const HUFFDEC_END_OF_BLOCK: u32 = 0x0000_2000;
 const CONSUMABLE_NBITS: u32 = 56; // MAX_BITSLEFT(63) - 7
 
 // Fastloop safety margins — how many bytes the fastloop can read/write per iteration.
-// Output: 2 extra literals + max match (258) + no overrun (safe Rust)
-const FASTLOOP_MAX_BYTES_WRITTEN: usize = 2 + crate::constants::DEFLATE_MAX_MATCH_LEN as usize;
+// Output: 2 extra literals + max match (258) + word overrun (7 bytes from 8-byte copies)
+const FASTLOOP_MAX_BYTES_WRITTEN: usize = 2 + crate::constants::DEFLATE_MAX_MATCH_LEN as usize + 7;
 // Input: worst-case bytes consumed per iteration + 8-byte read-ahead for branchless refill
 const FASTLOOP_MAX_BYTES_READ: usize = 32;
 
@@ -443,6 +443,16 @@ fn refill_bits_fast(bitbuf: &mut u64, bitsleft: &mut u32, input: &[u8], in_pos: 
     *bitbuf |= word << *bitsleft;
     *in_pos += 7 - ((*bitsleft as usize >> 3) & 7);
     *bitsleft |= 56;
+}
+
+/// Copy 8 bytes from `output[src]` to `output[dst]` via a stack temporary.
+/// The read completes before the write, so overlapping src/dst ranges are safe.
+/// Compiles to a single 8-byte load + store on x86-64.
+#[inline(always)]
+fn copy_word(output: &mut [u8], src: usize, dst: usize) {
+    let mut tmp = [0u8; 8];
+    tmp.copy_from_slice(&output[src..src + 8]);
+    output[dst..dst + 8].copy_from_slice(&tmp);
 }
 
 // ---------------------------------------------------------------------------
@@ -1013,24 +1023,38 @@ impl Decompressor {
                     entry = self.litlen_decode_table[(bitbuf & litlen_tablemask) as usize];
                     refill_bits_fast(&mut bitbuf, &mut bitsleft, input, &mut in_pos);
 
-                    // Copy match data (may overlap when offset < length)
+                    // Copy match data — word-at-a-time where possible.
+                    // The fastloop guarantees enough output margin for
+                    // up to 7 bytes of overrun from 8-byte word copies.
                     let src_start = out_pos - offset;
+                    let end = out_pos + length;
                     if offset >= length {
+                        // Non-overlapping: memcpy via copy_within
                         output.copy_within(src_start..src_start + length, out_pos);
                     } else if offset == 1 {
+                        // RLE: fill with repeated byte
                         let byte = output[src_start];
                         output[out_pos..out_pos + length].fill(byte);
-                    } else if length <= 32 {
-                        for i in 0..length {
-                            output[out_pos + i] = output[src_start + i];
+                    } else if offset < 8 {
+                        // Small offset (2-7): stride-by-offset word copy.
+                        // Each 8-byte write places `offset` correct bytes;
+                        // trailing bytes get fixed by subsequent iterations.
+                        // Bounded work slice + explicit d+8 condition lets the
+                        // compiler prove all word accesses are in-bounds.
+                        let work = &mut output[src_start..end + 8];
+                        let mut d = offset;
+                        while d + 8 <= work.len() {
+                            copy_word(work, d - offset, d);
+                            d += offset;
                         }
                     } else {
+                        // Overlapping with offset >= 8: memmove for offset
+                        // bytes, then forward byte copy for remainder.
+                        // Avoids a second memmove call for small remainders
+                        // (common case: offset=256, length=258 → 2-byte tail).
                         output.copy_within(src_start..src_start + offset, out_pos);
-                        let mut copied = offset;
-                        while copied < length {
-                            let chunk = copied.min(length - copied);
-                            output.copy_within(out_pos..out_pos + chunk, out_pos + copied);
-                            copied += chunk;
+                        for i in offset..length {
+                            output[out_pos + i] = output[src_start + i];
                         }
                     }
                     out_pos += length;
