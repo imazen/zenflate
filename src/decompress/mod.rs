@@ -936,10 +936,29 @@ impl Decompressor {
                     return Err(bad);
                 }
 
-                // Copy match byte-at-a-time (handles overlapping copies)
+                // Copy match data (may overlap when offset < length)
                 let src_start = out_pos - offset;
-                for i in 0..length {
-                    output[out_pos + i] = output[src_start + i];
+                if offset >= length {
+                    // No overlap: copy_within is efficient (uses memcpy)
+                    output.copy_within(src_start..src_start + length, out_pos);
+                } else if offset == 1 {
+                    // RLE: fill with single byte (auto-vectorizes to memset)
+                    let byte = output[src_start];
+                    output[out_pos..out_pos + length].fill(byte);
+                } else if length <= 32 {
+                    // Short overlapping match: byte-at-a-time avoids overhead
+                    for i in 0..length {
+                        output[out_pos + i] = output[src_start + i];
+                    }
+                } else {
+                    // Long overlapping copy: doubling strategy O(log n) memcpys
+                    output.copy_within(src_start..src_start + offset, out_pos);
+                    let mut copied = offset;
+                    while copied < length {
+                        let chunk = copied.min(length - copied);
+                        output.copy_within(out_pos..out_pos + chunk, out_pos + copied);
+                        copied += chunk;
+                    }
                 }
                 out_pos += length;
             }
