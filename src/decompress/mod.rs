@@ -24,6 +24,12 @@ const HUFFDEC_END_OF_BLOCK: u32 = 0x0000_2000;
 // Bitstream constants (64-bit)
 const CONSUMABLE_NBITS: u32 = 56; // MAX_BITSLEFT(63) - 7
 
+// Fastloop safety margins — how many bytes the fastloop can read/write per iteration.
+// Output: 2 extra literals + max match (258) + no overrun (safe Rust)
+const FASTLOOP_MAX_BYTES_WRITTEN: usize = 2 + crate::constants::DEFLATE_MAX_MATCH_LEN as usize;
+// Input: worst-case bytes consumed per iteration + 8-byte read-ahead for branchless refill
+const FASTLOOP_MAX_BYTES_READ: usize = 32;
+
 // DEFLATE format constants (local copies for internal use)
 const DEFLATE_BLOCKTYPE_UNCOMPRESSED: u32 = 0;
 const DEFLATE_BLOCKTYPE_STATIC_HUFFMAN: u32 = 1;
@@ -425,6 +431,18 @@ fn refill_bits(
         }
     }
     Ok(())
+}
+
+/// Branchless bitstream refill for the fastloop.
+///
+/// Same as the hot path of `refill_bits`, but without the end-of-input check
+/// or overread tracking. Only safe to call when `in_pos + 8 <= input.len()`.
+#[inline(always)]
+fn refill_bits_fast(bitbuf: &mut u64, bitsleft: &mut u32, input: &[u8], in_pos: &mut usize) {
+    let word = u64::from_le_bytes(input[*in_pos..*in_pos + 8].try_into().unwrap());
+    *bitbuf |= word << *bitsleft;
+    *in_pos += 7 - ((*bitsleft as usize >> 3) & 7);
+    *bitsleft |= 56;
 }
 
 // ---------------------------------------------------------------------------
@@ -874,110 +892,254 @@ impl Decompressor {
                 return Err(bad);
             }
 
-            // --- Generic decode loop (literals and matches) ---
+            // --- Fastloop + generic decode loop (literals and matches) ---
             let litlen_tablemask = bitmask(self.litlen_tablebits);
+            let in_fastloop_end = input.len().saturating_sub(FASTLOOP_MAX_BYTES_READ);
+            let out_fastloop_end = output.len().saturating_sub(FASTLOOP_MAX_BYTES_WRITTEN);
 
-            loop {
-                refill_bits(
-                    &mut bitbuf,
-                    &mut bitsleft,
-                    input,
-                    &mut in_pos,
-                    &mut overread_count,
-                )?;
+            // The fastloop processes the bulk of data without per-item bounds
+            // checks. It exits when input/output margins are exhausted or
+            // end-of-block is reached. The generic loop handles the remainder.
+            let mut block_done = false;
 
+            if in_pos < in_fastloop_end && out_pos < out_fastloop_end {
+                // Initial refill and preload
+                refill_bits_fast(&mut bitbuf, &mut bitsleft, input, &mut in_pos);
                 let mut entry = self.litlen_decode_table[(bitbuf & litlen_tablemask) as usize];
-                let mut saved_bitbuf = bitbuf;
-                bitbuf >>= (entry & 0xFF) as u64;
-                bitsleft -= entry & 0xFF;
 
-                // Resolve subtable if needed
-                if entry & HUFFDEC_SUBTABLE_POINTER != 0 {
-                    entry = self.litlen_decode_table[((entry >> 16) as u64
-                        + extract_varbits(bitbuf, (entry >> 8) & 0x3F))
-                        as usize];
-                    saved_bitbuf = bitbuf;
+                'fastloop: loop {
+                    // Consume entry bits
+                    let mut saved_bitbuf = bitbuf;
                     bitbuf >>= (entry & 0xFF) as u64;
                     bitsleft -= entry & 0xFF;
+
+                    // --- Fast literal path: decode up to 3 literals ---
+                    if entry & HUFFDEC_LITERAL != 0 {
+                        // 1st literal (the primary item)
+                        let lit = (entry >> 16) as u8;
+                        entry = self.litlen_decode_table[(bitbuf & litlen_tablemask) as usize];
+                        saved_bitbuf = bitbuf;
+                        bitbuf >>= (entry & 0xFF) as u64;
+                        bitsleft -= entry & 0xFF;
+                        output[out_pos] = lit;
+                        out_pos += 1;
+
+                        if entry & HUFFDEC_LITERAL != 0 {
+                            // 2nd literal (extra)
+                            let lit = (entry >> 16) as u8;
+                            entry = self.litlen_decode_table[(bitbuf & litlen_tablemask) as usize];
+                            saved_bitbuf = bitbuf;
+                            bitbuf >>= (entry & 0xFF) as u64;
+                            bitsleft -= entry & 0xFF;
+                            output[out_pos] = lit;
+                            out_pos += 1;
+
+                            if entry & HUFFDEC_LITERAL != 0 {
+                                // 3rd literal (replaces primary for next iter)
+                                output[out_pos] = (entry >> 16) as u8;
+                                out_pos += 1;
+                                entry =
+                                    self.litlen_decode_table[(bitbuf & litlen_tablemask) as usize];
+                                refill_bits_fast(&mut bitbuf, &mut bitsleft, input, &mut in_pos);
+                                if in_pos < in_fastloop_end && out_pos < out_fastloop_end {
+                                    continue 'fastloop;
+                                }
+                                break 'fastloop;
+                            }
+                        }
+                        // Entry is now non-literal, fall through to handle it
+                    }
+
+                    // --- Exceptional: subtable or end-of-block ---
+                    if entry & HUFFDEC_EXCEPTIONAL != 0 {
+                        if entry & HUFFDEC_END_OF_BLOCK != 0 {
+                            block_done = true;
+                            break 'fastloop;
+                        }
+                        // Subtable lookup
+                        entry = self.litlen_decode_table[((entry >> 16) as u64
+                            + extract_varbits(bitbuf, (entry >> 8) & 0x3F))
+                            as usize];
+                        saved_bitbuf = bitbuf;
+                        bitbuf >>= (entry & 0xFF) as u64;
+                        bitsleft -= entry & 0xFF;
+
+                        if entry & HUFFDEC_LITERAL != 0 {
+                            // Literal from subtable
+                            output[out_pos] = (entry >> 16) as u8;
+                            out_pos += 1;
+                            entry = self.litlen_decode_table[(bitbuf & litlen_tablemask) as usize];
+                            refill_bits_fast(&mut bitbuf, &mut bitsleft, input, &mut in_pos);
+                            if in_pos < in_fastloop_end && out_pos < out_fastloop_end {
+                                continue 'fastloop;
+                            }
+                            break 'fastloop;
+                        }
+                        if entry & HUFFDEC_END_OF_BLOCK != 0 {
+                            block_done = true;
+                            break 'fastloop;
+                        }
+                        // Length from subtable, fall through
+                    }
+
+                    // --- Decode match length ---
+                    let length = (entry >> 16) as usize
+                        + (extract_varbits8(saved_bitbuf, entry) >> ((entry >> 8) as u8 as u64))
+                            as usize;
+
+                    // --- Decode match offset ---
+                    let mut oentry =
+                        self.offset_decode_table[(bitbuf & bitmask(OFFSET_TABLEBITS)) as usize];
+                    if oentry & HUFFDEC_EXCEPTIONAL != 0 {
+                        bitbuf >>= OFFSET_TABLEBITS as u64;
+                        bitsleft -= OFFSET_TABLEBITS;
+                        oentry = self.offset_decode_table[((oentry >> 16) as u64
+                            + extract_varbits(bitbuf, (oentry >> 8) & 0x3F))
+                            as usize];
+                    }
+                    let saved_bitbuf_off = bitbuf;
+                    bitbuf >>= (oentry & 0xFF) as u64;
+                    bitsleft -= oentry & 0xFF;
+
+                    let offset = (oentry >> 16) as usize
+                        + (extract_varbits8(saved_bitbuf_off, oentry)
+                            >> ((oentry >> 8) as u8 as u64)) as usize;
+
+                    if offset == 0 || offset > out_pos {
+                        return Err(bad);
+                    }
+
+                    // Preload next entry and refill BEFORE copy to overlap latency
+                    entry = self.litlen_decode_table[(bitbuf & litlen_tablemask) as usize];
+                    refill_bits_fast(&mut bitbuf, &mut bitsleft, input, &mut in_pos);
+
+                    // Copy match data (may overlap when offset < length)
+                    let src_start = out_pos - offset;
+                    if offset >= length {
+                        output.copy_within(src_start..src_start + length, out_pos);
+                    } else if offset == 1 {
+                        let byte = output[src_start];
+                        output[out_pos..out_pos + length].fill(byte);
+                    } else if length <= 32 {
+                        for i in 0..length {
+                            output[out_pos + i] = output[src_start + i];
+                        }
+                    } else {
+                        output.copy_within(src_start..src_start + offset, out_pos);
+                        let mut copied = offset;
+                        while copied < length {
+                            let chunk = copied.min(length - copied);
+                            output.copy_within(out_pos..out_pos + chunk, out_pos + copied);
+                            copied += chunk;
+                        }
+                    }
+                    out_pos += length;
+
+                    if in_pos >= in_fastloop_end || out_pos >= out_fastloop_end {
+                        break 'fastloop;
+                    }
                 }
+            }
 
-                let value = entry >> 16;
+            // --- Generic decode loop (handles remainder after fastloop) ---
+            if !block_done {
+                loop {
+                    refill_bits(
+                        &mut bitbuf,
+                        &mut bitsleft,
+                        input,
+                        &mut in_pos,
+                        &mut overread_count,
+                    )?;
 
-                // Literal?
-                if entry & HUFFDEC_LITERAL != 0 {
-                    if out_pos >= output.len() {
+                    let mut entry = self.litlen_decode_table[(bitbuf & litlen_tablemask) as usize];
+                    let mut saved_bitbuf = bitbuf;
+                    bitbuf >>= (entry & 0xFF) as u64;
+                    bitsleft -= entry & 0xFF;
+
+                    // Resolve subtable if needed
+                    if entry & HUFFDEC_SUBTABLE_POINTER != 0 {
+                        entry = self.litlen_decode_table[((entry >> 16) as u64
+                            + extract_varbits(bitbuf, (entry >> 8) & 0x3F))
+                            as usize];
+                        saved_bitbuf = bitbuf;
+                        bitbuf >>= (entry & 0xFF) as u64;
+                        bitsleft -= entry & 0xFF;
+                    }
+
+                    let value = entry >> 16;
+
+                    // Literal?
+                    if entry & HUFFDEC_LITERAL != 0 {
+                        if out_pos >= output.len() {
+                            return Err(no_space);
+                        }
+                        output[out_pos] = value as u8;
+                        out_pos += 1;
+                        continue;
+                    }
+
+                    // End of block?
+                    if entry & HUFFDEC_END_OF_BLOCK != 0 {
+                        break;
+                    }
+
+                    // Length: base + extra bits
+                    let length = value as usize
+                        + (extract_varbits8(saved_bitbuf, entry) >> ((entry >> 8) as u8 as u64))
+                            as usize;
+
+                    if length > output.len() - out_pos {
                         return Err(no_space);
                     }
-                    output[out_pos] = value as u8;
-                    out_pos += 1;
-                    continue;
-                }
 
-                // End of block?
-                if entry & HUFFDEC_END_OF_BLOCK != 0 {
-                    break;
-                }
+                    // On 64-bit: CAN_CONSUME(48) is true, no refill needed here
 
-                // Length: base + extra bits
-                let length = value as usize
-                    + (extract_varbits8(saved_bitbuf, entry) >> ((entry >> 8) as u8 as u64))
-                        as usize;
-
-                if length > output.len() - out_pos {
-                    return Err(no_space);
-                }
-
-                // On 64-bit: CAN_CONSUME(48) is true, no refill needed here
-
-                // Decode offset
-                let mut oentry =
-                    self.offset_decode_table[(bitbuf & bitmask(OFFSET_TABLEBITS)) as usize];
-                if oentry & HUFFDEC_EXCEPTIONAL != 0 {
-                    // Offset requires subtable
-                    bitbuf >>= OFFSET_TABLEBITS as u64;
-                    bitsleft -= OFFSET_TABLEBITS;
-                    oentry = self.offset_decode_table[((oentry >> 16) as u64
-                        + extract_varbits(bitbuf, (oentry >> 8) & 0x3F))
-                        as usize];
-                }
-                let saved_bitbuf_off = bitbuf;
-                bitbuf >>= (oentry & 0xFF) as u64;
-                bitsleft -= oentry & 0xFF;
-
-                let offset = (oentry >> 16) as usize
-                    + (extract_varbits8(saved_bitbuf_off, oentry) >> ((oentry >> 8) as u8 as u64))
-                        as usize;
-
-                // Validate offset
-                if offset == 0 || offset > out_pos {
-                    return Err(bad);
-                }
-
-                // Copy match data (may overlap when offset < length)
-                let src_start = out_pos - offset;
-                if offset >= length {
-                    // No overlap: copy_within is efficient (uses memcpy)
-                    output.copy_within(src_start..src_start + length, out_pos);
-                } else if offset == 1 {
-                    // RLE: fill with single byte (auto-vectorizes to memset)
-                    let byte = output[src_start];
-                    output[out_pos..out_pos + length].fill(byte);
-                } else if length <= 32 {
-                    // Short overlapping match: byte-at-a-time avoids overhead
-                    for i in 0..length {
-                        output[out_pos + i] = output[src_start + i];
+                    // Decode offset
+                    let mut oentry =
+                        self.offset_decode_table[(bitbuf & bitmask(OFFSET_TABLEBITS)) as usize];
+                    if oentry & HUFFDEC_EXCEPTIONAL != 0 {
+                        bitbuf >>= OFFSET_TABLEBITS as u64;
+                        bitsleft -= OFFSET_TABLEBITS;
+                        oentry = self.offset_decode_table[((oentry >> 16) as u64
+                            + extract_varbits(bitbuf, (oentry >> 8) & 0x3F))
+                            as usize];
                     }
-                } else {
-                    // Long overlapping copy: doubling strategy O(log n) memcpys
-                    output.copy_within(src_start..src_start + offset, out_pos);
-                    let mut copied = offset;
-                    while copied < length {
-                        let chunk = copied.min(length - copied);
-                        output.copy_within(out_pos..out_pos + chunk, out_pos + copied);
-                        copied += chunk;
+                    let saved_bitbuf_off = bitbuf;
+                    bitbuf >>= (oentry & 0xFF) as u64;
+                    bitsleft -= oentry & 0xFF;
+
+                    let offset = (oentry >> 16) as usize
+                        + (extract_varbits8(saved_bitbuf_off, oentry)
+                            >> ((oentry >> 8) as u8 as u64)) as usize;
+
+                    // Validate offset
+                    if offset == 0 || offset > out_pos {
+                        return Err(bad);
                     }
+
+                    // Copy match data (may overlap when offset < length)
+                    let src_start = out_pos - offset;
+                    if offset >= length {
+                        output.copy_within(src_start..src_start + length, out_pos);
+                    } else if offset == 1 {
+                        let byte = output[src_start];
+                        output[out_pos..out_pos + length].fill(byte);
+                    } else if length <= 32 {
+                        for i in 0..length {
+                            output[out_pos + i] = output[src_start + i];
+                        }
+                    } else {
+                        output.copy_within(src_start..src_start + offset, out_pos);
+                        let mut copied = offset;
+                        while copied < length {
+                            let chunk = copied.min(length - copied);
+                            output.copy_within(out_pos..out_pos + chunk, out_pos + copied);
+                            copied += chunk;
+                        }
+                    }
+                    out_pos += length;
                 }
-                out_pos += length;
             }
 
             if is_final {

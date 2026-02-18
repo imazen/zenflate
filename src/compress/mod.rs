@@ -1623,9 +1623,8 @@ mod tests {
         // Compress with C libdeflate at each level, decompress with zenflate
         let data: Vec<u8> = (0..=255u8).cycle().take(50_000).collect();
         for level in 1..=12 {
-            let mut lc = libdeflater::Compressor::new(
-                libdeflater::CompressionLvl::new(level).unwrap(),
-            );
+            let mut lc =
+                libdeflater::Compressor::new(libdeflater::CompressionLvl::new(level).unwrap());
             let bound = lc.deflate_compress_bound(data.len());
             let mut c_compressed = vec![0u8; bound];
             let c_csize = lc.deflate_compress(&data, &mut c_compressed).unwrap();

@@ -124,7 +124,9 @@ fn bench_decompress(c: &mut Criterion) {
             let mut decompressor = zenflate::Decompressor::new();
             let mut out = vec![0u8; data.len()];
             b.iter(|| {
-                decompressor.deflate_decompress(compressed, &mut out).unwrap();
+                decompressor
+                    .deflate_decompress(compressed, &mut out)
+                    .unwrap();
             });
         });
 
