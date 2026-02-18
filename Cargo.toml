@@ -1,0 +1,22 @@
+[package]
+name = "zenflate"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Pure Rust DEFLATE/zlib/gzip compression and decompression, ported from libdeflate"
+license = "MIT"
+repository = "https://github.com/imazen/zenflate"
+categories = ["compression"]
+keywords = ["deflate", "zlib", "gzip", "compression", "decompression"]
+
+[features]
+default = ["std"]
+std = ["alloc", "archmage/std", "magetypes/std"]
+alloc = []
+
+[dependencies]
+archmage = { version = "0.7", default-features = false }
+magetypes = { version = "0.7", default-features = false }
+
+[dev-dependencies]
+libdeflater = "1.25"
