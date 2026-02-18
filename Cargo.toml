@@ -10,9 +10,10 @@ categories = ["compression"]
 keywords = ["deflate", "zlib", "gzip", "compression", "decompression"]
 
 [features]
-default = ["std"]
+default = ["std", "avx512"]
 std = ["alloc", "archmage/std", "magetypes/std"]
 alloc = []
+avx512 = ["archmage/avx512", "magetypes/avx512", "safe_unaligned_simd/avx512"]
 
 [dependencies]
 archmage = { version = "0.7", default-features = false, features = ["macros", "safe_unaligned_simd"] }

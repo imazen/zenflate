@@ -1,7 +1,9 @@
 //! Adler-32 checksum, ported from libdeflate's adler32.c.
 //!
-//! Uses SIMD acceleration (AVX2) when available via archmage, falling back
-//! to a 4-way parallel accumulator scalar pattern.
+//! Uses SIMD acceleration when available via archmage:
+//! - AVX-512 VNNI (x86_64-v4x): `vpdpbusd` for single-instruction dot products
+//! - AVX2 (x86_64-v3): unpack + `pmaddwd` + `psadbw`
+//! - Scalar fallback: 4-way parallel accumulator
 
 use archmage::prelude::*;
 
@@ -26,7 +28,176 @@ const MAX_CHUNK_LEN: usize = 5552;
 /// ```
 #[allow(unexpected_cfgs)]
 pub fn adler32(adler: u32, data: &[u8]) -> u32 {
-    incant!(adler32_impl(adler, data))
+    // modern = AVX-512 VNNI, v3 = AVX2, scalar = fallback
+    #[cfg(feature = "avx512")]
+    {
+        incant!(adler32_impl(adler, data), [modern, v3])
+    }
+    #[cfg(not(feature = "avx512"))]
+    {
+        incant!(adler32_impl(adler, data), [v3])
+    }
+}
+
+// ---------------------------------------------------------------------------
+// AVX-512 VNNI implementation (x86_64-v4x: Avx512ModernToken = AVX-512 + VNNI)
+//
+// Uses `vpdpbusd` (dot product of unsigned/signed bytes to i32) for both s1
+// and s2 accumulation. Processes 4*VL=128 bytes per inner loop iteration with
+// 4 independent accumulators for instruction-level parallelism.
+// ---------------------------------------------------------------------------
+#[cfg(all(target_arch = "x86_64", feature = "avx512"))]
+#[arcane]
+#[allow(clippy::incompatible_msrv)] // avx512 feature requires rustc 1.89+
+fn adler32_impl_modern(_token: Avx512ModernToken, adler: u32, data: &[u8]) -> u32 {
+    use safe_unaligned_simd::x86_64::_mm256_loadu_si256;
+
+    const VL: usize = 32;
+    // Max chunk: vpdpbusd accumulates u8*i8 into i32 per 4-byte group.
+    // Each iteration adds up to 4*255 = 1020 per i32 element. After N iterations
+    // of 4*VL bytes, each element has at most 4*N*255. To avoid overflow:
+    // 4*N*255 < 2^31 → N < 2_105_376. With 128 bytes/iter, that's 269M bytes.
+    // But s2 overflow limits us to MAX_CHUNK_LEN = 5552.
+    // Round down to multiple of 4*VL = 128: 5504
+    const MAX_SIMD_CHUNK: usize = MAX_CHUNK_LEN & !(4 * VL - 1);
+
+    // Weight vector: [32, 31, 30, ..., 1] for s2 weighted accumulation within one VL block
+    #[repr(align(32))]
+    struct Aligned32([i8; 32]);
+
+    static MULTS: Aligned32 = Aligned32([
+        32, 31, 30, 29, 28, 27, 26, 25, 24, 23, 22, 21, 20, 19, 18, 17, 16, 15, 14, 13, 12, 11, 10,
+        9, 8, 7, 6, 5, 4, 3, 2, 1,
+    ]);
+
+    let mults = _mm256_loadu_si256(&MULTS.0);
+    let ones = _mm256_set1_epi8(1);
+    let zeroes = _mm256_setzero_si256();
+
+    let mut s1 = adler & 0xFFFF;
+    let mut s2 = adler >> 16;
+    let mut remaining = data;
+
+    while !remaining.is_empty() {
+        let n = remaining.len().min(MAX_SIMD_CHUNK);
+        let (chunk, rest) = remaining.split_at(n);
+        remaining = rest;
+
+        let mut p = chunk;
+
+        if p.len() >= 4 * VL {
+            // 4-accumulator VNNI loop
+            let mut v_s1_a = zeroes;
+            let mut v_s1_b = zeroes;
+            let mut v_s1_c = zeroes;
+            let mut v_s1_d = zeroes;
+            let mut v_s2_a = zeroes;
+            let mut v_s2_b = zeroes;
+            let mut v_s2_c = zeroes;
+            let mut v_s2_d = zeroes;
+            let mut v_s1_sums_a = zeroes;
+            let mut v_s1_sums_b = zeroes;
+            let mut v_s1_sums_c = zeroes;
+            let mut v_s1_sums_d = zeroes;
+
+            // Pre-adjust s2 for the vectorized portion
+            let vectorized_len = p.len() & !(4 * VL - 1);
+            s2 += s1 * vectorized_len as u32;
+
+            while p.len() >= 4 * VL {
+                let data_a: &[u8; 32] = p[..32].try_into().unwrap();
+                let data_b: &[u8; 32] = p[32..64].try_into().unwrap();
+                let data_c: &[u8; 32] = p[64..96].try_into().unwrap();
+                let data_d: &[u8; 32] = p[96..128].try_into().unwrap();
+                let va = _mm256_loadu_si256(data_a);
+                let vb = _mm256_loadu_si256(data_b);
+                let vc = _mm256_loadu_si256(data_c);
+                let vd = _mm256_loadu_si256(data_d);
+
+                // Track running s1 for across-iteration s2 weighting
+                v_s1_sums_a = _mm256_add_epi32(v_s1_sums_a, v_s1_a);
+                v_s1_sums_b = _mm256_add_epi32(v_s1_sums_b, v_s1_b);
+                v_s1_sums_c = _mm256_add_epi32(v_s1_sums_c, v_s1_c);
+                v_s1_sums_d = _mm256_add_epi32(v_s1_sums_d, v_s1_d);
+
+                // s2: weighted byte sums via vpdpbusd(data, weights)
+                v_s2_a = _mm256_dpbusd_epi32(v_s2_a, va, mults);
+                v_s2_b = _mm256_dpbusd_epi32(v_s2_b, vb, mults);
+                v_s2_c = _mm256_dpbusd_epi32(v_s2_c, vc, mults);
+                v_s2_d = _mm256_dpbusd_epi32(v_s2_d, vd, mults);
+
+                // s1: sum of all bytes via vpdpbusd(data, ones)
+                v_s1_a = _mm256_dpbusd_epi32(v_s1_a, va, ones);
+                v_s1_b = _mm256_dpbusd_epi32(v_s1_b, vb, ones);
+                v_s1_c = _mm256_dpbusd_epi32(v_s1_c, vc, ones);
+                v_s1_d = _mm256_dpbusd_epi32(v_s1_d, vd, ones);
+
+                p = &p[4 * VL..];
+            }
+
+            // Reduction: combine 4 accumulators into one, accounting for
+            // within-iteration position weighting.
+            //
+            // data_a is at positions [0..VL), weight offset = 3*VL per byte
+            // data_b at [VL..2*VL), weight offset = 2*VL per byte
+            // data_c at [2*VL..3*VL), weight offset = VL per byte
+            // data_d at [3*VL..4*VL), weight offset = 0
+            //
+            // Missing s2 = 3*VL*s1_a + 2*VL*s1_b + VL*s1_c
+            // = 2*VL*(s1_a + s1_b) + VL*(s1_a + s1_c)
+            let tmp0 = _mm256_add_epi32(v_s1_a, v_s1_b);
+            let tmp1 = _mm256_add_epi32(v_s1_a, v_s1_c);
+
+            // Combine s1_sums across all 4 accumulators
+            let total_s1_sums = _mm256_add_epi32(
+                _mm256_add_epi32(v_s1_sums_a, v_s1_sums_b),
+                _mm256_add_epi32(v_s1_sums_c, v_s1_sums_d),
+            );
+
+            // Combined s1
+            let v_s1 = _mm256_add_epi32(_mm256_add_epi32(tmp0, v_s1_c), v_s1_d);
+
+            // Combined s2 with position weighting:
+            // 4*VL * total_s1_sums + 2*VL * (s1_a + s1_b) + VL * (s1_a + s1_c)
+            // + s2_a + s2_b + s2_c + s2_d
+            let v_s2 = {
+                let cross_iter = _mm256_slli_epi32(total_s1_sums, 7); // * 128 = 4*VL
+                let pos_2vl = _mm256_slli_epi32(tmp0, 6); // * 64 = 2*VL
+                let pos_vl = _mm256_slli_epi32(tmp1, 5); // * 32 = VL
+                let sum_s2 = _mm256_add_epi32(
+                    _mm256_add_epi32(v_s2_a, v_s2_b),
+                    _mm256_add_epi32(v_s2_c, v_s2_d),
+                );
+                _mm256_add_epi32(
+                    _mm256_add_epi32(cross_iter, sum_s2),
+                    _mm256_add_epi32(pos_2vl, pos_vl),
+                )
+            };
+
+            // Reduce 256-bit vectors to scalar
+            let s1_lo = _mm256_castsi256_si128(v_s1);
+            let s1_hi = _mm256_extracti128_si256(v_s1, 1);
+            let mut s1_128 = _mm_add_epi32(s1_lo, s1_hi);
+
+            let s2_lo = _mm256_castsi256_si128(v_s2);
+            let s2_hi = _mm256_extracti128_si256(v_s2, 1);
+            let mut s2_128 = _mm_add_epi32(s2_lo, s2_hi);
+
+            // VNNI s1 has values in all 4 lanes (not just SAD's [sum, 0, sum, 0])
+            s1_128 = _mm_add_epi32(s1_128, _mm_shuffle_epi32(s1_128, 0x31));
+            s2_128 = _mm_add_epi32(s2_128, _mm_shuffle_epi32(s2_128, 0x31));
+            s1_128 = _mm_add_epi32(s1_128, _mm_shuffle_epi32(s1_128, 0x02));
+            s2_128 = _mm_add_epi32(s2_128, _mm_shuffle_epi32(s2_128, 0x02));
+
+            s1 += _mm_cvtsi128_si32(s1_128) as u32;
+            s2 += _mm_cvtsi128_si32(s2_128) as u32;
+        }
+
+        // Scalar tail for remaining bytes in this chunk
+        adler32_chunk_scalar(&mut s1, &mut s2, p);
+    }
+
+    (s2 << 16) | s1
 }
 
 // ---------------------------------------------------------------------------
