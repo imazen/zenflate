@@ -11,9 +11,10 @@
 //! the binary tree finds more matches per step (ideally log(n) vs n)
 //! but requires nearly twice as much memory.
 
+#[cfg(not(feature = "unchecked"))]
+use super::lz_extend;
 use super::{
-    MATCHFINDER_INITVAL, MATCHFINDER_WINDOW_SIZE, lz_extend, lz_hash, matchfinder_init,
-    matchfinder_rebase,
+    MATCHFINDER_INITVAL, MATCHFINDER_WINDOW_SIZE, lz_hash, matchfinder_init, matchfinder_rebase,
 };
 
 /// Hash order for length 3 matches.
@@ -169,7 +170,9 @@ impl BtMatchfinder {
         next_hashes: &mut [u32; 2],
         matches: &mut [LzMatch],
     ) -> usize {
-        use crate::fast_bytes::{get_byte, load_u32_le, prefetch};
+        #[cfg(not(feature = "unchecked"))]
+        use crate::fast_bytes::get_byte;
+        use crate::fast_bytes::{load_u32_le, prefetch};
 
         let in_next = (in_base_offset as isize + cur_pos as isize) as usize;
         let mut depth_remaining = max_search_depth;
@@ -232,6 +235,81 @@ impl BtMatchfinder {
         let mut best_gt_len = 0u32;
         let mut len = 0u32;
 
+        // Raw-pointer inner loop: eliminates fat-pointer register pressure.
+        // input (&[u8] = 2 regs) → input_ptr (*const u8 = 1 reg), freeing
+        // a register in this spill-heavy loop (~16 live values, 14 GPRs).
+        #[cfg(feature = "unchecked")]
+        {
+            use super::raw::lz_extend_raw;
+
+            let input_ptr = input.as_ptr();
+            let child_ptr = self.child_tab.as_mut_ptr();
+
+            // SAFETY: All offsets are bounded by in_end <= input.len() (checked
+            // by callers) and child_tab indices are masked to WINDOW_MASK.
+            unsafe {
+                loop {
+                    let match_pos = (in_base_offset as isize + cur_node as isize) as usize;
+
+                    if *input_ptr.add(match_pos + len as usize)
+                        == *input_ptr.add(in_next + len as usize)
+                    {
+                        len = lz_extend_raw(
+                            input_ptr.add(in_next),
+                            input_ptr.add(match_pos),
+                            len + 1,
+                            max_len,
+                        );
+                        if !RECORD_MATCHES || len > best_len {
+                            if RECORD_MATCHES {
+                                best_len = len;
+                                matches[match_count] = LzMatch {
+                                    length: len as u16,
+                                    offset: (in_next - match_pos) as u16,
+                                };
+                                match_count += 1;
+                            }
+                            if len >= nice_len {
+                                *child_ptr.add(pending_lt_idx) =
+                                    *child_ptr.add(Self::left_child_idx(cur_node));
+                                *child_ptr.add(pending_gt_idx) =
+                                    *child_ptr.add(Self::right_child_idx(cur_node));
+                                return match_count;
+                            }
+                        }
+                    }
+
+                    if *input_ptr.add(match_pos + len as usize)
+                        < *input_ptr.add(in_next + len as usize)
+                    {
+                        *child_ptr.add(pending_lt_idx) = cur_node as i16;
+                        pending_lt_idx = Self::right_child_idx(cur_node);
+                        cur_node = *child_ptr.add(pending_lt_idx) as i32;
+                        best_lt_len = len;
+                        if best_gt_len < len {
+                            len = best_gt_len;
+                        }
+                    } else {
+                        *child_ptr.add(pending_gt_idx) = cur_node as i16;
+                        pending_gt_idx = Self::left_child_idx(cur_node);
+                        cur_node = *child_ptr.add(pending_gt_idx) as i32;
+                        best_gt_len = len;
+                        if best_lt_len < len {
+                            len = best_lt_len;
+                        }
+                    }
+
+                    depth_remaining -= 1;
+                    if cur_node <= cutoff || depth_remaining == 0 {
+                        *child_ptr.add(pending_lt_idx) = MATCHFINDER_INITVAL;
+                        *child_ptr.add(pending_gt_idx) = MATCHFINDER_INITVAL;
+                        return match_count;
+                    }
+                }
+            }
+        }
+
+        #[cfg(not(feature = "unchecked"))]
         loop {
             let match_pos = (in_base_offset as isize + cur_node as isize) as usize;
 

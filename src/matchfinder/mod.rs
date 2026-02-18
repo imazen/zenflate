@@ -5,6 +5,8 @@
 pub(crate) mod bt;
 pub(crate) mod hc;
 pub(crate) mod ht;
+#[cfg(feature = "unchecked")]
+pub(crate) mod raw;
 
 /// Matchfinder window order (log2 of window size).
 pub(crate) const MATCHFINDER_WINDOW_ORDER: u32 = 15;
