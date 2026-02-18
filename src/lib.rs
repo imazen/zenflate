@@ -13,6 +13,8 @@ pub mod constants;
 pub mod error;
 
 pub mod checksum;
+pub mod decompress;
 
 pub use checksum::{adler32, crc32};
+pub use decompress::Decompressor;
 pub use error::{CompressionError, DecompressionError};
