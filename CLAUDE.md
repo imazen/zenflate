@@ -17,12 +17,11 @@ Pure Rust port of libdeflate. DEFLATE/zlib/gzip compression and decompression.
 - `src/decompress/` — Decompression (bitstream reader, Huffman tables, inflate loop)
 - `src/compress/` — Compression (bitstream writer, Huffman construction, block flushing, strategies)
 - `src/matchfinder/` — Hash table, hash chain, binary tree matchfinders
-- `src/gzip.rs` — gzip wrapper
-- `src/zlib.rs` — zlib wrapper
+- `src/decompress/mod.rs` — gzip/zlib wrappers integrated into Decompressor
 
 ## Implementation Status
-- [ ] Phase 1: Foundation + Checksums
-- [ ] Phase 2: Decompression
+- [x] Phase 1: Foundation + Checksums (Adler-32, CRC-32 scalar, 23 parity tests)
+- [x] Phase 2: Decompression (generic loop, all 3 formats, 10 parity tests at all levels)
 - [ ] Phase 3: Compression Core
 - [ ] Phase 4: Compression Strategies
 - [ ] Phase 5: SIMD Acceleration
