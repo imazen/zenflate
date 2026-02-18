@@ -140,6 +140,7 @@ impl Compressor {
             codes: DeflateCodes::default(),
             static_codes,
             sequences: alloc::vec![Sequence::default(); seq_capacity],
+            ht_mf: None,
         }
     }
 

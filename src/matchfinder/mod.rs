@@ -11,7 +11,7 @@ pub(crate) const MATCHFINDER_WINDOW_ORDER: u32 = 15;
 pub(crate) const MATCHFINDER_WINDOW_SIZE: u32 = 1 << MATCHFINDER_WINDOW_ORDER;
 
 /// Initial value for matchfinder position entries (= -WINDOW_SIZE as i16).
-pub(crate) const MATCHFINDER_INITVAL: i16 = -(MATCHFINDER_WINDOW_SIZE as i16);
+pub(crate) const MATCHFINDER_INITVAL: i16 = i16::MIN;
 
 /// Multiplicative hash function for LZ77 matchfinding.
 ///
