@@ -5,7 +5,7 @@
 
 use crate::constants::*;
 
-use super::bitstream::{BITBUF_NBITS, OutputBitstream};
+use super::bitstream::{BITBUF_NBITS, OutputBitstream, can_buffer};
 use super::huffman::make_huffman_code;
 use super::near_optimal::{OPTIMUM_LEN_MASK, OPTIMUM_OFFSET_SHIFT, OptimumNode};
 use super::sequences::Sequence;
@@ -358,15 +358,25 @@ pub(crate) fn flush_block(
         os.flush_bits();
     } else {
         // Dynamic Huffman block header
+        // CAN_BUFFER(1 + 2 + 5 + 5 + 4 + 3) = 7 + 20 = 27 ≤ 63 ✓
         os.add_bits(is_final_block as u32, 1);
         os.add_bits(DEFLATE_BLOCKTYPE_DYNAMIC_HUFFMAN, 2);
         os.add_bits(num_litlen_syms as u32 - 257, 5);
         os.add_bits(num_offset_syms as u32 - 1, 5);
         os.add_bits(num_explicit_lens as u32 - 4, 4);
+
+        // Output precode lengths.
+        // A 64-bit bitbuffer is one bit too small for all 19 precode lengths
+        // (19×3=57, and 7+57=64 > 63=BITBUF_NBITS), so merge the first
+        // precode length with the header before flushing, matching libdeflate.
+        const _: () = assert!(can_buffer(1 + 2 + 5 + 5 + 4 + 3));
+        const _: () = assert!(can_buffer(3 * (DEFLATE_NUM_PRECODE_SYMS - 1)));
+        let first_perm = DEFLATE_PRECODE_LENS_PERMUTATION[0];
+        os.add_bits(precode_lens[first_perm as usize] as u32, 3);
         os.flush_bits();
 
-        // Output precode lengths
-        for &perm in &DEFLATE_PRECODE_LENS_PERMUTATION[..num_explicit_lens] {
+        // Remaining precode lengths: up to 18×3=54 bits, 7+54=61 ≤ 63 ✓
+        for &perm in &DEFLATE_PRECODE_LENS_PERMUTATION[1..num_explicit_lens] {
             os.add_bits(precode_lens[perm as usize] as u32, 3);
         }
         os.flush_bits();

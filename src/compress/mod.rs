@@ -2417,11 +2417,14 @@ mod tests {
     /// from a 1024x1024 RGB8 image.
     ///
     /// The bug manifests as a `debug_assert!` failure in `add_bits()` during
-    /// compression (panic in debug, silent corruption in release). Known to
-    /// affect at least levels 2 and 6, possibly others.
+    /// Regression test: adaptive PNG filtering can produce data patterns where
+    /// the dynamic Huffman block header uses all 19 precode symbols, pushing
+    /// the precode length output to 19×3=57 bits. With ≤7 residual bits after
+    /// a flush, that's 64 total — exceeding the 63-bit bitbuffer capacity.
     ///
-    /// Only triggers with adaptive per-row filter selection (mixed filter
-    /// types). Single-filter data compresses fine at all levels.
+    /// Fixed by merging the first precode length with the header before
+    /// flushing, matching libdeflate's approach. Remaining 18×3=54 bits
+    /// safely fit: 7+54=61 ≤ 63.
     ///
     /// Source: codec-corpus/clic2025-1024/0d154749...f0.png
     #[test]
@@ -2453,35 +2456,10 @@ mod tests {
         let filtered = filter_image_minsum(&pixels, row_bytes, height, bpp);
         assert_eq!(filtered.len(), height * (1 + row_bytes));
 
-        // Test all levels 1-12, recording which fail
-        let mut failed_levels = Vec::new();
-        let mut passed_levels = Vec::new();
+        // All levels must roundtrip successfully
         for level in 1..=12 {
-            match try_roundtrip(&filtered, level) {
-                Ok(()) => {
-                    passed_levels.push(level);
-                }
-                Err(msg) => {
-                    eprintln!("L{level} FAILED: {msg}");
-                    failed_levels.push(level);
-                }
-            }
+            try_roundtrip(&filtered, level)
+                .unwrap_or_else(|msg| panic!("L{level} failed: {msg}"));
         }
-
-        eprintln!(
-            "\nBitstream overflow bug on adaptive-filtered PNG ({} bytes):",
-            filtered.len()
-        );
-        eprintln!("  Failed levels: {failed_levels:?}");
-        eprintln!("  Passed levels: {passed_levels:?}");
-
-        // The bug must be present — at least level 2 should fail.
-        // When the bug is fixed, this assertion will fail, signaling that
-        // this test should be converted to assert all levels pass.
-        assert!(
-            !failed_levels.is_empty(),
-            "BUG APPEARS FIXED: all levels passed on adaptive-filtered data. \
-             Convert this test to a normal roundtrip assertion."
-        );
     }
 }
