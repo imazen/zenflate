@@ -12,8 +12,11 @@ env:
   CI: true
 
 jobs:
-  test:
-    name: Test (${{ matrix.os }})
+  # ==========================================================================
+  # Native x86_64 testing
+  # ==========================================================================
+  test-x64:
+    name: Test x64 (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -21,39 +24,104 @@ jobs:
         os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
       - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - name: Test
-        run: cargo test --all-features
 
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Test (default: std + avx512)
+        run: cargo test
+
+      - name: Test (no_std + alloc, no SIMD dispatch)
+        run: cargo test --no-default-features --features alloc --lib
+
+      - name: Test (with unchecked bounds elimination)
+        run: cargo test --features unchecked
+
+  # ==========================================================================
+  # Clippy
+  # ==========================================================================
   clippy:
     name: Clippy
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo clippy --all-targets --all-features -- -D warnings
 
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Clippy (default features)
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Clippy (unchecked)
+        run: cargo clippy --all-targets --features unchecked -- -D warnings
+
+  # ==========================================================================
+  # Format check
+  # ==========================================================================
   fmt:
     name: Format
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
-      - run: cargo fmt --all -- --check
 
+      - name: Format check
+        run: cargo fmt --all -- --check
+
+  # ==========================================================================
+  # Miri (unsafe soundness for unchecked feature)
+  # ==========================================================================
+  miri:
+    name: Miri (unsafe soundness)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Miri tests (unchecked feature)
+        run: |
+          cargo miri test --features unchecked -- \
+            --skip zeros --skip sequential --skip large \
+            --skip all_levels --skip all_formats \
+            --skip window_boundary --skip block_splitting \
+            --skip parallel --skip compression_improves \
+            --skip short_inputs
+
+  # ==========================================================================
+  # MSRV check
+  # ==========================================================================
   msrv:
     name: MSRV (1.85)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@master
+
+      - name: Install Rust 1.85
+        uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.85"
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo check
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check MSRV
+        run: cargo check
