@@ -2,7 +2,7 @@
 //!
 //! Uses SIMD acceleration when available via archmage:
 //! - VPCLMULQDQ 512-bit folding (x86_64-v4x: AVX-512 + VPCLMULQDQ)
-//! - PCLMULQDQ 128-bit folding (x86_64-v2: SSE4.1 + PCLMULQDQ)
+//! - PCLMULQDQ 128-bit folding (X64CryptoToken: SSE4.2 + PCLMULQDQ + AES)
 //! - ARM PMULL folding + hardware CRC-32 (Arm64-v2: NEON + AES + CRC)
 //! - ARM PMULL folding (NeonAes: NEON + AES, scalar tail)
 //! - Scalar slice-by-8 fallback
@@ -33,11 +33,11 @@ pub fn crc32(crc: u32, data: &[u8]) -> u32 {
     }
     #[cfg(feature = "avx512")]
     {
-        !incant!(crc32_impl(!crc, data), [v4x, v2, arm_v2, neon_aes])
+        !incant!(crc32_impl(!crc, data), [v4x, x64_crypto, arm_v2, neon_aes])
     }
     #[cfg(not(feature = "avx512"))]
     {
-        !incant!(crc32_impl(!crc, data), [v2, arm_v2, neon_aes])
+        !incant!(crc32_impl(!crc, data), [x64_crypto, arm_v2, neon_aes])
     }
 }
 
@@ -391,11 +391,11 @@ fn crc32_impl_v4x(_token: X64V4xToken, crc: u32, data: &[u8]) -> u32 {
 }
 
 // ---------------------------------------------------------------------------
-// PCLMULQDQ 128-bit CRC-32 folding (x86_64-v2: SSE4.1 + PCLMULQDQ)
+// PCLMULQDQ 128-bit CRC-32 folding (X64CryptoToken: SSE4.2 + PCLMULQDQ + AES)
 // ---------------------------------------------------------------------------
 #[cfg(target_arch = "x86_64")]
 #[arcane]
-fn crc32_impl_v2(_token: X64V2Token, crc: u32, data: &[u8]) -> u32 {
+fn crc32_impl_x64_crypto(_token: X64CryptoToken, crc: u32, data: &[u8]) -> u32 {
     use safe_unaligned_simd::x86_64::_mm_loadu_si128;
 
     let len = data.len();
@@ -912,21 +912,21 @@ mod parity {
         }
     }
 
-    /// Verify that PCLMULQDQ (_mm_clmulepi64_si128) compiles as safe inside #[arcane] with V2.
+    /// Verify that PCLMULQDQ (_mm_clmulepi64_si128) compiles as safe inside #[arcane] with X64CryptoToken.
     #[test]
     #[cfg(target_arch = "x86_64")]
     fn pclmulqdq_compiles_in_arcane() {
         use archmage::prelude::*;
 
         #[arcane]
-        fn clmul_test(_token: X64V2Token, a: u64, b: u64) -> u64 {
+        fn clmul_test(_token: X64CryptoToken, a: u64, b: u64) -> u64 {
             let va = _mm_set_epi64x(0, a as i64);
             let vb = _mm_set_epi64x(0, b as i64);
             let result = _mm_clmulepi64_si128(va, vb, 0x00);
             _mm_extract_epi64(result, 0) as u64
         }
 
-        let token = X64V2Token::summon().expect("X64V2 should be available");
+        let token = X64CryptoToken::summon().expect("X64CryptoToken should be available");
         let result = clmul_test(token, 7, 3);
         // 7 clmul 3 in GF(2): (x²+x+1)(x+1) = x³+1 = 9
         assert_eq!(result, 9);
