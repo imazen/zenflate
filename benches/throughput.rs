@@ -65,7 +65,7 @@ fn miniz_level(level: u32) -> u8 {
 /// Label for ecosystem crates that cap at level 9.
 fn capped_label(level: u32) -> String {
     if level > 9 {
-        format!("L9(best)")
+        "L9(best)".to_string()
     } else {
         format!("L{level}")
     }
