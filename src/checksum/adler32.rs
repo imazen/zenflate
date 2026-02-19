@@ -28,14 +28,14 @@ const MAX_CHUNK_LEN: usize = 5552;
 /// ```
 #[allow(unexpected_cfgs)]
 pub fn adler32(adler: u32, data: &[u8]) -> u32 {
-    // modern = AVX-512 VNNI, v3 = AVX2, scalar = fallback
+    // modern = AVX-512 VNNI, v3 = AVX2, neon = NEON, scalar = fallback
     #[cfg(feature = "avx512")]
     {
-        incant!(adler32_impl(adler, data), [modern, v3])
+        incant!(adler32_impl(adler, data), [modern, v3, neon])
     }
     #[cfg(not(feature = "avx512"))]
     {
-        incant!(adler32_impl(adler, data), [v3])
+        incant!(adler32_impl(adler, data), [v3, neon])
     }
 }
 
@@ -352,6 +352,135 @@ fn adler32_impl_v3(_token: Desktop64, adler: u32, data: &[u8]) -> u32 {
 
             s1 += _mm_cvtsi128_si32(s1_128) as u32;
             s2 += _mm_cvtsi128_si32(s2_128) as u32;
+        }
+
+        // Scalar tail for remaining bytes in this chunk
+        adler32_chunk_scalar(&mut s1, &mut s2, p);
+    }
+
+    (s2 << 16) | s1
+}
+
+// ---------------------------------------------------------------------------
+// NEON implementation (aarch64)
+//
+// Processes 64 bytes per inner loop iteration using pairwise add/accumulate
+// and multiply-accumulate long instructions for weighted sums.
+// Ported from libdeflate's arm/adler32_impl.h (adler32_arm_neon).
+// ---------------------------------------------------------------------------
+#[cfg(target_arch = "aarch64")]
+#[arcane]
+fn adler32_impl_neon(_token: NeonToken, adler: u32, data: &[u8]) -> u32 {
+    use safe_unaligned_simd::aarch64::{vld1q_u8, vld1q_u16};
+
+    // Weight tables for s2: position weights [64, 63, ..., 1] split into 8 u16x8 vectors.
+    // Within each 64-byte block, byte at position i contributes weight (64 - i) to s2.
+    static MULTS_A: [u16; 8] = [64, 63, 62, 61, 60, 59, 58, 57];
+    static MULTS_B: [u16; 8] = [56, 55, 54, 53, 52, 51, 50, 49];
+    static MULTS_C: [u16; 8] = [48, 47, 46, 45, 44, 43, 42, 41];
+    static MULTS_D: [u16; 8] = [40, 39, 38, 37, 36, 35, 34, 33];
+    static MULTS_E: [u16; 8] = [32, 31, 30, 29, 28, 27, 26, 25];
+    static MULTS_F: [u16; 8] = [24, 23, 22, 21, 20, 19, 18, 17];
+    static MULTS_G: [u16; 8] = [16, 15, 14, 13, 12, 11, 10, 9];
+    static MULTS_H: [u16; 8] = [8, 7, 6, 5, 4, 3, 2, 1];
+
+    let mults_a = vld1q_u16(&MULTS_A);
+    let mults_b = vld1q_u16(&MULTS_B);
+    let mults_c = vld1q_u16(&MULTS_C);
+    let mults_d = vld1q_u16(&MULTS_D);
+    let mults_e = vld1q_u16(&MULTS_E);
+    let mults_f = vld1q_u16(&MULTS_F);
+    let mults_g = vld1q_u16(&MULTS_G);
+    let mults_h = vld1q_u16(&MULTS_H);
+
+    let mut s1 = adler & 0xFFFF;
+    let mut s2 = adler >> 16;
+    let mut remaining = data;
+
+    while !remaining.is_empty() {
+        let n = remaining.len().min(MAX_CHUNK_LEN & !63);
+        let (chunk, rest) = remaining.split_at(n);
+        remaining = rest;
+        let mut p = chunk;
+
+        if p.len() >= 64 {
+            let mut v_s1 = vdupq_n_u32(0);
+            let mut v_s2 = vdupq_n_u32(0);
+            // Per-position byte sums across all 64-byte blocks in this chunk.
+            // 8 vectors of u16x8 = 64 independent counters.
+            let mut v_byte_sums_a = vdupq_n_u16(0);
+            let mut v_byte_sums_b = vdupq_n_u16(0);
+            let mut v_byte_sums_c = vdupq_n_u16(0);
+            let mut v_byte_sums_d = vdupq_n_u16(0);
+            let mut v_byte_sums_e = vdupq_n_u16(0);
+            let mut v_byte_sums_f = vdupq_n_u16(0);
+            let mut v_byte_sums_g = vdupq_n_u16(0);
+            let mut v_byte_sums_h = vdupq_n_u16(0);
+
+            // Pre-adjust s2: each of the vectorized_len bytes sees the initial s1.
+            let vectorized_len = p.len() & !63;
+            s2 += s1 * vectorized_len as u32;
+
+            while p.len() >= 64 {
+                let data_a: &[u8; 16] = p[0..16].try_into().unwrap();
+                let data_b: &[u8; 16] = p[16..32].try_into().unwrap();
+                let data_c: &[u8; 16] = p[32..48].try_into().unwrap();
+                let data_d: &[u8; 16] = p[48..64].try_into().unwrap();
+                let data_a = vld1q_u8(data_a);
+                let data_b = vld1q_u8(data_b);
+                let data_c = vld1q_u8(data_c);
+                let data_d = vld1q_u8(data_d);
+
+                // Accumulate previous s1 into s2 (the *64 multiplication is delayed)
+                v_s2 = vaddq_u32(v_s2, v_s1);
+
+                // Sum bytes to s1 via pairwise add chain:
+                // vpaddlq_u8: 16xu8 -> 8xu16 (pairwise add long)
+                // vpadalq_u8: accumulate another 16xu8 pairwise into 8xu16
+                // vpadalq_u16: accumulate 8xu16 pairwise into 4xu32
+                let mut tmp = vpaddlq_u8(data_a);
+                v_byte_sums_a = vaddw_u8(v_byte_sums_a, vget_low_u8(data_a));
+                v_byte_sums_b = vaddw_u8(v_byte_sums_b, vget_high_u8(data_a));
+
+                tmp = vpadalq_u8(tmp, data_b);
+                v_byte_sums_c = vaddw_u8(v_byte_sums_c, vget_low_u8(data_b));
+                v_byte_sums_d = vaddw_u8(v_byte_sums_d, vget_high_u8(data_b));
+
+                tmp = vpadalq_u8(tmp, data_c);
+                v_byte_sums_e = vaddw_u8(v_byte_sums_e, vget_low_u8(data_c));
+                v_byte_sums_f = vaddw_u8(v_byte_sums_f, vget_high_u8(data_c));
+
+                tmp = vpadalq_u8(tmp, data_d);
+                v_byte_sums_g = vaddw_u8(v_byte_sums_g, vget_low_u8(data_d));
+                v_byte_sums_h = vaddw_u8(v_byte_sums_h, vget_high_u8(data_d));
+
+                v_s1 = vpadalq_u16(v_s1, tmp);
+
+                p = &p[64..];
+            }
+
+            // s2 = 64 * s2 + (64*bytesum0 + 63*bytesum1 + ... + 1*bytesum63)
+            v_s2 = vqshlq_n_u32::<6>(v_s2);
+            v_s2 = vmlal_u16(v_s2, vget_low_u16(v_byte_sums_a), vget_low_u16(mults_a));
+            v_s2 = vmlal_high_u16(v_s2, v_byte_sums_a, mults_a);
+            v_s2 = vmlal_u16(v_s2, vget_low_u16(v_byte_sums_b), vget_low_u16(mults_b));
+            v_s2 = vmlal_high_u16(v_s2, v_byte_sums_b, mults_b);
+            v_s2 = vmlal_u16(v_s2, vget_low_u16(v_byte_sums_c), vget_low_u16(mults_c));
+            v_s2 = vmlal_high_u16(v_s2, v_byte_sums_c, mults_c);
+            v_s2 = vmlal_u16(v_s2, vget_low_u16(v_byte_sums_d), vget_low_u16(mults_d));
+            v_s2 = vmlal_high_u16(v_s2, v_byte_sums_d, mults_d);
+            v_s2 = vmlal_u16(v_s2, vget_low_u16(v_byte_sums_e), vget_low_u16(mults_e));
+            v_s2 = vmlal_high_u16(v_s2, v_byte_sums_e, mults_e);
+            v_s2 = vmlal_u16(v_s2, vget_low_u16(v_byte_sums_f), vget_low_u16(mults_f));
+            v_s2 = vmlal_high_u16(v_s2, v_byte_sums_f, mults_f);
+            v_s2 = vmlal_u16(v_s2, vget_low_u16(v_byte_sums_g), vget_low_u16(mults_g));
+            v_s2 = vmlal_high_u16(v_s2, v_byte_sums_g, mults_g);
+            v_s2 = vmlal_u16(v_s2, vget_low_u16(v_byte_sums_h), vget_low_u16(mults_h));
+            v_s2 = vmlal_high_u16(v_s2, v_byte_sums_h, mults_h);
+
+            // Horizontal reduction
+            s1 += vaddvq_u32(v_s1);
+            s2 += vaddvq_u32(v_s2);
         }
 
         // Scalar tail for remaining bytes in this chunk

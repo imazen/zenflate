@@ -31,11 +31,11 @@ pub fn crc32(crc: u32, data: &[u8]) -> u32 {
     }
     #[cfg(feature = "avx512")]
     {
-        !incant!(crc32_impl(!crc, data), [modern, v2])
+        !incant!(crc32_impl(!crc, data), [modern, v2, neon_aes])
     }
     #[cfg(not(feature = "avx512"))]
     {
-        !incant!(crc32_impl(!crc, data), [v2])
+        !incant!(crc32_impl(!crc, data), [v2, neon_aes])
     }
 }
 
@@ -492,6 +492,154 @@ fn crc32_impl_v2(_token: X64V2Token, crc: u32, data: &[u8]) -> u32 {
 
     // Barrett reduction: 128-bit → 32-bit CRC
     barrett_reduce!(x0, mults_1v, barrett)
+}
+
+// ---------------------------------------------------------------------------
+// NEON PMULL CRC-32 folding (aarch64: NeonAesToken = NEON + PMULL)
+//
+// Uses vmull_p64 for carryless multiplication — same folding algorithm as
+// x86 PCLMULQDQ but with ARM PMULL instructions. 4-accumulator path for
+// large data, Barrett reduction to 32 bits.
+// Ported from libdeflate's arm/crc32_impl.h (crc32_arm_pmullx4).
+// ---------------------------------------------------------------------------
+
+/// clmul_low(src, mults) = lo64(src) * lo64(mults) -> 128-bit as u8x16
+#[cfg(target_arch = "aarch64")]
+macro_rules! neon_clmul_low {
+    ($a:expr, $b:expr) => {{
+        let a = $a;
+        let b = $b;
+        vreinterpretq_u8_p128(vmull_p64(
+            vgetq_lane_p64(vreinterpretq_p64_u8(a), 0),
+            vgetq_lane_p64(b, 0),
+        ))
+    }};
+}
+
+/// clmul_high(src, mults) = hi64(src) * hi64(mults) -> 128-bit as u8x16
+#[cfg(target_arch = "aarch64")]
+macro_rules! neon_clmul_high {
+    ($a:expr, $b:expr) => {{
+        let a = $a;
+        let b = $b;
+        vreinterpretq_u8_p128(vmull_high_p64(vreinterpretq_p64_u8(a), b))
+    }};
+}
+
+/// fold_vec(src, dst, mults) = dst XOR clmul_low(src, mults) XOR clmul_high(src, mults)
+#[cfg(target_arch = "aarch64")]
+macro_rules! neon_fold_vec {
+    ($src:expr, $dst:expr, $mults:expr) => {{
+        let src = $src;
+        let mults = $mults;
+        let a = neon_clmul_low!(src, mults);
+        let b = neon_clmul_high!(src, mults);
+        veorq_u8(veorq_u8(a, b), $dst)
+    }};
+}
+
+/// Barrett reduction: 128-bit polynomial -> 32-bit CRC
+#[cfg(target_arch = "aarch64")]
+macro_rules! neon_barrett_reduce {
+    ($v0:expr, $c0:expr, $c1:expr, $c2:expr) => {{
+        let zero = vdupq_n_u8(0);
+        // Fold 128 -> 64 bits: multiply low half by x^64 constant, XOR with high half
+        let x0 = veorq_u8(neon_clmul_low!($v0, $c0), vextq_u8($v0, zero, 8));
+        // Barrett step 1
+        let x1 = neon_clmul_low!(x0, $c1);
+        // Barrett step 2
+        let x1 = neon_clmul_low!(x1, $c2);
+        // Extract CRC from lane 2 (bytes 8-11)
+        vgetq_lane_u32(vreinterpretq_u32_u8(veorq_u8(x0, x1)), 2)
+    }};
+}
+
+#[cfg(target_arch = "aarch64")]
+#[arcane]
+fn crc32_impl_neon_aes(_token: NeonAesToken, crc: u32, data: &[u8]) -> u32 {
+    use safe_unaligned_simd::aarch64::{vld1q_u8, vld1q_u64};
+
+    let len = data.len();
+
+    // Need at least 16 bytes for PMULL path
+    if len < 16 {
+        return crc32_slice8(crc, data);
+    }
+
+    // Fold constants: x^N mod G(x), loaded as poly64x2_t pairs.
+    // Same constants as the x86 PCLMULQDQ path.
+    static MULTS_1V: [u64; 2] = [CRC32_X159_MODG as u64, CRC32_X95_MODG as u64];
+    static MULTS_4V: [u64; 2] = [CRC32_X543_MODG as u64, CRC32_X479_MODG as u64];
+    static MULTS_2V: [u64; 2] = [CRC32_X287_MODG as u64, CRC32_X223_MODG as u64];
+    static BARRETT_0: [u64; 2] = [CRC32_X95_MODG as u64, 0];
+    static BARRETT_1: [u64; 2] = [CRC32_BARRETT_1 as u64, 0];
+    static BARRETT_2: [u64; 2] = [CRC32_BARRETT_2 as u64, 0];
+
+    let multipliers_1 = vreinterpretq_p64_u64(vld1q_u64(&MULTS_1V));
+    let multipliers_4 = vreinterpretq_p64_u64(vld1q_u64(&MULTS_4V));
+    let multipliers_2 = vreinterpretq_p64_u64(vld1q_u64(&MULTS_2V));
+    let barrett_c0 = vreinterpretq_p64_u64(vld1q_u64(&BARRETT_0));
+    let barrett_c1 = vreinterpretq_p64_u64(vld1q_u64(&BARRETT_1));
+    let barrett_c2 = vreinterpretq_p64_u64(vld1q_u64(&BARRETT_2));
+
+    #[inline(always)]
+    fn ld16(data: &[u8], off: usize) -> &[u8; 16] {
+        data[off..off + 16].try_into().unwrap()
+    }
+
+    let mut p = data;
+
+    // Initialize: load first 16 bytes, XOR CRC into low 32 bits
+    let crc_vec = vreinterpretq_u8_u32(vsetq_lane_u32(crc, vdupq_n_u32(0), 0));
+    let mut v0 = veorq_u8(vld1q_u8(ld16(p, 0)), crc_vec);
+    p = &p[16..];
+
+    if p.len() >= 48 {
+        // 4-accumulator path: load 3 more vectors
+        let mut v1 = vld1q_u8(ld16(p, 0));
+        let mut v2 = vld1q_u8(ld16(p, 16));
+        let mut v3 = vld1q_u8(ld16(p, 32));
+        p = &p[48..];
+
+        // Main loop: fold 64 bytes per iteration (4 vectors x 16 bytes)
+        while p.len() >= 64 {
+            v0 = neon_fold_vec!(v0, vld1q_u8(ld16(p, 0)), multipliers_4);
+            v1 = neon_fold_vec!(v1, vld1q_u8(ld16(p, 16)), multipliers_4);
+            v2 = neon_fold_vec!(v2, vld1q_u8(ld16(p, 32)), multipliers_4);
+            v3 = neon_fold_vec!(v3, vld1q_u8(ld16(p, 48)), multipliers_4);
+            p = &p[64..];
+        }
+
+        // Fold 4 -> 2 accumulators
+        v0 = neon_fold_vec!(v0, v2, multipliers_2);
+        v1 = neon_fold_vec!(v1, v3, multipliers_2);
+        if p.len() >= 32 {
+            v0 = neon_fold_vec!(v0, vld1q_u8(ld16(p, 0)), multipliers_2);
+            v1 = neon_fold_vec!(v1, vld1q_u8(ld16(p, 16)), multipliers_2);
+            p = &p[32..];
+        }
+
+        // Fold 2 -> 1 accumulator
+        v0 = neon_fold_vec!(v0, v1, multipliers_1);
+        if p.len() >= 16 {
+            v0 = neon_fold_vec!(v0, vld1q_u8(ld16(p, 0)), multipliers_1);
+            p = &p[16..];
+        }
+    } else {
+        // Small path: fold 16-byte chunks one at a time
+        while p.len() >= 16 {
+            v0 = neon_fold_vec!(v0, vld1q_u8(ld16(p, 0)), multipliers_1);
+            p = &p[16..];
+        }
+    }
+
+    // Handle remaining 1-15 bytes with scalar
+    if !p.is_empty() {
+        let partial = neon_barrett_reduce!(v0, barrett_c0, barrett_c1, barrett_c2);
+        return crc32_slice8(partial, p);
+    }
+
+    neon_barrett_reduce!(v0, barrett_c0, barrett_c1, barrett_c2)
 }
 
 // ---------------------------------------------------------------------------
