@@ -1,4 +1,7 @@
-//! Throughput benchmarks: zenflate (Rust) vs libdeflate (C).
+//! Throughput benchmarks: zenflate vs ecosystem compression libraries.
+//!
+//! Compares: zenflate (Rust), libdeflate (C), flate2 (miniz_oxide backend),
+//! and miniz_oxide (direct).
 //!
 //! Run with: `cargo bench --release`
 
@@ -35,6 +38,37 @@ fn make_mixed(size: usize) -> Vec<u8> {
     }
     data.truncate(size);
     data
+}
+
+// ---------------------------------------------------------------------------
+// Level mapping helpers
+// ---------------------------------------------------------------------------
+
+/// Map zenflate levels (1/6/12) to flate2 Compression.
+/// flate2 max is 9, so L12 maps to best() = 9.
+fn flate2_level(level: u32) -> flate2::Compression {
+    match level {
+        0 => flate2::Compression::none(),
+        1 => flate2::Compression::fast(),
+        6 => flate2::Compression::default(),
+        n if n >= 9 => flate2::Compression::best(),
+        n => flate2::Compression::new(n),
+    }
+}
+
+/// Map zenflate levels to miniz_oxide levels (0-10).
+/// L12 maps to 9 (best standard; level 10 is "uber" and very slow).
+fn miniz_level(level: u32) -> u8 {
+    level.min(9) as u8
+}
+
+/// Label for ecosystem crates that cap at level 9.
+fn capped_label(level: u32) -> String {
+    if level > 9 {
+        format!("L9(best)")
+    } else {
+        format!("L{level}")
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -87,6 +121,39 @@ fn bench_compress(c: &mut Criterion) {
                     });
                 },
             );
+
+            // flate2 (miniz_oxide backend, reuses compressor with reset)
+            {
+                let fl = flate2_level(level);
+                let label = capped_label(level);
+                group.bench_with_input(
+                    BenchmarkId::new("flate2", &label),
+                    &level,
+                    |b, _| {
+                        let mut comp = flate2::Compress::new(fl, false);
+                        let mut out = vec![0u8; data.len() * 2];
+                        b.iter(|| {
+                            comp.reset();
+                            comp.compress(data, &mut out, flate2::FlushCompress::Finish)
+                                .unwrap();
+                            comp.total_out() as usize
+                        });
+                    },
+                );
+            }
+
+            // miniz_oxide (direct, allocates per call)
+            {
+                let ml = miniz_level(level);
+                let label = capped_label(level);
+                group.bench_with_input(
+                    BenchmarkId::new("miniz_oxide", &label),
+                    &level,
+                    |b, _| {
+                        b.iter(|| miniz_oxide::deflate::compress_to_vec(data, ml));
+                    },
+                );
+            }
         }
 
         group.finish();
@@ -138,6 +205,26 @@ fn bench_decompress(c: &mut Criterion) {
                 decompressor
                     .deflate_decompress(compressed, &mut out)
                     .unwrap();
+            });
+        });
+
+        // flate2 decompression (reuses decompressor with reset)
+        group.bench_function("flate2", |b| {
+            let mut decomp = flate2::Decompress::new(false);
+            let mut out = vec![0u8; data.len()];
+            b.iter(|| {
+                decomp.reset(false);
+                decomp
+                    .decompress(compressed, &mut out, flate2::FlushDecompress::Finish)
+                    .unwrap();
+                decomp.total_out() as usize
+            });
+        });
+
+        // miniz_oxide decompression (allocates per call)
+        group.bench_function("miniz_oxide", |b| {
+            b.iter(|| {
+                miniz_oxide::inflate::decompress_to_vec(compressed).unwrap();
             });
         });
 
