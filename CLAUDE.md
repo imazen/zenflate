@@ -33,12 +33,6 @@ Pure Rust port of libdeflate. DEFLATE/zlib/gzip compression and decompression.
 - [x] Phase 6: Benchmarks + Polish (criterion benchmarks, README, doc examples, #[non_exhaustive] errors)
 - [x] Phase 7: Ecosystem benchmarks (flate2, miniz_oxide), justfile, Dockerfile, CI bench checks
 
-## Archmage Patches (local only)
-The following files in `~/.cargo/registry/src/` were patched to add `pclmulqdq` to X64V2Token:
-- `archmage-macros-0.7.0/src/generated/registry.rs` — added pclmulqdq to V2+ feature lists
-- `archmage-0.7.0/src/tokens/generated/x86.rs` — V2 runtime detection + const strings
-These must be re-applied after any `cargo update` of archmage.
-
 ## Compression Speed vs C (1MB data)
 
 ### Default (safe, forbid(unsafe_code))

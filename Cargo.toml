@@ -2,7 +2,7 @@
 name = "zenflate"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.89"
 description = "Pure Rust DEFLATE/zlib/gzip compression and decompression, ported from libdeflate"
 license = "MIT"
 repository = "https://github.com/imazen/zenflate"
@@ -11,14 +11,13 @@ keywords = ["deflate", "zlib", "gzip", "compression", "decompression"]
 
 [features]
 default = ["std", "avx512"]
-std = ["alloc", "archmage/std", "magetypes/std"]
+std = ["alloc", "archmage/std"]
 alloc = []
-avx512 = ["archmage/avx512", "magetypes/avx512", "safe_unaligned_simd/avx512"]
+avx512 = ["archmage/avx512", "safe_unaligned_simd/avx512"]
 unchecked = []
 
 [dependencies]
-archmage = { version = "0.7", default-features = false, features = ["macros", "safe_unaligned_simd"] }
-magetypes = { version = "0.7", default-features = false }
+archmage = { version = "0.8.1", default-features = false, features = ["macros", "safe_unaligned_simd"] }
 safe_unaligned_simd = { version = "0.2", default-features = false }
 
 [dev-dependencies]

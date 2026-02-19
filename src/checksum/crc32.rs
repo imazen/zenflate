@@ -1,8 +1,10 @@
 //! CRC-32 checksum for gzip, ported from libdeflate's crc32.c.
 //!
 //! Uses SIMD acceleration when available via archmage:
-//! - VPCLMULQDQ 512-bit folding (x86_64 modern: AVX-512 + VPCLMULQDQ)
+//! - VPCLMULQDQ 512-bit folding (x86_64-v4x: AVX-512 + VPCLMULQDQ)
 //! - PCLMULQDQ 128-bit folding (x86_64-v2: SSE4.1 + PCLMULQDQ)
+//! - ARM PMULL folding + hardware CRC-32 (Arm64-v2: NEON + AES + CRC)
+//! - ARM PMULL folding (NeonAes: NEON + AES, scalar tail)
 //! - Scalar slice-by-8 fallback
 
 use archmage::prelude::*;
@@ -31,11 +33,11 @@ pub fn crc32(crc: u32, data: &[u8]) -> u32 {
     }
     #[cfg(feature = "avx512")]
     {
-        !incant!(crc32_impl(!crc, data), [modern, v2, neon_aes])
+        !incant!(crc32_impl(!crc, data), [v4x, v2, arm_v2, neon_aes])
     }
     #[cfg(not(feature = "avx512"))]
     {
-        !incant!(crc32_impl(!crc, data), [v2, neon_aes])
+        !incant!(crc32_impl(!crc, data), [v2, arm_v2, neon_aes])
     }
 }
 
@@ -177,7 +179,7 @@ macro_rules! barrett_reduce {
 }
 
 // ---------------------------------------------------------------------------
-// VPCLMULQDQ 512-bit CRC-32 folding (Avx512ModernToken: VPCLMULQDQ + AVX-512)
+// VPCLMULQDQ 512-bit CRC-32 folding (X64V4xToken: VPCLMULQDQ + AVX-512)
 //
 // Processes four 128-bit lanes in parallel per 512-bit vector. 8 accumulators
 // (8*64=512 bytes per main loop iteration). Reduces via 256-bit and 128-bit
@@ -186,7 +188,7 @@ macro_rules! barrett_reduce {
 #[cfg(all(target_arch = "x86_64", feature = "avx512"))]
 #[arcane]
 #[allow(clippy::incompatible_msrv)] // avx512 feature requires rustc 1.89+
-fn crc32_impl_modern(_token: Avx512ModernToken, crc: u32, data: &[u8]) -> u32 {
+fn crc32_impl_v4x(_token: X64V4xToken, crc: u32, data: &[u8]) -> u32 {
     use safe_unaligned_simd::x86_64::{_mm_loadu_si128, _mm256_loadu_si256, _mm512_loadu_si512};
 
     let len = data.len();
@@ -643,6 +645,116 @@ fn crc32_impl_neon_aes(_token: NeonAesToken, crc: u32, data: &[u8]) -> u32 {
 }
 
 // ---------------------------------------------------------------------------
+// ARM hardware CRC-32 + PMULL folding (Arm64V2Token: CRC + AES + NEON)
+//
+// Same PMULL folding as NeonAes for data >= 16 bytes, but uses hardware CRC
+// instructions (__crc32d/__crc32b) for small inputs (<16 bytes) and tail bytes
+// instead of falling back to scalar slice-by-8.
+// ---------------------------------------------------------------------------
+
+/// Hardware CRC-32 using ARM CRC extension instructions.
+/// Processes 8 bytes at a time via __crc32d, then 1 byte at a time via __crc32b.
+#[cfg(target_arch = "aarch64")]
+#[arcane]
+fn crc32_hw(_token: Arm64V2Token, crc: u32, data: &[u8]) -> u32 {
+    let mut c = crc;
+    let mut i = 0;
+    while i + 8 <= data.len() {
+        let val = u64::from_le_bytes(data[i..i + 8].try_into().unwrap());
+        c = __crc32d(c, val);
+        i += 8;
+    }
+    while i < data.len() {
+        c = __crc32b(c, data[i]);
+        i += 1;
+    }
+    c
+}
+
+#[cfg(target_arch = "aarch64")]
+#[arcane]
+fn crc32_impl_arm_v2(_token: Arm64V2Token, crc: u32, data: &[u8]) -> u32 {
+    use safe_unaligned_simd::aarch64::{vld1q_u8, vld1q_u64};
+
+    let len = data.len();
+
+    // Small data: use hardware CRC directly (faster than PMULL setup)
+    if len < 16 {
+        return crc32_hw(_token, crc, data);
+    }
+
+    // Fold constants: same as NeonAes path
+    static MULTS_1V: [u64; 2] = [CRC32_X159_MODG as u64, CRC32_X95_MODG as u64];
+    static MULTS_4V: [u64; 2] = [CRC32_X543_MODG as u64, CRC32_X479_MODG as u64];
+    static MULTS_2V: [u64; 2] = [CRC32_X287_MODG as u64, CRC32_X223_MODG as u64];
+    static BARRETT_0: [u64; 2] = [CRC32_X95_MODG as u64, 0];
+    static BARRETT_1: [u64; 2] = [CRC32_BARRETT_1 as u64, 0];
+    static BARRETT_2: [u64; 2] = [CRC32_BARRETT_2 as u64, 0];
+
+    let multipliers_1 = vreinterpretq_p64_u64(vld1q_u64(&MULTS_1V));
+    let multipliers_4 = vreinterpretq_p64_u64(vld1q_u64(&MULTS_4V));
+    let multipliers_2 = vreinterpretq_p64_u64(vld1q_u64(&MULTS_2V));
+    let barrett_c0 = vreinterpretq_p64_u64(vld1q_u64(&BARRETT_0));
+    let barrett_c1 = vreinterpretq_p64_u64(vld1q_u64(&BARRETT_1));
+    let barrett_c2 = vreinterpretq_p64_u64(vld1q_u64(&BARRETT_2));
+
+    #[inline(always)]
+    fn ld16(data: &[u8], off: usize) -> &[u8; 16] {
+        data[off..off + 16].try_into().unwrap()
+    }
+
+    let mut p = data;
+
+    // Initialize: load first 16 bytes, XOR CRC into low 32 bits
+    let crc_vec = vreinterpretq_u8_u32(vsetq_lane_u32(crc, vdupq_n_u32(0), 0));
+    let mut v0 = veorq_u8(vld1q_u8(ld16(p, 0)), crc_vec);
+    p = &p[16..];
+
+    if p.len() >= 48 {
+        // 4-accumulator path
+        let mut v1 = vld1q_u8(ld16(p, 0));
+        let mut v2 = vld1q_u8(ld16(p, 16));
+        let mut v3 = vld1q_u8(ld16(p, 32));
+        p = &p[48..];
+
+        while p.len() >= 64 {
+            v0 = neon_fold_vec!(v0, vld1q_u8(ld16(p, 0)), multipliers_4);
+            v1 = neon_fold_vec!(v1, vld1q_u8(ld16(p, 16)), multipliers_4);
+            v2 = neon_fold_vec!(v2, vld1q_u8(ld16(p, 32)), multipliers_4);
+            v3 = neon_fold_vec!(v3, vld1q_u8(ld16(p, 48)), multipliers_4);
+            p = &p[64..];
+        }
+
+        v0 = neon_fold_vec!(v0, v2, multipliers_2);
+        v1 = neon_fold_vec!(v1, v3, multipliers_2);
+        if p.len() >= 32 {
+            v0 = neon_fold_vec!(v0, vld1q_u8(ld16(p, 0)), multipliers_2);
+            v1 = neon_fold_vec!(v1, vld1q_u8(ld16(p, 16)), multipliers_2);
+            p = &p[32..];
+        }
+
+        v0 = neon_fold_vec!(v0, v1, multipliers_1);
+        if p.len() >= 16 {
+            v0 = neon_fold_vec!(v0, vld1q_u8(ld16(p, 0)), multipliers_1);
+            p = &p[16..];
+        }
+    } else {
+        while p.len() >= 16 {
+            v0 = neon_fold_vec!(v0, vld1q_u8(ld16(p, 0)), multipliers_1);
+            p = &p[16..];
+        }
+    }
+
+    // Handle remaining 1-15 bytes with hardware CRC instead of scalar slice-by-8
+    if !p.is_empty() {
+        let partial = neon_barrett_reduce!(v0, barrett_c0, barrett_c1, barrett_c2);
+        return crc32_hw(_token, partial, p);
+    }
+
+    neon_barrett_reduce!(v0, barrett_c0, barrett_c1, barrett_c2)
+}
+
+// ---------------------------------------------------------------------------
 // Scalar fallback: slice-by-8
 // ---------------------------------------------------------------------------
 
@@ -858,10 +970,10 @@ mod parity {
     #[cfg(all(target_arch = "x86_64", feature = "avx512"))]
     fn avx512_modern_token_available() {
         use archmage::prelude::*;
-        let token = Avx512ModernToken::summon();
+        let token = X64V4xToken::summon();
         assert!(
             token.is_some(),
-            "Avx512ModernToken should be available on this CPU"
+            "X64V4xToken should be available on this CPU"
         );
     }
 }

@@ -31,9 +31,9 @@ checksum = "5192cca8006f1fd4f7237516f40fa183bb07f8fbdfedaa0036de5ea9b0b45e78"
 
 [[package]]
 name = "archmage"
-version = "0.7.0"
+version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "61bd463aee29794a0318115ab857c2486842b28956c3f75365b304f1047b4758"
+checksum = "39cd784d0313ecebddae883945fb84f9303882bd5974e3a80841533f816a643a"
 dependencies = [
  "archmage-macros",
  "safe_unaligned_simd",
@@ -41,9 +41,9 @@ dependencies = [
 
 [[package]]
 name = "archmage-macros"
-version = "0.7.0"
+version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "02b01e2d131ffadba47bdff5d5e1d5d8a3b9743dc6b3d6ce4847ae2d6d306058"
+checksum = "6bd96b6ba7fd246a61fe3d07f8ff34c3fa29650522f9ce8983ba77a8810da0f4"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -269,15 +269,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "magetypes"
-version = "0.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7d55dd4e83507ff9fe129b01669adca1e302ef346dac252ef59139c78def312a"
-dependencies = [
- "archmage",
-]
-
-[[package]]
 name = "memchr"
 version = "2.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -500,7 +491,6 @@ dependencies = [
  "criterion",
  "flate2",
  "libdeflater",
- "magetypes",
  "miniz_oxide",
  "safe_unaligned_simd",
 ]

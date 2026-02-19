@@ -28,10 +28,10 @@ const MAX_CHUNK_LEN: usize = 5552;
 /// ```
 #[allow(unexpected_cfgs)]
 pub fn adler32(adler: u32, data: &[u8]) -> u32 {
-    // modern = AVX-512 VNNI, v3 = AVX2, neon = NEON, scalar = fallback
+    // v4x = AVX-512 VNNI, v3 = AVX2, neon = NEON, scalar = fallback
     #[cfg(feature = "avx512")]
     {
-        incant!(adler32_impl(adler, data), [modern, v3, neon])
+        incant!(adler32_impl(adler, data), [v4x, v3, neon])
     }
     #[cfg(not(feature = "avx512"))]
     {
@@ -65,7 +65,7 @@ pub(crate) fn adler32_combine(adler1: u32, adler2: u32, len2: usize) -> u32 {
 }
 
 // ---------------------------------------------------------------------------
-// AVX-512 VNNI implementation (x86_64-v4x: Avx512ModernToken = AVX-512 + VNNI)
+// AVX-512 VNNI implementation (x86_64-v4x: X64V4xToken = AVX-512 + VNNI)
 //
 // Uses `vpdpbusd` (dot product of unsigned/signed bytes to i32) for both s1
 // and s2 accumulation. Processes 4*VL=128 bytes per inner loop iteration with
@@ -74,7 +74,7 @@ pub(crate) fn adler32_combine(adler1: u32, adler2: u32, len2: usize) -> u32 {
 #[cfg(all(target_arch = "x86_64", feature = "avx512"))]
 #[arcane]
 #[allow(clippy::incompatible_msrv)] // avx512 feature requires rustc 1.89+
-fn adler32_impl_modern(_token: Avx512ModernToken, adler: u32, data: &[u8]) -> u32 {
+fn adler32_impl_v4x(_token: X64V4xToken, adler: u32, data: &[u8]) -> u32 {
     use safe_unaligned_simd::x86_64::_mm256_loadu_si256;
 
     const VL: usize = 32;
