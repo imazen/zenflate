@@ -26,7 +26,7 @@ avx512 = ["archmage/avx512", "safe_unaligned_simd/avx512"]
 unchecked = []
 
 [dependencies]
-archmage = { version = "0.8.3", default-features = false, features = ["macros", "safe_unaligned_simd"] }
+archmage = { version = "0.8.4", default-features = false, features = ["macros", "safe_unaligned_simd"] }
 safe_unaligned_simd = { version = "0.2", default-features = false }
 
 [dev-dependencies]
