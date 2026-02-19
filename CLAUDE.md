@@ -80,5 +80,26 @@ fat pointers in outer strategy loop and hc_matchfinder (L5-9).
 Parallel compression uses pigz-style chunking: equal-sized chunks with 32KB
 dictionary overlap, sync flush at boundaries, combined CRC-32 via GF(2) matrix.
 
+## Investigation Notes
+
+### L1 +48% instruction overhead (callgrind)
+- NOT panic-related (zero panic calls in assembly)
+- Root cause: register pressure from fat pointers + separate hash table allocation
+- 18 stack spills in Rust hot loop vs 2 in C
+- Stack frame: 232 bytes Rust vs 104 bytes C (2.2x)
+- Raw pointers DON'T help (LLVM already proves bounds for simple 2-entry hash table)
+- Fix would require embedding hash table in Compressor struct (like C does)
+- `ht.rs` has `longest_match_raw`/`skip_bytes_raw` available but unused
+
+### Callgrind instruction counts (all levels, unchecked, 1MB sequential)
+| Level | zenflate | C | Overhead |
+|-------|---------|---|----------|
+| L1 | 86.8M | 58.5M | +48% |
+| L6 | 116.0M | 93.1M | +25% |
+| L9 | 117.9M | 96.3M | +22% |
+| L12 | 361.4M | 302.3M | +20% |
+
+Cachegrind: D1 cache misses nearly identical. Gap is pure instruction count.
+
 ## Known Bugs
 (none yet)
