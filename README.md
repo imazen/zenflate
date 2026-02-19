@@ -88,23 +88,28 @@ Decompression works in `no_std` without `alloc`; all state is stack-allocated.
 
 ## Performance
 
-Benchmarked on x86_64 with AVX-512 (Intel), `--features unchecked`. 1 MB input data.
+Benchmarked on x86_64 with AVX-512 (Intel), `--features unchecked`.
 Run `cargo bench --features unchecked` to reproduce.
 
-**Compression** (1 MB mixed data — pseudo-random with runs):
+**Compression** (3 MiB photo bitmap, reproducible via `examples/ratio_bench.rs`):
 
-| Library | Level | Speed | Ratio |
-|---------|-------|-------|-------|
-| **zenflate** | 1 (fast) | 162 MiB/s | 88.95% |
-| **zenflate** | 6 (default) | 128 MiB/s | 88.69% |
-| **zenflate** | 12 (best) | 47 MiB/s | **88.55%** |
-| libdeflate (C) | 12 | 54 MiB/s | 88.55% |
-| flate2 | 1 (fast) | 333 MiB/s | 88.63% |
-| flate2 | 9 (best) | 64 MiB/s | 88.73% |
-| miniz_oxide | 9 (best) | 64 MiB/s | 88.73% |
+| Library | Level | Ratio | Safe | Unchecked | vs C |
+|---------|-------|-------|------|-----------|------|
+| **zenflate** | 1 (fastest) | 91.69% | 134 MiB/s | 149 MiB/s | 0.81x |
+| **zenflate** | 6 (lazy) | 92.31% | 102 MiB/s | 105 MiB/s | 0.88x |
+| **zenflate** | 9 (lazy2) | 92.31% | 102 MiB/s | 104 MiB/s | 0.87x |
+| **zenflate** | 10 (near-opt) | 91.97% | 38 MiB/s | 47 MiB/s | 0.87x |
+| **zenflate** | 12 (best) | 91.80% | 33 MiB/s | 39 MiB/s | 0.89x |
+| libdeflate (C) | 1 | 91.69% | — | 185 MiB/s | — |
+| libdeflate (C) | 9 | 92.31% | — | 119 MiB/s | — |
+| libdeflate (C) | 12 | 91.80% | — | 44 MiB/s | — |
+| flate2 | 1 | 91.70% | — | 291 MiB/s | — |
+| flate2 | 9 (best) | 91.58% | — | 55 MiB/s | — |
+| miniz_oxide | 9 (best) | 91.58% | — | 55 MiB/s | — |
 
-zenflate L6 compresses **smaller** than flate2/miniz_oxide's best (L9) while running **2x faster**.
-On repetitive data, zenflate L1 is **2.4x faster** than libdeflate C.
+zenflate and libdeflate produce **byte-identical output** at every level.
+zenflate L6-9 runs **~2x faster** than flate2/miniz_oxide at comparable ratios.
+The `unchecked` feature helps most at L10-12 (+18-24%), less at L1-9 (+2-11%).
 
 **Decompression** (compressed at L6):
 

@@ -40,6 +40,40 @@ fn make_mixed(size: usize) -> Vec<u8> {
     data
 }
 
+fn make_photo_bitmap(width: usize, height: usize) -> Vec<u8> {
+    // Generate a deterministic photo-like RGB bitmap: smooth gradients with
+    // local noise, similar to natural image pixel data. Neighboring pixels
+    // are correlated (like real photos) but with enough entropy to exercise
+    // the compressor properly.
+    let mut data = Vec::with_capacity(width * height * 3);
+    let mut rng: u32 = 0x12345678;
+    let mut next_rng = || -> u32 {
+        rng = rng.wrapping_mul(1103515245).wrapping_add(12345);
+        rng
+    };
+
+    for y in 0..height {
+        for x in 0..width {
+            // Smooth gradient base (simulates sky/ground/color regions)
+            let fx = x as f64 / width as f64;
+            let fy = y as f64 / height as f64;
+            let r_base = (fx * 180.0 + fy * 60.0) as u32;
+            let g_base = ((1.0 - fy) * 200.0 + fx * 40.0) as u32;
+            let b_base = (fy * 220.0 + (1.0 - fx) * 30.0) as u32;
+
+            // Local noise (simulates texture/detail)
+            let noise_r = (next_rng() >> 16) % 31;
+            let noise_g = (next_rng() >> 16) % 31;
+            let noise_b = (next_rng() >> 16) % 31;
+
+            data.push((r_base + noise_r).min(255) as u8);
+            data.push((g_base + noise_g).min(255) as u8);
+            data.push((b_base + noise_b).min(255) as u8);
+        }
+    }
+    data
+}
+
 // ---------------------------------------------------------------------------
 // Level mapping helpers
 // ---------------------------------------------------------------------------
@@ -81,10 +115,11 @@ fn bench_compress(c: &mut Criterion) {
         ("sequential", make_sequential(size)),
         ("zeros", make_zeros(size)),
         ("mixed", make_mixed(size)),
+        ("photo", make_photo_bitmap(577, 577)), // ~1MB RGB bitmap
     ];
 
-    // Key levels: 1 (fastest), 6 (default), 12 (best)
-    let levels = [1u32, 6, 12];
+    // Key levels from each strategy tier
+    let levels = [1u32, 2, 4, 6, 9, 10, 12];
 
     for (name, data) in &inputs {
         let mut group = c.benchmark_group(format!("compress/{name}"));
@@ -170,6 +205,7 @@ fn bench_decompress(c: &mut Criterion) {
         ("sequential", make_sequential(size)),
         ("zeros", make_zeros(size)),
         ("mixed", make_mixed(size)),
+        ("photo", make_photo_bitmap(577, 577)),
     ];
 
     // Compress at level 6 (default) and then benchmark decompression

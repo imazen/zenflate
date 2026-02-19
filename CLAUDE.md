@@ -67,20 +67,40 @@ These must be re-applied after any `cargo update` of archmage.
 | L12 | zeros | 14.3ms | 13.4ms | 0.94x |
 | L12 | mixed | 20.1ms | 17.6ms | 0.88x |
 
-### Ecosystem comparison (1MB mixed data, --features unchecked)
+### All levels, photo bitmap (3 MiB, built-in reproducible data)
+
+| Level | Ratio | Safe | Unchecked | C | vs C |
+|-------|-------|------|-----------|---|------|
+| L1 | 91.69% | 134 MiB/s | 149 MiB/s | 185 MiB/s | 0.81x |
+| L2 | 92.36% | 104 MiB/s | 109 MiB/s | 128 MiB/s | 0.85x |
+| L3 | 92.36% | 105 MiB/s | 108 MiB/s | 128 MiB/s | 0.84x |
+| L4 | 92.36% | 98 MiB/s | 106 MiB/s | 128 MiB/s | 0.83x |
+| L5 | 92.31% | 99 MiB/s | 103 MiB/s | 123 MiB/s | 0.84x |
+| L6 | 92.31% | 102 MiB/s | 105 MiB/s | 120 MiB/s | 0.88x |
+| L7 | 92.31% | 103 MiB/s | 105 MiB/s | 126 MiB/s | 0.83x |
+| L8 | 92.31% | 101 MiB/s | 104 MiB/s | 114 MiB/s | 0.91x |
+| L9 | 92.31% | 102 MiB/s | 104 MiB/s | 119 MiB/s | 0.87x |
+| L10 | 91.97% | 38 MiB/s | 47 MiB/s | 54 MiB/s | 0.87x |
+| L11 | 91.88% | 37 MiB/s | 47 MiB/s | 52 MiB/s | 0.90x |
+| L12 | 91.80% | 33 MiB/s | 39 MiB/s | 44 MiB/s | 0.89x |
+
+Byte-identical output at every level. Speed gap is 0.81-0.91x C.
+`unchecked` helps most at L10-12 (+18-27%), modest at L1-9 (+2-11%).
+Ratio is flat L2-9 (92.31-92.36%); near-optimal L10-12 squeezes to 91.80%.
+
+### Ecosystem comparison (3 MiB photo bitmap, unchecked)
 
 | Library | Level | Speed | Ratio |
 |---------|-------|-------|-------|
-| **zenflate** | 1 | 162 MiB/s | 88.95% |
-| **zenflate** | 6 | 128 MiB/s | 88.69% |
-| **zenflate** | 12 | 47 MiB/s | **88.55%** |
-| libdeflate (C) | 12 | 54 MiB/s | 88.55% |
-| flate2 | 1 | 333 MiB/s | 88.63% |
-| flate2 | 9 (best) | 64 MiB/s | 88.73% |
-| miniz_oxide | 9 (best) | 64 MiB/s | 88.73% |
+| zenflate | 6-9 | 104-105 MiB/s | 92.31% |
+| zenflate | 12 | 39 MiB/s | 91.80% |
+| flate2 | 1 | 291 MiB/s | 91.70% |
+| flate2 | 4-9 (best) | 55 MiB/s | 91.58% |
+| miniz_oxide | 4-9 (best) | 55 MiB/s | 91.58% |
 
-zenflate L6 compresses smaller than flate2/miniz_oxide L9 while running 2x faster.
-flate2/miniz_oxide L1 is faster (simpler hash) but with comparable ratio on this data.
+zenflate L6-9 is ~2x faster than flate2 at comparable ratios.
+On this photo data, flate2 L9 (91.58%) slightly beats zenflate L12 (91.80%)
+on ratio — different algorithms have different strengths on different data.
 
 ### Parallel Compression (4MB mixed data, --features unchecked)
 
