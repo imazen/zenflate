@@ -1184,7 +1184,8 @@ impl Decompressor {
     }
 }
 
-#[cfg(test)]
+// All decompress tests use libdeflater (C FFI) to create test data.
+#[cfg(all(test, not(miri)))]
 mod tests {
     use super::*;
 

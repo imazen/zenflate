@@ -435,6 +435,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn test_known_values() {
         let data = b"Hello World";
         let result = adler32(1, data);
@@ -451,7 +452,8 @@ mod tests {
     }
 }
 
-#[cfg(test)]
+// All parity tests use libdeflater (C FFI) for comparison.
+#[cfg(all(test, not(miri)))]
 mod parity {
     use super::*;
 

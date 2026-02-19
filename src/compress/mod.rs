@@ -1626,6 +1626,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn test_compress_literals_large() {
         let data: Vec<u8> = (0..=255).cycle().take(100_000).collect();
         let mut c = Compressor::new(CompressionLevel::DEFAULT);
@@ -1675,6 +1676,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn test_cross_decompress_libdeflater() {
         // Compress with zenflate, decompress with libdeflater
         let data: Vec<u8> = (0..=255).cycle().take(50_000).collect();
@@ -1712,17 +1714,20 @@ mod tests {
             "level {level}: zenflate roundtrip mismatch"
         );
 
-        // Verify with libdeflater
-        let mut ld = libdeflater::Decompressor::new();
-        let mut ld_decompressed = vec![0u8; data.len()];
-        let ld_dsize = ld
-            .deflate_decompress(&compressed[..csize], &mut ld_decompressed)
-            .unwrap_or_else(|e| panic!("level {level}: libdeflater decompress failed: {e}"));
-        assert_eq!(
-            &ld_decompressed[..ld_dsize],
-            data,
-            "level {level}: libdeflater roundtrip mismatch"
-        );
+        // Verify with libdeflater (skip under miri — can't run C FFI)
+        #[cfg(not(miri))]
+        {
+            let mut ld = libdeflater::Decompressor::new();
+            let mut ld_decompressed = vec![0u8; data.len()];
+            let ld_dsize = ld
+                .deflate_decompress(&compressed[..csize], &mut ld_decompressed)
+                .unwrap_or_else(|e| panic!("level {level}: libdeflater decompress failed: {e}"));
+            assert_eq!(
+                &ld_decompressed[..ld_dsize],
+                data,
+                "level {level}: libdeflater roundtrip mismatch"
+            );
+        }
     }
 
     #[test]
@@ -1775,6 +1780,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn test_fastest_cross_decompress_c() {
         // Compress with C libdeflate level 1, decompress with zenflate
         let data: Vec<u8> = (0..=255u8).cycle().take(50_000).collect();
@@ -1993,6 +1999,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn test_all_levels_cross_decompress_c() {
         // Compress with C libdeflate at each level, decompress with zenflate
         let data: Vec<u8> = (0..=255u8).cycle().take(50_000).collect();
@@ -2202,6 +2209,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn test_parallel_gzip_matches_single_threaded_crc() {
         // Verify the CRC-32 in the parallel output is correct by having
         // libdeflater (C) decompress it.

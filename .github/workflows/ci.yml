@@ -98,13 +98,17 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Miri tests (unchecked feature)
+        # Run small-input tests only. Miri is ~1000x slower than native,
+        # so even 2KB inputs at L12 take hours. The *_small tests (13 bytes)
+        # exercise all code paths including raw-pointer matchfinders.
         run: |
           cargo miri test --features unchecked -- \
             --skip zeros --skip sequential --skip large \
             --skip all_levels --skip all_formats \
             --skip window_boundary --skip block_splitting \
             --skip parallel --skip compression_improves \
-            --skip short_inputs
+            --skip short_inputs --skip repetitive \
+            --skip actually_compresses
 
   # ==========================================================================
   # MSRV check

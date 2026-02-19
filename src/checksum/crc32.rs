@@ -561,7 +561,8 @@ mod tests {
     }
 }
 
-#[cfg(test)]
+// All parity tests use libdeflater (C FFI) for comparison.
+#[cfg(all(test, not(miri)))]
 mod parity {
     use super::*;
 
