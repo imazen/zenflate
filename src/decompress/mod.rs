@@ -178,7 +178,7 @@ const LENS_SIZE: usize =
 ///
 /// // Compress some data
 /// let data = b"The quick brown fox jumps over the lazy dog.";
-/// let mut c = Compressor::new(CompressionLevel::FASTEST);
+/// let mut c = Compressor::new(CompressionLevel::fastest());
 /// let bound = Compressor::deflate_compress_bound(data.len());
 /// let mut compressed = vec![0u8; bound];
 /// let csize = c.deflate_compress(data, &mut compressed).unwrap();

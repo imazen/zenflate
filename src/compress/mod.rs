@@ -44,46 +44,80 @@ const FAST_SEQ_STORE_LENGTH: usize = 8192;
 
 /// Compression level (0-12).
 ///
-/// Higher levels produce smaller output but take longer. Level 6 is a good default.
+/// Higher levels produce smaller output but take longer.
+///
+/// | Level | Strategy | Typical speed | Constructor |
+/// |-------|----------|---------------|-------------|
+/// | 0 | Store (no compression) | memcpy | [`none()`](Self::none) |
+/// | 1 | Hash table | ~150 MiB/s | [`fastest()`](Self::fastest) |
+/// | 2-4 | Greedy | ~105 MiB/s | [`fast()`](Self::fast) |
+/// | 5-7 | Lazy | ~105 MiB/s | [`balanced()`](Self::balanced) |
+/// | 8-9 | Lazy (double) | ~104 MiB/s | [`high()`](Self::high) |
+/// | 10-12 | Near-optimal | ~40 MiB/s | [`best()`](Self::best) |
+///
+/// Levels 2-9 produce similar ratios at similar speeds on most data.
+/// The big jumps are L0→L1 (store vs. compress) and L9→L10 (lazy vs. near-optimal).
 ///
 /// ```
 /// use zenflate::CompressionLevel;
 ///
-/// let level = CompressionLevel::DEFAULT; // level 6
+/// let level = CompressionLevel::balanced(); // level 6
 /// assert_eq!(level.level(), 6);
 ///
-/// // Out-of-range values are clamped
+/// // Specific levels via new(), clamped to 0-12
 /// assert_eq!(CompressionLevel::new(99).level(), 12);
 /// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CompressionLevel(u32);
 
 impl CompressionLevel {
-    /// Create a compression level. Clamps to 0-12.
+    /// Create a compression level from a numeric value. Clamps to 0-12.
     pub fn new(level: u32) -> Self {
         Self(level.min(12))
     }
 
-    /// Get the numeric level.
+    /// Get the numeric level (0-12).
     pub fn level(self) -> u32 {
         self.0
     }
 
-    /// Level 0: no compression (uncompressed blocks only).
-    pub const NONE: Self = Self(0);
-    /// Level 1: fastest compression.
-    pub const FASTEST: Self = Self(1);
-    /// Level 6: default compression (good balance of speed and ratio).
-    pub const DEFAULT: Self = Self(6);
-    /// Level 9: maximum compression with greedy/lazy strategies.
-    pub const BEST_GREEDY: Self = Self(9);
-    /// Level 12: maximum compression with near-optimal parsing.
-    pub const BEST: Self = Self(12);
+    /// Level 0: no compression. Wraps input in uncompressed DEFLATE blocks.
+    pub fn none() -> Self {
+        Self(0)
+    }
+
+    /// Level 1: fastest compression. Hash table matchfinder, no lazy evaluation.
+    pub fn fastest() -> Self {
+        Self(1)
+    }
+
+    /// Level 4: fast compression. Greedy hash-chain matchfinder.
+    pub fn fast() -> Self {
+        Self(4)
+    }
+
+    /// Level 6: balanced compression. Lazy hash-chain matchfinder.
+    /// This is the default.
+    pub fn balanced() -> Self {
+        Self(6)
+    }
+
+    /// Level 9: high compression. Double-lazy hash-chain matchfinder.
+    /// Best ratio before the much slower near-optimal parser.
+    pub fn high() -> Self {
+        Self(9)
+    }
+
+    /// Level 12: maximum compression. Near-optimal parser with multiple passes.
+    /// About 3x slower than [`balanced()`](Self::balanced).
+    pub fn best() -> Self {
+        Self(12)
+    }
 }
 
 impl Default for CompressionLevel {
     fn default() -> Self {
-        Self::DEFAULT
+        Self::balanced()
     }
 }
 
@@ -94,7 +128,7 @@ impl Default for CompressionLevel {
 /// ```
 /// use zenflate::{Compressor, CompressionLevel};
 ///
-/// let mut compressor = Compressor::new(CompressionLevel::DEFAULT);
+/// let mut compressor = Compressor::new(CompressionLevel::balanced());
 ///
 /// let data = b"Hello, World! Hello, World! Hello, World!";
 /// let bound = Compressor::deflate_compress_bound(data.len());
@@ -1272,7 +1306,7 @@ impl Compressor {
     /// use zenflate::{Compressor, CompressionLevel, Decompressor};
     ///
     /// let data = vec![0u8; 100_000];
-    /// let mut compressor = Compressor::new(CompressionLevel::DEFAULT);
+    /// let mut compressor = Compressor::new(CompressionLevel::balanced());
     /// let bound = Compressor::gzip_compress_bound(data.len()) + 4 * 5;
     /// let mut compressed = vec![0u8; bound];
     /// let csize = compressor.gzip_compress_parallel(&data, &mut compressed, 4).unwrap();
@@ -1584,7 +1618,7 @@ mod tests {
 
     #[test]
     fn test_compress_level0_empty() {
-        let mut c = Compressor::new(CompressionLevel::NONE);
+        let mut c = Compressor::new(CompressionLevel::none());
         let mut output = vec![0u8; 100];
         let size = c.deflate_compress(&[], &mut output).unwrap();
         assert_eq!(size, 5);
@@ -1601,7 +1635,7 @@ mod tests {
     #[test]
     fn test_compress_level0_roundtrip() {
         let data = b"Hello, World! This is a test of uncompressed DEFLATE blocks.";
-        let mut c = Compressor::new(CompressionLevel::NONE);
+        let mut c = Compressor::new(CompressionLevel::none());
         let bound = Compressor::deflate_compress_bound(data.len());
         let mut compressed = vec![0u8; bound];
         let csize = c.deflate_compress(data, &mut compressed).unwrap();
@@ -1617,7 +1651,7 @@ mod tests {
     #[test]
     fn test_compress_level0_large() {
         let data: Vec<u8> = (0..=255).cycle().take(200_000).collect();
-        let mut c = Compressor::new(CompressionLevel::NONE);
+        let mut c = Compressor::new(CompressionLevel::none());
         let bound = Compressor::deflate_compress_bound(data.len());
         let mut compressed = vec![0u8; bound];
         let csize = c.deflate_compress(&data, &mut compressed).unwrap();
@@ -1634,7 +1668,7 @@ mod tests {
     fn test_compress_literals_roundtrip() {
         // Test the literal-only compressor at level 6 (no matchfinding yet)
         let data = b"Hello, World! This is a test of literal-only DEFLATE compression.";
-        let mut c = Compressor::new(CompressionLevel::DEFAULT);
+        let mut c = Compressor::new(CompressionLevel::balanced());
         let bound = Compressor::deflate_compress_bound(data.len());
         let mut compressed = vec![0u8; bound];
         let csize = c.deflate_compress(data, &mut compressed).unwrap();
@@ -1651,7 +1685,7 @@ mod tests {
     #[cfg_attr(miri, ignore)]
     fn test_compress_literals_large() {
         let data: Vec<u8> = (0..=255).cycle().take(100_000).collect();
-        let mut c = Compressor::new(CompressionLevel::DEFAULT);
+        let mut c = Compressor::new(CompressionLevel::balanced());
         let bound = Compressor::deflate_compress_bound(data.len());
         let mut compressed = vec![0u8; bound];
         let csize = c.deflate_compress(&data, &mut compressed).unwrap();
@@ -1668,7 +1702,7 @@ mod tests {
     #[test]
     fn test_compress_zlib_roundtrip() {
         let data = b"Test zlib compression roundtrip!";
-        let mut c = Compressor::new(CompressionLevel::DEFAULT);
+        let mut c = Compressor::new(CompressionLevel::balanced());
         let bound = Compressor::zlib_compress_bound(data.len());
         let mut compressed = vec![0u8; bound];
         let csize = c.zlib_compress(data, &mut compressed).unwrap();
@@ -1684,7 +1718,7 @@ mod tests {
     #[test]
     fn test_compress_gzip_roundtrip() {
         let data = b"Test gzip compression roundtrip!";
-        let mut c = Compressor::new(CompressionLevel::DEFAULT);
+        let mut c = Compressor::new(CompressionLevel::balanced());
         let bound = Compressor::gzip_compress_bound(data.len());
         let mut compressed = vec![0u8; bound];
         let csize = c.gzip_compress(data, &mut compressed).unwrap();
@@ -1702,7 +1736,7 @@ mod tests {
     fn test_cross_decompress_libdeflater() {
         // Compress with zenflate, decompress with libdeflater
         let data: Vec<u8> = (0..=255).cycle().take(50_000).collect();
-        let mut c = Compressor::new(CompressionLevel::DEFAULT);
+        let mut c = Compressor::new(CompressionLevel::balanced());
         let bound = Compressor::deflate_compress_bound(data.len());
         let mut compressed = vec![0u8; bound];
         let csize = c.deflate_compress(&data, &mut compressed).unwrap();
@@ -1789,7 +1823,7 @@ mod tests {
     fn test_fastest_actually_compresses() {
         // Verify level 1 actually produces smaller output than literal-only
         let data = vec![0u8; 10_000];
-        let mut c = Compressor::new(CompressionLevel::FASTEST);
+        let mut c = Compressor::new(CompressionLevel::fastest());
         let bound = Compressor::deflate_compress_bound(data.len());
         let mut compressed = vec![0u8; bound];
         let csize = c.deflate_compress(&data, &mut compressed).unwrap();

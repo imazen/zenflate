@@ -17,7 +17,7 @@
 //! let data = b"Hello, World! Hello, World! Hello, World!";
 //!
 //! // Compress
-//! let mut compressor = Compressor::new(CompressionLevel::DEFAULT);
+//! let mut compressor = Compressor::new(CompressionLevel::balanced());
 //! let bound = Compressor::deflate_compress_bound(data.len());
 //! let mut compressed = vec![0u8; bound];
 //! let csize = compressor.deflate_compress(data, &mut compressed).unwrap();

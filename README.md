@@ -17,7 +17,7 @@ zenflate = "0.1"
 use zenflate::{Compressor, CompressionLevel};
 
 let data = b"Hello, World! Hello, World! Hello, World!";
-let mut compressor = Compressor::new(CompressionLevel::DEFAULT);
+let mut compressor = Compressor::new(CompressionLevel::balanced());
 
 let bound = Compressor::deflate_compress_bound(data.len());
 let mut compressed = vec![0u8; bound];
@@ -62,19 +62,22 @@ decompressor.gzip_decompress(compressed, &mut out)?;
 | Level | Strategy | Speed vs ratio |
 |-------|----------|---------------|
 | 0 | Uncompressed | No compression, just framing |
-| 1 | Fastest (hash table) | Best throughput |
-| 2-3 | Greedy | |
-| 4-6 | Lazy | Good balance (6 is default) |
-| 7-9 | Lazy2 (double lazy eval) | Better ratio |
-| 10-12 | Near-optimal parsing | Best ratio, slowest |
+| 1 | Fastest (hash table) | Best throughput | `fastest()` |
+| 2-4 | Greedy | | `fast()` (L4) |
+| 5-7 | Lazy | Good balance | `balanced()` (L6, default) |
+| 8-9 | Lazy2 (double lazy eval) | Better ratio | `high()` (L9) |
+| 10-12 | Near-optimal parsing | Best ratio, ~3x slower | `best()` (L12) |
 
 ```rust
 use zenflate::CompressionLevel;
 
-CompressionLevel::NONE     // 0
-CompressionLevel::FASTEST  // 1
-CompressionLevel::DEFAULT  // 6
-CompressionLevel::BEST     // 12
+CompressionLevel::none()      // 0 — store
+CompressionLevel::fastest()   // 1 — hash table
+CompressionLevel::fast()      // 4 — greedy
+CompressionLevel::balanced()  // 6 — lazy (default)
+CompressionLevel::high()      // 9 — lazy2
+CompressionLevel::best()      // 12 — near-optimal
+CompressionLevel::new(3)      // specific level
 ```
 
 Reuse `Compressor` and `Decompressor` across calls to avoid re-initialization.
