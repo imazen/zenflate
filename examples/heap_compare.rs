@@ -1,5 +1,5 @@
-/// Heap allocation comparison: zenflate vs libdeflate C.
-/// Run with: heaptrack cargo run --release --example heap_compare -- <level>
+// Heap allocation comparison: zenflate vs libdeflate C.
+// Run with: heaptrack cargo run --release --example heap_compare -- <level>
 
 fn make_mixed(size: usize) -> Vec<u8> {
     let mut data = Vec::with_capacity(size);

@@ -1,5 +1,5 @@
-/// Heap profiling: zenflate only.
-/// Run with: heaptrack cargo run --release --example heap_zen -- <level>
+// Heap profiling: zenflate only.
+// Run with: heaptrack cargo run --release --example heap_zen -- <level>
 
 fn make_mixed(size: usize) -> Vec<u8> {
     let mut data = Vec::with_capacity(size);

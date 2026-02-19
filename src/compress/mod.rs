@@ -2232,8 +2232,8 @@ mod tests {
     fn make_mixed_data(len: usize) -> Vec<u8> {
         let mut data = vec![0u8; len];
         // Mix of patterns: sequential, repeated, random-ish
-        for i in 0..len {
-            data[i] = match i % 1024 {
+        for (i, byte) in data.iter_mut().enumerate() {
+            *byte = match i % 1024 {
                 0..=255 => (i % 256) as u8,             // sequential
                 256..=511 => (i / 256 % 256) as u8,     // slow-changing
                 512..=767 => b"Hello, World! "[i % 14], // repeated text

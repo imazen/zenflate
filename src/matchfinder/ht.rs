@@ -150,6 +150,192 @@ impl HtMatchfinder {
         (best_len, best_offset)
     }
 
+    /// Find the longest match using raw pointers (unchecked mode).
+    ///
+    /// Equivalent to [`longest_match`] but takes `*const u8` instead of `&[u8]`
+    /// to eliminate fat-pointer register pressure in the hot loop.
+    ///
+    /// # Safety
+    ///
+    /// `input_ptr` must be valid for reads of `in_end` bytes from the start of the input.
+    /// `in_next + 4` must not exceed `in_end`.
+    #[cfg(feature = "unchecked")]
+    #[inline(always)]
+    #[allow(clippy::too_many_arguments, dead_code)]
+    pub unsafe fn longest_match_raw(
+        &mut self,
+        input_ptr: *const u8,
+        in_end: usize,
+        in_base_offset: &mut usize,
+        in_next: usize,
+        max_len: u32,
+        nice_len: u32,
+        next_hash: &mut u32,
+    ) -> (u32, u32) {
+        use super::raw::lz_extend_raw;
+        use crate::fast_bytes::{load_u32_le_ptr, prefetch_ptr};
+
+        unsafe {
+            debug_assert!(max_len >= HT_MATCHFINDER_REQUIRED_NBYTES);
+
+            let mut cur_pos = (in_next - *in_base_offset) as i32;
+
+            // Slide window if we've reached the boundary
+            if cur_pos as u32 == MATCHFINDER_WINDOW_SIZE {
+                self.slide_window();
+                *in_base_offset += MATCHFINDER_WINDOW_SIZE as usize;
+                cur_pos = 0;
+            }
+
+            let in_base = *in_base_offset;
+            let cutoff = cur_pos - MATCHFINDER_WINDOW_SIZE as i32;
+
+            let hash = *next_hash as usize;
+
+            // Precompute next hash from in_next+1 and prefetch the bucket
+            if in_next + 5 <= in_end {
+                *next_hash = lz_hash(
+                    load_u32_le_ptr(input_ptr, in_next + 1),
+                    HT_MATCHFINDER_HASH_ORDER,
+                );
+                prefetch_ptr(self.hash_tab.as_ptr() as *const u8);
+                let _ = *self.hash_tab.get_unchecked(*next_hash as usize);
+                prefetch_ptr(self.hash_tab.get_unchecked(*next_hash as usize).as_ptr() as *const u8);
+            }
+
+            // Load 4 bytes at current position for quick comparison
+            let seq = load_u32_le_ptr(input_ptr, in_next);
+
+            // BUCKET_SIZE == 2 hand-unrolled path (matches C code)
+            let cur_node = *self.hash_tab.get_unchecked(hash).get_unchecked(0) as i32;
+            *self.hash_tab.get_unchecked_mut(hash).get_unchecked_mut(0) = cur_pos as i16;
+
+            if cur_node <= cutoff {
+                return (0, 0);
+            }
+
+            let match_pos = (in_base as isize + cur_node as isize) as usize;
+            let matchptr_seq = load_u32_le_ptr(input_ptr, match_pos);
+
+            let to_insert = cur_node as i16;
+            let cur_node2 = *self.hash_tab.get_unchecked(hash).get_unchecked(1) as i32;
+            *self.hash_tab.get_unchecked_mut(hash).get_unchecked_mut(1) = to_insert;
+
+            let mut best_len = 0u32;
+            let mut best_offset = 0u32;
+
+            if matchptr_seq == seq {
+                best_len =
+                    lz_extend_raw(input_ptr.add(in_next), input_ptr.add(match_pos), 4, max_len);
+                best_offset = (in_next - match_pos) as u32;
+
+                if cur_node2 <= cutoff || best_len >= nice_len {
+                    return (best_len, best_offset);
+                }
+
+                let match_pos2 = (in_base as isize + cur_node2 as isize) as usize;
+                let matchptr2_seq = load_u32_le_ptr(input_ptr, match_pos2);
+
+                // Check second entry: must match first 4 bytes AND the bytes at best_len-3
+                if matchptr2_seq == seq && best_len >= 4 {
+                    let tail_off = (best_len - 3) as usize;
+                    let s_tail = load_u32_le_ptr(input_ptr, in_next + tail_off);
+                    let m_tail = load_u32_le_ptr(input_ptr, match_pos2 + tail_off);
+                    if s_tail == m_tail {
+                        let len2 = lz_extend_raw(
+                            input_ptr.add(in_next),
+                            input_ptr.add(match_pos2),
+                            4,
+                            max_len,
+                        );
+                        if len2 > best_len {
+                            best_len = len2;
+                            best_offset = (in_next - match_pos2) as u32;
+                        }
+                    }
+                }
+            } else {
+                if cur_node2 <= cutoff {
+                    return (0, 0);
+                }
+                let match_pos2 = (in_base as isize + cur_node2 as isize) as usize;
+                let matchptr2_seq = load_u32_le_ptr(input_ptr, match_pos2);
+                if matchptr2_seq == seq {
+                    best_len = lz_extend_raw(
+                        input_ptr.add(in_next),
+                        input_ptr.add(match_pos2),
+                        4,
+                        max_len,
+                    );
+                    best_offset = (in_next - match_pos2) as u32;
+                }
+            }
+
+            (best_len, best_offset)
+        }
+    }
+
+    /// Skip `count` bytes using raw pointers (unchecked mode).
+    ///
+    /// # Safety
+    ///
+    /// `input_ptr` must be valid for reads of `in_end` bytes.
+    #[cfg(feature = "unchecked")]
+    #[inline(always)]
+    #[allow(dead_code)]
+    pub unsafe fn skip_bytes_raw(
+        &mut self,
+        input_ptr: *const u8,
+        in_end: usize,
+        in_base_offset: &mut usize,
+        in_next: usize,
+        count: u32,
+        next_hash: &mut u32,
+    ) {
+        use crate::fast_bytes::{load_u32_le_ptr, prefetch_ptr};
+
+        unsafe {
+            if count == 0 {
+                return;
+            }
+
+            if (count + HT_MATCHFINDER_REQUIRED_NBYTES) as usize > in_end - in_next {
+                return;
+            }
+
+            let mut cur_pos = (in_next - *in_base_offset) as i32;
+
+            if (cur_pos + count as i32 - 1) >= MATCHFINDER_WINDOW_SIZE as i32 {
+                self.slide_window();
+                *in_base_offset += MATCHFINDER_WINDOW_SIZE as usize;
+                cur_pos -= MATCHFINDER_WINDOW_SIZE as i32;
+            }
+
+            let mut hash = *next_hash as usize;
+            let mut pos = in_next;
+            let mut remaining = count;
+
+            while remaining > 0 {
+                // Shift bucket: move [0] to [1]
+                *self.hash_tab.get_unchecked_mut(hash).get_unchecked_mut(1) =
+                    *self.hash_tab.get_unchecked(hash).get_unchecked(0);
+                *self.hash_tab.get_unchecked_mut(hash).get_unchecked_mut(0) = cur_pos as i16;
+
+                pos += 1;
+                cur_pos += 1;
+                remaining -= 1;
+
+                if pos + 4 <= in_end {
+                    hash = lz_hash(load_u32_le_ptr(input_ptr, pos), HT_MATCHFINDER_HASH_ORDER)
+                        as usize;
+                }
+            }
+
+            prefetch_ptr(self.hash_tab.get_unchecked(hash).as_ptr() as *const u8);
+            *next_hash = hash as u32;
+        }
+    }
+
     /// Skip `count` bytes in the matchfinder (update hash table without finding matches).
     #[inline(always)]
     pub fn skip_bytes(
