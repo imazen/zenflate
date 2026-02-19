@@ -231,7 +231,11 @@ impl Decompressor {
         Ok(out_written)
     }
 
-    /// Decompress raw DEFLATE data, returning (input_consumed, output_written).
+    /// Decompress raw DEFLATE data, returning `(input_consumed, output_written)`.
+    ///
+    /// Like [`deflate_decompress`](Self::deflate_decompress), but also reports how many
+    /// bytes of `input` were consumed. Useful when the compressed data is embedded in a
+    /// larger buffer and you need to know where it ends.
     pub fn deflate_decompress_ex(
         &mut self,
         input: &[u8],

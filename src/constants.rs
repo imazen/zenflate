@@ -1,5 +1,8 @@
 //! DEFLATE format constants, ported from deflate_constants.h.
 
+// Some constants are defined for spec completeness but not yet used internally.
+#![allow(dead_code)]
+
 /// Uncompressed block type.
 pub const DEFLATE_BLOCKTYPE_UNCOMPRESSED: u32 = 0;
 /// Static Huffman block type.

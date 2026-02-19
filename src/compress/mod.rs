@@ -1256,6 +1256,150 @@ impl Compressor {
             );
         }
     }
+
+    /// Compress data in gzip format using multiple threads.
+    ///
+    /// Splits the input into chunks (one per thread), each with a 32KB dictionary
+    /// overlap from the previous chunk. All chunks are compressed in parallel, then
+    /// concatenated into a valid gzip stream.
+    ///
+    /// The compression ratio is nearly identical to single-threaded compression,
+    /// since each chunk uses a full 32KB dictionary window.
+    ///
+    /// Falls back to single-threaded compression for small inputs or `num_threads <= 1`.
+    ///
+    /// ```
+    /// use zenflate::{Compressor, CompressionLevel, Decompressor};
+    ///
+    /// let data = vec![0u8; 100_000];
+    /// let mut compressor = Compressor::new(CompressionLevel::DEFAULT);
+    /// let bound = Compressor::gzip_compress_bound(data.len()) + 4 * 5;
+    /// let mut compressed = vec![0u8; bound];
+    /// let csize = compressor.gzip_compress_parallel(&data, &mut compressed, 4).unwrap();
+    ///
+    /// let mut decompressor = Decompressor::new();
+    /// let mut output = vec![0u8; data.len()];
+    /// let dsize = decompressor.gzip_decompress(&compressed[..csize], &mut output).unwrap();
+    /// assert_eq!(&output[..dsize], &data[..]);
+    /// ```
+    #[cfg(feature = "std")]
+    pub fn gzip_compress_parallel(
+        &mut self,
+        input: &[u8],
+        output: &mut [u8],
+        num_threads: usize,
+    ) -> Result<usize, CompressionError> {
+        use crate::checksum::crc32_combine;
+        use alloc::vec;
+        use alloc::vec::Vec;
+
+        let num_threads = num_threads.max(1);
+        let level = self.level;
+
+        // For small inputs or single thread, fall back to single-threaded.
+        if num_threads == 1 || input.len() < 32 * 1024 {
+            return self.gzip_compress(input, output);
+        }
+
+        const DICT_SIZE: usize = 32 * 1024; // MATCHFINDER_WINDOW_SIZE
+
+        // Split into equal-sized chunks, one per thread. At least 16KB per chunk.
+        let num_chunks = num_threads.min(input.len() / (16 * 1024)).max(1);
+        let chunk_data_size = input.len().div_ceil(num_chunks);
+
+        // Build chunk descriptors: (dict_start, data_start, data_end, is_last)
+        let mut chunks: Vec<(usize, usize, usize, bool)> = Vec::with_capacity(num_chunks);
+        for i in 0..num_chunks {
+            let data_start = i * chunk_data_size;
+            let data_end = ((i + 1) * chunk_data_size).min(input.len());
+            if data_start >= input.len() {
+                break;
+            }
+            let dict_start = data_start.saturating_sub(DICT_SIZE);
+            let is_last = data_end >= input.len();
+            chunks.push((dict_start, data_start, data_end, is_last));
+        }
+
+        // Parallel compression: each thread gets its own Compressor.
+        // Each result is (compressed_bytes, crc32, data_len).
+        #[allow(clippy::type_complexity)]
+        let results: Vec<Result<(Vec<u8>, u32, usize), CompressionError>> =
+            std::thread::scope(|s| {
+                let handles: Vec<_> = chunks
+                    .iter()
+                    .map(|&(dict_start, data_start, data_end, is_last)| {
+                        s.spawn(move || {
+                            let mut c = Compressor::new(level);
+                            let chunk_input = &input[dict_start..data_end];
+                            let chunk_start = data_start - dict_start;
+                            let data_len = data_end - data_start;
+
+                            // CRC-32 of the data portion only.
+                            let chunk_crc = crc32(0, &input[data_start..data_end]);
+
+                            // Compress chunk.
+                            let bound =
+                                Compressor::deflate_compress_bound(chunk_input.len()) + 5;
+                            let mut buf = vec![0u8; bound];
+                            let size = c.deflate_compress_chunk(
+                                chunk_input,
+                                chunk_start,
+                                is_last,
+                                &mut buf,
+                            )?;
+                            buf.truncate(size);
+
+                            Ok((buf, chunk_crc, data_len))
+                        })
+                    })
+                    .collect();
+
+                handles.into_iter().map(|h| h.join().unwrap()).collect()
+            });
+
+        // Assemble gzip output: 10-byte header + concatenated DEFLATE + 8-byte footer.
+        let mut total_deflate_size = 0usize;
+        let mut combined_crc = 0u32;
+        for result in &results {
+            match result {
+                Ok((buf, chunk_crc, data_len)) => {
+                    total_deflate_size += buf.len();
+                    combined_crc = crc32_combine(combined_crc, *chunk_crc, *data_len);
+                }
+                Err(e) => return Err(*e),
+            }
+        }
+
+        let total_size = 10 + total_deflate_size + 8;
+        if total_size > output.len() {
+            return Err(CompressionError::InsufficientSpace);
+        }
+
+        // gzip header (10 bytes).
+        output[0] = 0x1F; // ID1
+        output[1] = 0x8B; // ID2
+        output[2] = 0x08; // CM = deflate
+        output[3] = 0x00; // FLG = none
+        output[4..8].copy_from_slice(&[0, 0, 0, 0]); // MTIME
+        output[8] = 0x00; // XFL
+        output[9] = 0xFF; // OS = unknown
+
+        // Concatenate DEFLATE chunks.
+        let mut pos = 10;
+        for result in &results {
+            let (buf, _, _) = result.as_ref().unwrap();
+            output[pos..pos + buf.len()].copy_from_slice(buf);
+            pos += buf.len();
+        }
+
+        // CRC-32 + ISIZE (8 bytes).
+        output[pos..pos + 4].copy_from_slice(&combined_crc.to_le_bytes());
+        pos += 4;
+        output[pos..pos + 4].copy_from_slice(&(input.len() as u32).to_le_bytes());
+        pos += 4;
+
+        Ok(pos)
+    }
 }
 
 impl Default for Compressor {
@@ -1348,128 +1492,6 @@ fn deflate_compress_none_chunk(
     Ok(out_pos)
 }
 
-/// Compress data in gzip format using multiple threads.
-///
-/// Splits the input into chunks (one per thread), each with a 32KB dictionary
-/// overlap from the previous chunk. All chunks are compressed in parallel, then
-/// concatenated into a valid gzip stream.
-///
-/// The compression ratio is nearly identical to single-threaded compression,
-/// since each chunk uses a full 32KB dictionary window.
-///
-/// Falls back to single-threaded compression for small inputs or `num_threads <= 1`.
-#[cfg(feature = "std")]
-pub fn gzip_compress_parallel(
-    input: &[u8],
-    output: &mut [u8],
-    level: CompressionLevel,
-    num_threads: usize,
-) -> Result<usize, CompressionError> {
-    use crate::checksum::crc32_combine;
-    use alloc::vec;
-    use alloc::vec::Vec;
-
-    let num_threads = num_threads.max(1);
-
-    // For small inputs or single thread, fall back to single-threaded.
-    if num_threads == 1 || input.len() < 32 * 1024 {
-        let mut c = Compressor::new(level);
-        return c.gzip_compress(input, output);
-    }
-
-    const DICT_SIZE: usize = 32 * 1024; // MATCHFINDER_WINDOW_SIZE
-
-    // Split into equal-sized chunks, one per thread. At least 16KB per chunk.
-    let num_chunks = num_threads.min(input.len() / (16 * 1024)).max(1);
-    let chunk_data_size = input.len().div_ceil(num_chunks);
-
-    // Build chunk descriptors: (dict_start, data_start, data_end, is_last)
-    let mut chunks: Vec<(usize, usize, usize, bool)> = Vec::with_capacity(num_chunks);
-    for i in 0..num_chunks {
-        let data_start = i * chunk_data_size;
-        let data_end = ((i + 1) * chunk_data_size).min(input.len());
-        if data_start >= input.len() {
-            break;
-        }
-        let dict_start = data_start.saturating_sub(DICT_SIZE);
-        let is_last = data_end >= input.len();
-        chunks.push((dict_start, data_start, data_end, is_last));
-    }
-
-    // Parallel compression: each thread gets its own Compressor.
-    // Each result is (compressed_bytes, crc32, data_len).
-    #[allow(clippy::type_complexity)]
-    let results: Vec<Result<(Vec<u8>, u32, usize), CompressionError>> = std::thread::scope(|s| {
-        let handles: Vec<_> = chunks
-            .iter()
-            .map(|&(dict_start, data_start, data_end, is_last)| {
-                s.spawn(move || {
-                    let mut c = Compressor::new(level);
-                    let chunk_input = &input[dict_start..data_end];
-                    let chunk_start = data_start - dict_start;
-                    let data_len = data_end - data_start;
-
-                    // CRC-32 of the data portion only.
-                    let chunk_crc = crc32(0, &input[data_start..data_end]);
-
-                    // Compress chunk.
-                    let bound = Compressor::deflate_compress_bound(chunk_input.len()) + 5;
-                    let mut buf = vec![0u8; bound];
-                    let size =
-                        c.deflate_compress_chunk(chunk_input, chunk_start, is_last, &mut buf)?;
-                    buf.truncate(size);
-
-                    Ok((buf, chunk_crc, data_len))
-                })
-            })
-            .collect();
-
-        handles.into_iter().map(|h| h.join().unwrap()).collect()
-    });
-
-    // Assemble gzip output: 10-byte header + concatenated DEFLATE + 8-byte footer.
-    let mut total_deflate_size = 0usize;
-    let mut combined_crc = 0u32;
-    for result in &results {
-        match result {
-            Ok((buf, chunk_crc, data_len)) => {
-                total_deflate_size += buf.len();
-                combined_crc = crc32_combine(combined_crc, *chunk_crc, *data_len);
-            }
-            Err(e) => return Err(*e),
-        }
-    }
-
-    let total_size = 10 + total_deflate_size + 8;
-    if total_size > output.len() {
-        return Err(CompressionError::InsufficientSpace);
-    }
-
-    // gzip header (10 bytes).
-    output[0] = 0x1F; // ID1
-    output[1] = 0x8B; // ID2
-    output[2] = 0x08; // CM = deflate
-    output[3] = 0x00; // FLG = none
-    output[4..8].copy_from_slice(&[0, 0, 0, 0]); // MTIME
-    output[8] = 0x00; // XFL
-    output[9] = 0xFF; // OS = unknown
-
-    // Concatenate DEFLATE chunks.
-    let mut pos = 10;
-    for result in &results {
-        let (buf, _, _) = result.as_ref().unwrap();
-        output[pos..pos + buf.len()].copy_from_slice(buf);
-        pos += buf.len();
-    }
-
-    // CRC-32 + ISIZE (8 bytes).
-    output[pos..pos + 4].copy_from_slice(&combined_crc.to_le_bytes());
-    pos += 4;
-    output[pos..pos + 4].copy_from_slice(&(input.len() as u32).to_le_bytes());
-    pos += 4;
-
-    Ok(pos)
-}
 
 /// Bit scan reverse: floor(log2(v)). v must be > 0.
 #[inline(always)]
@@ -2145,7 +2167,10 @@ mod tests {
         let level = CompressionLevel::new(level);
         let bound = Compressor::gzip_compress_bound(data.len()) + num_threads * 5;
         let mut compressed = vec![0u8; bound];
-        let csize = gzip_compress_parallel(data, &mut compressed, level, num_threads).unwrap();
+        let mut compressor = Compressor::new(level);
+        let csize = compressor
+            .gzip_compress_parallel(data, &mut compressed, num_threads)
+            .unwrap();
 
         let mut decompressor = crate::decompress::Decompressor::new();
         let mut decompressed = vec![0u8; data.len()];
@@ -2217,7 +2242,10 @@ mod tests {
         let level = CompressionLevel::new(6);
         let bound = Compressor::gzip_compress_bound(data.len()) + 4 * 5;
         let mut compressed = vec![0u8; bound];
-        let csize = gzip_compress_parallel(&data, &mut compressed, level, 4).unwrap();
+        let mut compressor = Compressor::new(level);
+        let csize = compressor
+            .gzip_compress_parallel(&data, &mut compressed, 4)
+            .unwrap();
 
         // Decompress with C library to validate the gzip stream.
         let mut decompressed = vec![0u8; data.len()];
