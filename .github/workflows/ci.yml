@@ -167,6 +167,33 @@ jobs:
             --skip actually_compresses
 
   # ==========================================================================
+  # Benchmark compilation check
+  # ==========================================================================
+  bench-check:
+    name: Bench compile (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, name: x64 }
+          - { os: ubuntu-24.04-arm, name: aarch64 }
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Bench compile (default)
+        run: cargo bench --no-run
+
+      - name: Bench compile (unchecked)
+        run: cargo bench --no-run --features unchecked
+
+  # ==========================================================================
   # MSRV check
   # ==========================================================================
   msrv:
