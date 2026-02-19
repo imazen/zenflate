@@ -88,7 +88,10 @@ dictionary overlap, sync flush at boundaries, combined CRC-32 via GF(2) matrix.
 - 18 stack spills in Rust hot loop vs 2 in C
 - Stack frame: 232 bytes Rust vs 104 bytes C (2.2x)
 - Raw pointers DON'T help (LLVM already proves bounds for simple 2-entry hash table)
-- Fix would require embedding hash table in Compressor struct (like C does)
+- Embedding HtMatchfinder inline in Compressor struct does NOT help — regressed +14.8%
+  - 805 asm lines (vs 744), 124 stack refs (vs 112), 248 byte frame (vs 232)
+  - Hash table at offset 0x11f8 from self means larger displacements everywhere
+  - LLVM may lose noalias reasoning (Box = separate object, inline = same object)
 - `ht.rs` has `longest_match_raw`/`skip_bytes_raw` available but unused
 
 ### Callgrind instruction counts (all levels, unchecked, 1MB sequential)
