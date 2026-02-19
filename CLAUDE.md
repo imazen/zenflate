@@ -67,17 +67,20 @@ These must be re-applied after any `cargo update` of archmage.
 | L12 | zeros | 14.3ms | 13.4ms | 0.94x |
 | L12 | mixed | 20.1ms | 17.6ms | 0.88x |
 
-### Ecosystem comparison (mixed data, --features unchecked)
+### Ecosystem comparison (1MB mixed data, --features unchecked)
 
-| Library | L1 (fast) | L6 (default) | Best |
-|---------|-----------|--------------|------|
-| **zenflate** | 162 MiB/s | 128 MiB/s | 47 MiB/s (L12) |
-| libdeflate (C) | 203 MiB/s | 158 MiB/s | 54 MiB/s (L12) |
-| flate2 | 333 MiB/s | 64 MiB/s | 64 MiB/s (L9) |
-| miniz_oxide | 339 MiB/s | 64 MiB/s | 64 MiB/s (L9) |
+| Library | Level | Speed | Ratio |
+|---------|-------|-------|-------|
+| **zenflate** | 1 | 162 MiB/s | 88.95% |
+| **zenflate** | 6 | 128 MiB/s | 88.69% |
+| **zenflate** | 12 | 47 MiB/s | **88.55%** |
+| libdeflate (C) | 12 | 54 MiB/s | 88.55% |
+| flate2 | 1 | 333 MiB/s | 88.63% |
+| flate2 | 9 (best) | 64 MiB/s | 88.73% |
+| miniz_oxide | 9 (best) | 64 MiB/s | 88.73% |
 
-At L6+, zenflate is 2x faster than flate2/miniz_oxide. flate2/miniz_oxide
-are faster at L1 (simpler hash strategy, likely worse compression ratio).
+zenflate L6 compresses smaller than flate2/miniz_oxide L9 while running 2x faster.
+flate2/miniz_oxide L1 is faster (simpler hash) but with comparable ratio on this data.
 
 ### Parallel Compression (4MB mixed data, --features unchecked)
 

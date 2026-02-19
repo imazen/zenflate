@@ -91,17 +91,20 @@ Decompression works in `no_std` without `alloc`; all state is stack-allocated.
 Benchmarked on x86_64 with AVX-512 (Intel), `--features unchecked`. 1 MB input data.
 Run `cargo bench --features unchecked` to reproduce.
 
-**Compression** (mixed data — pseudo-random with runs):
+**Compression** (1 MB mixed data — pseudo-random with runs):
 
-| Library | L1 (fast) | L6 (default) | Best |
-|---------|-----------|--------------|------|
-| **zenflate** | 162 MiB/s | 128 MiB/s | 47 MiB/s (L12) |
-| libdeflate (C) | 203 MiB/s | 158 MiB/s | 54 MiB/s (L12) |
-| flate2 | 333 MiB/s | 64 MiB/s | 64 MiB/s (L9) |
-| miniz_oxide | 339 MiB/s | 64 MiB/s | 64 MiB/s (L9) |
+| Library | Level | Speed | Ratio |
+|---------|-------|-------|-------|
+| **zenflate** | 1 (fast) | 162 MiB/s | 88.95% |
+| **zenflate** | 6 (default) | 128 MiB/s | 88.69% |
+| **zenflate** | 12 (best) | 47 MiB/s | **88.55%** |
+| libdeflate (C) | 12 | 54 MiB/s | 88.55% |
+| flate2 | 1 (fast) | 333 MiB/s | 88.63% |
+| flate2 | 9 (best) | 64 MiB/s | 88.73% |
+| miniz_oxide | 9 (best) | 64 MiB/s | 88.73% |
 
-At L6 (default), zenflate is **2x faster** than flate2/miniz_oxide. On repetitive data,
-zenflate L1 is **2.4x faster** than libdeflate C.
+zenflate L6 compresses **smaller** than flate2/miniz_oxide's best (L9) while running **2x faster**.
+On repetitive data, zenflate L1 is **2.4x faster** than libdeflate C.
 
 **Decompression** (compressed at L6):
 
