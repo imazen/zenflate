@@ -34,6 +34,7 @@ criterion = { version = "0.5", default-features = false }
 libdeflater = "1.25"
 flate2 = "1"
 miniz_oxide = "0.8"
+png = "0.17"
 
 [[bench]]
 name = "throughput"

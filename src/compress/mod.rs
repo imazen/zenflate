@@ -2242,4 +2242,246 @@ mod tests {
         }
         data
     }
+
+    // ---- Bug reproducer: greedy compressor corruption on adaptive-filtered PNG data ----
+
+    /// PNG filter types (same as PNG spec).
+    #[cfg(not(miri))]
+    const FILTER_NONE: u8 = 0;
+    #[cfg(not(miri))]
+    const FILTER_SUB: u8 = 1;
+    #[cfg(not(miri))]
+    const FILTER_UP: u8 = 2;
+    #[cfg(not(miri))]
+    const FILTER_AVERAGE: u8 = 3;
+    #[cfg(not(miri))]
+    const FILTER_PAETH: u8 = 4;
+
+    #[cfg(not(miri))]
+    fn paeth_predictor(a: u8, b: u8, c: u8) -> u8 {
+        let a = a as i16;
+        let b = b as i16;
+        let c = c as i16;
+        let p = a + b - c;
+        let pa = (p - a).unsigned_abs();
+        let pb = (p - b).unsigned_abs();
+        let pc = (p - c).unsigned_abs();
+        if pa <= pb && pa <= pc {
+            a as u8
+        } else if pb <= pc {
+            b as u8
+        } else {
+            c as u8
+        }
+    }
+
+    /// Apply a PNG filter to a row. Output written to `out`.
+    #[cfg(not(miri))]
+    fn apply_png_filter(filter: u8, row: &[u8], prev_row: &[u8], bpp: usize, out: &mut [u8]) {
+        let len = row.len();
+        match filter {
+            FILTER_NONE => out[..len].copy_from_slice(row),
+            FILTER_SUB => {
+                let b = bpp.min(len);
+                out[..b].copy_from_slice(&row[..b]);
+                for i in bpp..len {
+                    out[i] = row[i].wrapping_sub(row[i - bpp]);
+                }
+            }
+            FILTER_UP => {
+                for i in 0..len {
+                    out[i] = row[i].wrapping_sub(prev_row[i]);
+                }
+            }
+            FILTER_AVERAGE => {
+                for i in 0..bpp.min(len) {
+                    out[i] = row[i].wrapping_sub(prev_row[i] >> 1);
+                }
+                for i in bpp..len {
+                    let avg = ((row[i - bpp] as u16 + prev_row[i] as u16) >> 1) as u8;
+                    out[i] = row[i].wrapping_sub(avg);
+                }
+            }
+            FILTER_PAETH => {
+                for i in 0..bpp.min(len) {
+                    out[i] = row[i].wrapping_sub(paeth_predictor(0, prev_row[i], 0));
+                }
+                for i in bpp..len {
+                    let pred = paeth_predictor(row[i - bpp], prev_row[i], prev_row[i - bpp]);
+                    out[i] = row[i].wrapping_sub(pred);
+                }
+            }
+            _ => out[..len].copy_from_slice(row),
+        }
+    }
+
+    /// MinSum (sum of absolute values) heuristic score for a filtered row.
+    #[cfg(not(miri))]
+    fn sav_score(data: &[u8]) -> u64 {
+        data.iter()
+            .map(|&b| if b > 128 { 256 - b as u64 } else { b as u64 })
+            .sum()
+    }
+
+    /// Apply adaptive MinSum filtering to raw image data, producing PNG-style
+    /// filtered output (filter byte + filtered row per scanline).
+    #[cfg(not(miri))]
+    fn filter_image_minsum(pixels: &[u8], row_bytes: usize, height: usize, bpp: usize) -> Vec<u8> {
+        let mut out = Vec::with_capacity(height * (1 + row_bytes));
+        let mut prev_row = vec![0u8; row_bytes];
+        let mut candidates: Vec<Vec<u8>> = (0..5).map(|_| vec![0u8; row_bytes]).collect();
+
+        for y in 0..height {
+            let row = &pixels[y * row_bytes..(y + 1) * row_bytes];
+
+            // Try all 5 filters, pick the one with lowest SAV score
+            for f in 0..5u8 {
+                apply_png_filter(f, row, &prev_row, bpp, &mut candidates[f as usize]);
+            }
+
+            let mut best_f = 0u8;
+            let mut best_score = u64::MAX;
+            for f in 0..5u8 {
+                let score = sav_score(&candidates[f as usize]);
+                if score < best_score {
+                    best_score = score;
+                    best_f = f;
+                }
+            }
+
+            out.push(best_f);
+            out.extend_from_slice(&candidates[best_f as usize]);
+
+            prev_row.copy_from_slice(row);
+        }
+
+        out
+    }
+
+    /// Try to compress and decompress data at the given level. Returns Ok(())
+    /// if roundtrip succeeds, Err(msg) if compression panics, errors, or
+    /// produces corrupt output.
+    #[cfg(not(miri))]
+    fn try_roundtrip(data: &[u8], level: u32) -> Result<(), String> {
+        let data_owned = data.to_vec();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            let mut compressor = Compressor::new(CompressionLevel::new(level));
+            let bound = Compressor::deflate_compress_bound(data_owned.len());
+            let mut compressed = vec![0u8; bound];
+            let csize = compressor
+                .deflate_compress(&data_owned, &mut compressed)
+                .map_err(|e| format!("compression error: {e}"))?;
+
+            // Decompress with zenflate
+            let mut decompressor = crate::Decompressor::new();
+            let mut decompressed = vec![0u8; data_owned.len()];
+            let dsize = decompressor
+                .deflate_decompress(&compressed[..csize], &mut decompressed)
+                .map_err(|e| format!("decompression error: {e}"))?;
+
+            if &decompressed[..dsize] != &data_owned[..] {
+                return Err("roundtrip data mismatch".to_string());
+            }
+
+            // Cross-check with libdeflater
+            let mut ld = libdeflater::Decompressor::new();
+            let mut ld_out = vec![0u8; data_owned.len()];
+            let ld_size = ld
+                .deflate_decompress(&compressed[..csize], &mut ld_out)
+                .map_err(|e| format!("libdeflater decompression error: {e}"))?;
+            if &ld_out[..ld_size] != &data_owned[..] {
+                return Err("libdeflater roundtrip mismatch".to_string());
+            }
+
+            Ok(())
+        }));
+
+        match result {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(msg)) => Err(msg),
+            Err(panic_info) => {
+                let msg = if let Some(s) = panic_info.downcast_ref::<String>() {
+                    s.clone()
+                } else if let Some(s) = panic_info.downcast_ref::<&str>() {
+                    (*s).to_string()
+                } else {
+                    "unknown panic".to_string()
+                };
+                Err(format!("panic: {msg}"))
+            }
+        }
+    }
+
+    /// Bug reproducer: compressor produces corrupt deflate output (or panics
+    /// with a bitstream overflow assertion) on adaptive MinSum-filtered PNG data
+    /// from a 1024x1024 RGB8 image.
+    ///
+    /// The bug manifests as a `debug_assert!` failure in `add_bits()` during
+    /// compression (panic in debug, silent corruption in release). Known to
+    /// affect at least levels 2 and 6, possibly others.
+    ///
+    /// Only triggers with adaptive per-row filter selection (mixed filter
+    /// types). Single-filter data compresses fine at all levels.
+    ///
+    /// Source: codec-corpus/clic2025-1024/0d154749...f0.png
+    #[test]
+    #[ignore] // requires corpus file
+    #[cfg(not(miri))]
+    fn test_bitstream_overflow_adaptive_filtered_png() {
+        let path = "/home/lilith/work/codec-corpus/clic2025-1024/\
+                     0d154749c7771f58e89ad343653ec4e20d6f037da829f47f5598e5d0a4ab61f0.png";
+
+        // Decode the PNG
+        let file = std::fs::File::open(path)
+            .unwrap_or_else(|e| panic!("failed to open corpus file {path}: {e}"));
+        let decoder = png::Decoder::new(file);
+        let mut reader = decoder.read_info().unwrap();
+        let info = reader.info();
+        let width = info.width as usize;
+        let height = info.height as usize;
+        assert_eq!(info.color_type, png::ColorType::Rgb, "expected RGB image");
+        assert_eq!(info.bit_depth, png::BitDepth::Eight, "expected 8-bit depth");
+
+        let bpp = 3; // RGB8
+        let row_bytes = width * bpp;
+        let mut pixels = vec![0u8; height * row_bytes];
+        let frame_info = reader.next_frame(&mut pixels).unwrap();
+        assert_eq!(frame_info.width as usize, width);
+        assert_eq!(frame_info.height as usize, height);
+
+        // Apply adaptive MinSum filtering (same as zenpng's MinSum heuristic)
+        let filtered = filter_image_minsum(&pixels, row_bytes, height, bpp);
+        assert_eq!(filtered.len(), height * (1 + row_bytes));
+
+        // Test all levels 1-12, recording which fail
+        let mut failed_levels = Vec::new();
+        let mut passed_levels = Vec::new();
+        for level in 1..=12 {
+            match try_roundtrip(&filtered, level) {
+                Ok(()) => {
+                    passed_levels.push(level);
+                }
+                Err(msg) => {
+                    eprintln!("L{level} FAILED: {msg}");
+                    failed_levels.push(level);
+                }
+            }
+        }
+
+        eprintln!(
+            "\nBitstream overflow bug on adaptive-filtered PNG ({} bytes):",
+            filtered.len()
+        );
+        eprintln!("  Failed levels: {failed_levels:?}");
+        eprintln!("  Passed levels: {passed_levels:?}");
+
+        // The bug must be present — at least level 2 should fail.
+        // When the bug is fixed, this assertion will fail, signaling that
+        // this test should be converted to assert all levels pass.
+        assert!(
+            !failed_levels.is_empty(),
+            "BUG APPEARS FIXED: all levels passed on adaptive-filtered data. \
+             Convert this test to a normal roundtrip assertion."
+        );
+    }
 }

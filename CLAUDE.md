@@ -147,4 +147,18 @@ dictionary overlap, sync flush at boundaries, combined CRC-32 via GF(2) matrix.
 Cachegrind: D1 cache misses nearly identical. Gap is pure instruction count.
 
 ## Known Bugs
-(none yet)
+
+### Bitstream overflow on adaptive-filtered PNG data
+- Triggered by a 1024x1024 RGB image with adaptive MinSum filtering (~3.1 MiB)
+- **Root cause**: bitstream overflow — `debug_assert!(self.bitcount <= BITBUF_NBITS)` at `bitstream.rs:48` in `add_bits()`
+- Called from `flush_block`/`finish_block` → shared code path across strategies
+- In debug mode: panics during compression
+- In release mode: assertion stripped → silently produces corrupt deflate stream
+- Decompress fails with InvalidCodeLengthRepeat (both zenflate and miniz_oxide reject)
+- **Affected levels: 2, 4, 6** (NOT all greedy — L3 passes, L6 lazy also fails)
+- Passed levels: 1, 3, 5, 7, 8, 9, 10, 11, 12
+- Same data at same levels works fine with single-filter strategies (None/Sub/Up/Average/Paeth)
+- Only triggers on adaptive per-row filter selection (mixed filter types in one stream)
+- Workaround in zenpng: verify decompression after each strategy, skip corrupt outputs
+- Reproducer test: `test_bitstream_overflow_adaptive_filtered_png` (ignored, needs corpus)
+- Source image: `codec-corpus/clic2025-1024/0d154749c7771f58e89ad343653ec4e20d6f037da829f47f5598e5d0a4ab61f0.png`
