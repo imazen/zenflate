@@ -88,41 +88,52 @@ Decompression works in `no_std` without `alloc`; all state is stack-allocated.
 
 ## Performance
 
-Benchmarked against libdeflate (C) via the `libdeflater` crate. Tested on x86_64 with AVX-512 (Intel).
-Run `cargo bench` to reproduce.
+Benchmarked on x86_64 with AVX-512 (Intel), `--features unchecked`. 1 MB input data.
+Run `cargo bench --features unchecked` to reproduce.
 
-**Compression throughput** (1 MB sequential data):
+**Compression** (mixed data — pseudo-random with runs):
 
-| Level | zenflate | libdeflate (C) | Ratio |
-|-------|----------|----------------|-------|
-| 1 | 1.28 GiB/s | 1.46 GiB/s | 88% |
-| 6 | 745 MiB/s | 871 MiB/s | 86% |
-| 12 | 44 MiB/s | 73 MiB/s | 60% |
+| Library | L1 (fast) | L6 (default) | Best |
+|---------|-----------|--------------|------|
+| **zenflate** | 162 MiB/s | 128 MiB/s | 47 MiB/s (L12) |
+| libdeflate (C) | 203 MiB/s | 158 MiB/s | 54 MiB/s (L12) |
+| flate2 | 333 MiB/s | 64 MiB/s | 64 MiB/s (L9) |
+| miniz_oxide | 339 MiB/s | 64 MiB/s | 64 MiB/s (L9) |
 
-**Decompression throughput** (1 MB, compressed at L6):
+At L6 (default), zenflate is **2x faster** than flate2/miniz_oxide. On repetitive data,
+zenflate L1 is **2.4x faster** than libdeflate C.
 
-| Data type | zenflate | libdeflate (C) | Ratio |
-|-----------|----------|----------------|-------|
-| Sequential | 23.5 GiB/s | 32.2 GiB/s | 73% |
-| Zeros (RLE) | 27.8 GiB/s | 14.5 GiB/s | 192% |
-| Mixed | 539 MiB/s | 799 MiB/s | 67% |
+**Decompression** (compressed at L6):
 
-**Checksums** (1 MB):
+| Data type | zenflate | libdeflate (C) | flate2 | miniz_oxide |
+|-----------|----------|----------------|--------|-------------|
+| Sequential | 27.7 GiB/s | 31.6 GiB/s | 7.2 GiB/s | 6.6 GiB/s |
+| Zeros | 34.6 GiB/s | 14.5 GiB/s | 26.6 GiB/s | 17.2 GiB/s |
+| Mixed | 717 MiB/s | 795 MiB/s | 585 MiB/s | 571 MiB/s |
 
-| Checksum | zenflate | libdeflate (C) | Notes |
-|----------|----------|----------------|-------|
-| Adler-32 | 75 GiB/s | 124 GiB/s | AVX2 vs AVX-512 VNNI |
-| CRC-32 | 2.7 GiB/s | 78 GiB/s | Scalar vs PCLMULQDQ |
+zenflate decompression is **4x faster** than flate2/miniz_oxide on typical data.
+Zeros decompression is 2.4x faster than C (Rust's `fill()` auto-vectorizes).
 
-Compression throughput is 60-88% of C depending on level. The gap comes from safe Rust overhead (bounds checks, no raw pointer arithmetic) and limited SIMD coverage (AVX2 Adler-32 only; CRC-32 is scalar because PCLMULQDQ isn't exposed by the archmage token system yet).
+**Checksums:**
 
-Decompression of RLE-heavy data (zeros) is faster than C thanks to Rust's `fill()` auto-vectorization.
+| Algorithm | zenflate | libdeflate (C) | Implementation |
+|-----------|----------|----------------|----------------|
+| Adler-32 | 105 GiB/s | 120 GiB/s | AVX2 (x86), NEON (aarch64) |
+| CRC-32 | 78 GiB/s | 77 GiB/s | PCLMULQDQ (x86), PMULL (aarch64) |
+
+**Parallel compression** (4 MB mixed data, gzip):
+
+| Level | 1 thread | 4 threads | Speedup |
+|-------|----------|-----------|---------|
+| L1 | 161 MiB/s | 534 MiB/s | 3.3x |
+| L6 | 133 MiB/s | 440 MiB/s | 3.3x |
+| L12 | 46 MiB/s | 135 MiB/s | 2.9x |
 
 ## How it works
 
-This is a line-by-line port of [libdeflate](https://github.com/ebiggers/libdeflate) to safe Rust (`#![forbid(unsafe_code)]`). The algorithms are identical: same matchfinders (hash table, hash chains, binary trees), same Huffman construction, same block splitting heuristics, same near-optimal parser.
+This is a line-by-line port of [libdeflate](https://github.com/ebiggers/libdeflate) to safe Rust (`#![forbid(unsafe_code)]` by default). The algorithms are identical: same matchfinders (hash table, hash chains, binary trees), same Huffman construction, same block splitting heuristics, same near-optimal parser.
 
-SIMD dispatch uses [archmage](https://crates.io/crates/archmage) for runtime feature detection with zero `unsafe`.
+SIMD acceleration for checksums (AVX2/PCLMULQDQ on x86, NEON/PMULL on aarch64) and decompression. Runtime feature detection via [archmage](https://crates.io/crates/archmage) with zero `unsafe`.
 
 ## License
 

@@ -27,10 +27,11 @@ Pure Rust port of libdeflate. DEFLATE/zlib/gzip compression and decompression.
 - [x] Phase 3: Compression Core (bitstream writer, Huffman construction, block flushing, 55 tests)
 - [x] Phase 4: Compression Strategies (levels 0-12: fastest, greedy, lazy, lazy2, near-optimal; 97 tests)
 - [x] Phase 5: SIMD Acceleration
-  - Adler-32: AVX2 (v3) + AVX-512 VNNI (modern) — 99 GiB/s (0.82x C)
-  - CRC-32: PCLMULQDQ 128-bit (v2) + VPCLMULQDQ 512-bit zmm (modern) — 78 GiB/s (1.00x C)
+  - Adler-32: AVX2 (v3) + AVX-512 VNNI (modern) + NEON (aarch64) — 105 GiB/s (0.88x C)
+  - CRC-32: PCLMULQDQ 128-bit (v2) + VPCLMULQDQ 512-bit zmm (modern) + PMULL (aarch64) — 78 GiB/s (1.01x C)
   - Decompression fastloop + optimized match copy
 - [x] Phase 6: Benchmarks + Polish (criterion benchmarks, README, doc examples, #[non_exhaustive] errors)
+- [x] Phase 7: Ecosystem benchmarks (flate2, miniz_oxide), justfile, Dockerfile, CI bench checks
 
 ## Archmage Patches (local only)
 The following files in `~/.cargo/registry/src/` were patched to add `pclmulqdq` to X64V2Token:
@@ -54,31 +55,55 @@ These must be re-applied after any `cargo update` of archmage.
 
 ### With --features unchecked
 
-| Level | Data | zenflate | libdeflate C | Ratio | vs safe |
-|-------|------|----------|-------------|-------|---------|
-| L1 | sequential | 656µs | 659µs | **1.00x** | -10.7% |
-| L1 | zeros | 645µs | 1642µs | **2.55x** | -11.5% |
-| L1 | mixed | 6059µs | 4689µs | 0.77x | -4.7% |
-| L6 | sequential | 1144µs | 1109µs | **0.97x** | -12.2% |
-| L6 | zeros | 1066µs | 964µs | 0.90x | -12.5% |
-| L6 | mixed | 7128µs | 6200µs | 0.87x | -7.2% |
-| L12 | sequential | 16.1ms | 13.7ms | **0.85x** | -30.0% |
-| L12 | mixed | 22.5ms | 18.3ms | **0.81x** | -14.0% |
+| Level | Data | zenflate | libdeflate C | Ratio |
+|-------|------|----------|-------------|-------|
+| L1 | sequential | 701µs | 651µs | **0.93x** |
+| L1 | zeros | 686µs | 1659µs | **2.42x** |
+| L1 | mixed | 5.88ms | 4.70ms | 0.80x |
+| L6 | sequential | 1074µs | 1114µs | **1.04x** |
+| L6 | zeros | 950µs | 962µs | **1.01x** |
+| L6 | mixed | 7.43ms | 6.03ms | 0.81x |
+| L12 | sequential | 14.6ms | 13.4ms | **0.92x** |
+| L12 | zeros | 14.3ms | 13.4ms | 0.94x |
+| L12 | mixed | 20.1ms | 17.6ms | 0.88x |
 
-L12 improvement from raw-pointer bt_matchfinder inner loop (eliminates
-fat-pointer register pressure in the tree traversal). Remaining gap is
-fat pointers in outer strategy loop and hc_matchfinder (L5-9).
+### Ecosystem comparison (mixed data, --features unchecked)
+
+| Library | L1 (fast) | L6 (default) | Best |
+|---------|-----------|--------------|------|
+| **zenflate** | 162 MiB/s | 128 MiB/s | 47 MiB/s (L12) |
+| libdeflate (C) | 203 MiB/s | 158 MiB/s | 54 MiB/s (L12) |
+| flate2 | 333 MiB/s | 64 MiB/s | 64 MiB/s (L9) |
+| miniz_oxide | 339 MiB/s | 64 MiB/s | 64 MiB/s (L9) |
+
+At L6+, zenflate is 2x faster than flate2/miniz_oxide. flate2/miniz_oxide
+are faster at L1 (simpler hash strategy, likely worse compression ratio).
 
 ### Parallel Compression (4MB mixed data, --features unchecked)
 
-| Level | 1 thread | 2 threads | 4 threads | Speedup (4T) | Ratio overhead |
-|-------|----------|-----------|-----------|--------------|----------------|
-| L1 | 24.6ms | 13.4ms | 7.7ms | **3.19x** | +0.00% |
-| L6 | 30.3ms | 16.5ms | 9.9ms | **3.06x** | +0.00% |
-| L12 | 99.3ms | 53.0ms | 28.5ms | **3.48x** | +0.27% |
+| Level | 1 thread | 2 threads | 4 threads | Speedup (4T) |
+|-------|----------|-----------|-----------|--------------|
+| L1 | 23.7ms | 12.8ms | 7.1ms | **3.3x** |
+| L6 | 28.8ms | 15.5ms | 8.7ms | **3.3x** |
+| L12 | 82.9ms | 45.2ms | 28.3ms | **2.9x** |
 
 Parallel compression uses pigz-style chunking: equal-sized chunks with 32KB
 dictionary overlap, sync flush at boundaries, combined CRC-32 via GF(2) matrix.
+
+### Decompression (1MB, compressed at L6, --features unchecked)
+
+| Data type | zenflate | libdeflate (C) | flate2 | miniz_oxide |
+|-----------|----------|----------------|--------|-------------|
+| Sequential | 27.7 GiB/s | 31.6 GiB/s | 7.2 GiB/s | 6.6 GiB/s |
+| Zeros | 34.6 GiB/s | 14.5 GiB/s | 26.6 GiB/s | 17.2 GiB/s |
+| Mixed | 717 MiB/s | 795 MiB/s | 585 MiB/s | 571 MiB/s |
+
+### Checksums (1MB sequential, --features unchecked)
+
+| Algorithm | zenflate | libdeflate (C) | Ratio |
+|-----------|----------|----------------|-------|
+| Adler-32 | 105 GiB/s | 120 GiB/s | 0.88x |
+| CRC-32 | 78 GiB/s | 77 GiB/s | **1.01x** |
 
 ## Investigation Notes
 
