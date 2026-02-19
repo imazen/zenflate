@@ -8,6 +8,15 @@ license = "MIT"
 repository = "https://github.com/imazen/zenflate"
 categories = ["compression"]
 keywords = ["deflate", "zlib", "gzip", "compression", "decompression"]
+exclude = [
+    ".github/",
+    "CLAUDE.md",
+    "FEEDBACK.md",
+    "Dockerfile",
+    "justfile",
+    "examples/heap_*.rs",
+    "examples/profile_compress.rs",
+]
 
 [features]
 default = ["std", "avx512"]

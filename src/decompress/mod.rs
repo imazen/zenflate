@@ -252,7 +252,7 @@ impl Decompressor {
         // 2-byte header (big-endian)
         let hdr = u16::from_be_bytes([input[0], input[1]]);
         // FCHECK
-        if (hdr % 31) != 0 {
+        if !hdr.is_multiple_of(31) {
             return Err(DecompressionError::BadData);
         }
         // CM (low 4 bits of CMF = first byte)

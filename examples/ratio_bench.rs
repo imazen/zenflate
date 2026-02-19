@@ -65,17 +65,20 @@ fn bench_flate2(data: &[u8], level: u32) -> (usize, f64) {
     let fl = flate2::Compression::new(level);
     let mut comp = flate2::Compress::new(fl, false);
     let mut out = vec![0u8; data.len() * 2];
-    comp.compress(data, &mut out, flate2::FlushCompress::Finish).unwrap();
+    comp.compress(data, &mut out, flate2::FlushCompress::Finish)
+        .unwrap();
     comp.reset();
     let mut best = f64::MAX;
     for _ in 0..5 {
         comp.reset();
         let start = Instant::now();
-        comp.compress(data, &mut out, flate2::FlushCompress::Finish).unwrap();
+        comp.compress(data, &mut out, flate2::FlushCompress::Finish)
+            .unwrap();
         best = best.min(start.elapsed().as_secs_f64());
     }
     comp.reset();
-    comp.compress(data, &mut out, flate2::FlushCompress::Finish).unwrap();
+    comp.compress(data, &mut out, flate2::FlushCompress::Finish)
+        .unwrap();
     (comp.total_out() as usize, best)
 }
 
@@ -127,7 +130,10 @@ fn main() {
         let ratio = len as f64 / data.len() as f64 * 100.0;
         println!(
             "{:<14} {:>5}  {:>10}  {:>7.2}%  {:>10}",
-            "zenflate", level, len, ratio,
+            "zenflate",
+            level,
+            len,
+            ratio,
             format_speed(data.len(), secs)
         );
     }
@@ -139,7 +145,10 @@ fn main() {
         let ratio = len as f64 / data.len() as f64 * 100.0;
         println!(
             "{:<14} {:>5}  {:>10}  {:>7.2}%  {:>10}",
-            "libdeflate", level, len, ratio,
+            "libdeflate",
+            level,
+            len,
+            ratio,
             format_speed(data.len(), secs)
         );
     }
@@ -151,7 +160,10 @@ fn main() {
         let ratio = len as f64 / data.len() as f64 * 100.0;
         println!(
             "{:<14} {:>5}  {:>10}  {:>7.2}%  {:>10}",
-            "flate2", level, len, ratio,
+            "flate2",
+            level,
+            len,
+            ratio,
             format_speed(data.len(), secs)
         );
     }
@@ -163,7 +175,10 @@ fn main() {
         let ratio = len as f64 / data.len() as f64 * 100.0;
         println!(
             "{:<14} {:>5}  {:>10}  {:>7.2}%  {:>10}",
-            "miniz_oxide", level, len, ratio,
+            "miniz_oxide",
+            level,
+            len,
+            ratio,
             format_speed(data.len(), secs)
         );
     }

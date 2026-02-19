@@ -161,33 +161,25 @@ fn bench_compress(c: &mut Criterion) {
             {
                 let fl = flate2_level(level);
                 let label = capped_label(level);
-                group.bench_with_input(
-                    BenchmarkId::new("flate2", &label),
-                    &level,
-                    |b, _| {
-                        let mut comp = flate2::Compress::new(fl, false);
-                        let mut out = vec![0u8; data.len() * 2];
-                        b.iter(|| {
-                            comp.reset();
-                            comp.compress(data, &mut out, flate2::FlushCompress::Finish)
-                                .unwrap();
-                            comp.total_out() as usize
-                        });
-                    },
-                );
+                group.bench_with_input(BenchmarkId::new("flate2", &label), &level, |b, _| {
+                    let mut comp = flate2::Compress::new(fl, false);
+                    let mut out = vec![0u8; data.len() * 2];
+                    b.iter(|| {
+                        comp.reset();
+                        comp.compress(data, &mut out, flate2::FlushCompress::Finish)
+                            .unwrap();
+                        comp.total_out() as usize
+                    });
+                });
             }
 
             // miniz_oxide (direct, allocates per call)
             {
                 let ml = miniz_level(level);
                 let label = capped_label(level);
-                group.bench_with_input(
-                    BenchmarkId::new("miniz_oxide", &label),
-                    &level,
-                    |b, _| {
-                        b.iter(|| miniz_oxide::deflate::compress_to_vec(data, ml));
-                    },
-                );
+                group.bench_with_input(BenchmarkId::new("miniz_oxide", &label), &level, |b, _| {
+                    b.iter(|| miniz_oxide::deflate::compress_to_vec(data, ml));
+                });
             }
         }
 

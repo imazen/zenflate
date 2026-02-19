@@ -139,7 +139,11 @@ Zeros decompression is 2.4x faster than C (Rust's `fill()` auto-vectorizes).
 
 ## How it works
 
-This is a line-by-line port of [libdeflate](https://github.com/ebiggers/libdeflate) to safe Rust (`#![forbid(unsafe_code)]` by default). The algorithms are identical: same matchfinders (hash table, hash chains, binary trees), same Huffman construction, same block splitting heuristics, same near-optimal parser.
+This is a line-by-line port of Eric Biggers' [libdeflate](https://github.com/ebiggers/libdeflate) to safe Rust (`#![forbid(unsafe_code)]` by default). The algorithms are identical: same matchfinders (hash table, hash chains, binary trees), same Huffman construction, same block splitting heuristics, same near-optimal parser. zenflate produces byte-identical output to libdeflate at every compression level.
+
+The C original is faster — zenflate runs at roughly 0.8-0.9x the speed of libdeflate depending on compression level and data (see benchmarks above). The gap comes from Rust's fat pointers, bounds checking, and register pressure differences. The `unchecked` feature closes some of this gap by eliding bounds checks in hot paths.
+
+Parallel gzip compression is a zenflate addition — libdeflate is single-threaded. zenflate uses pigz-style chunking with dictionary overlap and combined CRC-32 for near-linear scaling.
 
 SIMD acceleration for checksums (AVX2/PCLMULQDQ on x86, NEON/PMULL on aarch64) and decompression. Runtime feature detection via [archmage](https://crates.io/crates/archmage) with zero `unsafe`.
 
