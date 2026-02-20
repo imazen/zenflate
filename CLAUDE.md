@@ -107,13 +107,18 @@ on ratio — different algorithms have different strengths on different data.
 Parallel compression uses pigz-style chunking: equal-sized chunks with 32KB
 dictionary overlap, sync flush at boundaries, combined CRC-32 via GF(2) matrix.
 
-### Decompression (1MB, compressed at L6, --features unchecked)
+### Decompression (1MB, compressed at L6, safe mode)
 
-| Data type | zenflate | libdeflate (C) | flate2 | miniz_oxide |
-|-----------|----------|----------------|--------|-------------|
-| Sequential | 27.7 GiB/s | 31.6 GiB/s | 7.2 GiB/s | 6.6 GiB/s |
-| Zeros | 34.6 GiB/s | 14.5 GiB/s | 26.6 GiB/s | 17.2 GiB/s |
-| Mixed | 717 MiB/s | 795 MiB/s | 585 MiB/s | 571 MiB/s |
+| Data type | zenflate | libdeflate (C) | fdeflate | zlib-rs | flate2 | miniz_oxide |
+|-----------|----------|----------------|----------|---------|--------|-------------|
+| Sequential | 34.6µs (0.85x) | 29.5µs | 74.8µs | 44.7µs | 131.9µs | 140.9µs |
+| Zeros | 27.7µs (**2.40x**) | 66.6µs | 46.6µs | 39.7µs | 36.0µs | 44.2µs |
+| Mixed | 1.33ms (0.93x) | 1.23ms | 1.43ms | 1.42ms | 1.65ms | 1.67ms |
+| Photo | 1.70ms (0.91x) | 1.54ms | 1.89ms | 1.93ms | 2.35ms | 2.34ms |
+
+Note: `unchecked` feature does NOT help decompression — safe bounds checks
+give LLVM information that enables better optimization (+5-6% regression when
+using `get_unchecked` for table lookups and match copy).
 
 ### Checksums (1MB sequential, --features unchecked)
 
@@ -145,6 +150,14 @@ dictionary overlap, sync flush at boundaries, combined CRC-32 via GF(2) matrix.
 | L12 | 361.4M | 302.3M | +20% |
 
 Cachegrind: D1 cache misses nearly identical. Gap is pure instruction count.
+
+### Decompression: unchecked hurts, SIMD won't help
+- `get_unchecked` in table lookups, literal stores, match copy REGRESSES 5-6% on mixed/photo
+- LLVM uses safe bounds checks to prove variable relationships → better codegen
+- Assembly confirms: unchecked has fewer lines (2020 vs 2146) and panic sites (18 vs 24), yet slower
+- C libdeflate does NOT use explicit SIMD for decompression match copy either
+- Only x86-specific decompression opt in C is BMI2 BZHI for bit extraction
+- Decompression gap vs C is from register pressure / instruction count, not SIMD
 
 ## Known Bugs
 
