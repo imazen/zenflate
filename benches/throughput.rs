@@ -96,15 +96,6 @@ fn miniz_level(level: u32) -> u8 {
     level.min(9) as u8
 }
 
-/// Label for ecosystem crates that cap at level 9.
-fn capped_label(level: u32) -> String {
-    if level > 9 {
-        "L9(best)".to_string()
-    } else {
-        format!("L{level}")
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Compression benchmarks
 // ---------------------------------------------------------------------------
@@ -160,8 +151,7 @@ fn bench_compress(c: &mut Criterion) {
             // flate2 (miniz_oxide backend, reuses compressor with reset)
             {
                 let fl = flate2_level(level);
-                let label = capped_label(level);
-                group.bench_with_input(BenchmarkId::new("flate2", &label), &level, |b, _| {
+                group.bench_with_input(BenchmarkId::new("flate2", format!("L{level}")), &level, |b, _| {
                     let mut comp = flate2::Compress::new(fl, false);
                     let mut out = vec![0u8; data.len() * 2];
                     b.iter(|| {
@@ -176,8 +166,7 @@ fn bench_compress(c: &mut Criterion) {
             // miniz_oxide (direct, allocates per call)
             {
                 let ml = miniz_level(level);
-                let label = capped_label(level);
-                group.bench_with_input(BenchmarkId::new("miniz_oxide", &label), &level, |b, _| {
+                group.bench_with_input(BenchmarkId::new("miniz_oxide", format!("L{level}")), &level, |b, _| {
                     b.iter(|| miniz_oxide::deflate::compress_to_vec(data, ml));
                 });
             }
@@ -207,12 +196,22 @@ fn bench_decompress(c: &mut Criterion) {
         let mut group = c.benchmark_group(format!("decompress/{name}"));
         group.throughput(Throughput::Bytes(data.len() as u64));
 
-        // Pre-compress with zenflate
+        // Pre-compress as raw deflate (for zenflate/libdeflate/flate2/miniz_oxide)
         let mut compressor = zenflate::Compressor::new(zenflate::CompressionLevel::new(level));
         let bound = zenflate::Compressor::deflate_compress_bound(data.len());
-        let mut compressed = vec![0u8; bound];
-        let compressed_len = compressor.deflate_compress(data, &mut compressed).unwrap();
-        let compressed = &compressed[..compressed_len];
+        let mut compressed_deflate = vec![0u8; bound];
+        let deflate_len = compressor
+            .deflate_compress(data, &mut compressed_deflate)
+            .unwrap();
+        let compressed_deflate = &compressed_deflate[..deflate_len];
+
+        // Pre-compress as zlib (for fdeflate and zlib-rs)
+        let zlib_bound = zenflate::Compressor::zlib_compress_bound(data.len());
+        let mut compressed_zlib = vec![0u8; zlib_bound];
+        let zlib_len = compressor
+            .zlib_compress(data, &mut compressed_zlib)
+            .unwrap();
+        let compressed_zlib = &compressed_zlib[..zlib_len];
 
         // zenflate decompression
         group.bench_function("zenflate", |b| {
@@ -220,7 +219,7 @@ fn bench_decompress(c: &mut Criterion) {
             let mut out = vec![0u8; data.len()];
             b.iter(|| {
                 decompressor
-                    .deflate_decompress(compressed, &mut out)
+                    .deflate_decompress(compressed_deflate, &mut out)
                     .unwrap();
             });
         });
@@ -231,8 +230,35 @@ fn bench_decompress(c: &mut Criterion) {
             let mut out = vec![0u8; data.len()];
             b.iter(|| {
                 decompressor
-                    .deflate_decompress(compressed, &mut out)
+                    .deflate_decompress(compressed_deflate, &mut out)
                     .unwrap();
+            });
+        });
+
+        // fdeflate decompression (zlib format, reuses decompressor)
+        group.bench_function("fdeflate", |b| {
+            let mut decompressor = fdeflate::Decompressor::new();
+            let mut out = vec![0u8; data.len()];
+            b.iter(|| {
+                decompressor = fdeflate::Decompressor::new();
+                let (_, produced) = decompressor
+                    .read(compressed_zlib, &mut out, 0, true)
+                    .unwrap();
+                produced
+            });
+        });
+
+        // zlib-rs decompression (zlib format)
+        group.bench_function("zlib-rs", |b| {
+            let mut out = vec![0u8; data.len()];
+            b.iter(|| {
+                let (decompressed, rc) = zlib_rs::decompress_slice(
+                    &mut out,
+                    compressed_zlib,
+                    zlib_rs::InflateConfig::default(),
+                );
+                assert_eq!(rc, zlib_rs::ReturnCode::Ok);
+                decompressed.len()
             });
         });
 
@@ -243,7 +269,7 @@ fn bench_decompress(c: &mut Criterion) {
             b.iter(|| {
                 decomp.reset(false);
                 decomp
-                    .decompress(compressed, &mut out, flate2::FlushDecompress::Finish)
+                    .decompress(compressed_deflate, &mut out, flate2::FlushDecompress::Finish)
                     .unwrap();
                 decomp.total_out() as usize
             });
@@ -252,7 +278,7 @@ fn bench_decompress(c: &mut Criterion) {
         // miniz_oxide decompression (allocates per call)
         group.bench_function("miniz_oxide", |b| {
             b.iter(|| {
-                miniz_oxide::inflate::decompress_to_vec(compressed).unwrap();
+                miniz_oxide::inflate::decompress_to_vec(compressed_deflate).unwrap();
             });
         });
 
@@ -325,7 +351,8 @@ fn bench_parallel_compress(c: &mut Criterion) {
                 let bound = zenflate::Compressor::gzip_compress_bound(data.len()) + threads * 5;
                 let mut out = vec![0u8; bound];
                 b.iter(|| {
-                    zenflate::gzip_compress_parallel(&data, &mut out, level, threads).unwrap();
+                    let mut compressor = zenflate::Compressor::new(level);
+                    compressor.gzip_compress_parallel(&data, &mut out, threads).unwrap();
                 });
             });
         }

@@ -35,6 +35,8 @@ libdeflater = "1.25"
 flate2 = "1"
 miniz_oxide = "0.8"
 png = "0.17"
+fdeflate = "0.3"
+zlib-rs = "0.6"
 
 [[bench]]
 name = "throughput"
