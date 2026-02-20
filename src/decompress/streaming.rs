@@ -886,43 +886,38 @@ impl<S: InputSource> StreamDecompressor<S> {
             }
         }
 
-        // Refill staging buffer from source
-        self.fill_input().map_err(StreamError::Source)?;
-
         let litlen_tablemask = bitmask(self.inner.litlen_tablebits);
-        let input = &self.input_buf[..self.input_len];
-        let in_fastloop_end = input.len().saturating_sub(FASTLOOP_MAX_BYTES_READ);
         let out_fastloop_end = self.buffer.len().saturating_sub(FASTLOOP_MAX_BYTES_WRITTEN);
 
-        // --- Fastloop ---
-        if self.input_pos < in_fastloop_end && self.write_pos < out_fastloop_end {
-            refill_bits_fast(
-                &mut self.bitbuf,
-                &mut self.bitsleft,
-                input,
-                &mut self.input_pos,
-            );
-            let mut entry = table_lookup(
-                &self.inner.litlen_decode_table,
-                self.bitbuf & litlen_tablemask,
-            );
+        // Outer loop: refills the staging buffer and re-enters the fastloop
+        // whenever enough fresh input data is available. Without this, the
+        // fastloop would only run once per decompress_block() call (on the
+        // initial 512-byte staging buffer fill), leaving all subsequent
+        // decompression to the slower generic loop.
+        'refill: loop {
+            // Refill staging buffer from source
+            self.fill_input().map_err(StreamError::Source)?;
 
-            'fastloop: loop {
-                let mut saved_bitbuf = self.bitbuf;
-                self.bitbuf >>= (entry & 0xFF) as u64;
-                self.bitsleft -= entry & 0xFF;
+            let input = &self.input_buf[..self.input_len];
+            let in_fastloop_end = input.len().saturating_sub(FASTLOOP_MAX_BYTES_READ);
 
-                if entry & HUFFDEC_LITERAL != 0 {
-                    let lit = (entry >> 16) as u8;
-                    entry = table_lookup(
-                        &self.inner.litlen_decode_table,
-                        self.bitbuf & litlen_tablemask,
-                    );
-                    saved_bitbuf = self.bitbuf;
+            // --- Fastloop ---
+            if self.input_pos < in_fastloop_end && self.write_pos < out_fastloop_end {
+                refill_bits_fast(
+                    &mut self.bitbuf,
+                    &mut self.bitsleft,
+                    input,
+                    &mut self.input_pos,
+                );
+                let mut entry = table_lookup(
+                    &self.inner.litlen_decode_table,
+                    self.bitbuf & litlen_tablemask,
+                );
+
+                'fastloop: loop {
+                    let mut saved_bitbuf = self.bitbuf;
                     self.bitbuf >>= (entry & 0xFF) as u64;
                     self.bitsleft -= entry & 0xFF;
-                    self.buffer[self.write_pos] = lit;
-                    self.write_pos += 1;
 
                     if entry & HUFFDEC_LITERAL != 0 {
                         let lit = (entry >> 16) as u8;
@@ -935,6 +930,55 @@ impl<S: InputSource> StreamDecompressor<S> {
                         self.bitsleft -= entry & 0xFF;
                         self.buffer[self.write_pos] = lit;
                         self.write_pos += 1;
+
+                        if entry & HUFFDEC_LITERAL != 0 {
+                            let lit = (entry >> 16) as u8;
+                            entry = table_lookup(
+                                &self.inner.litlen_decode_table,
+                                self.bitbuf & litlen_tablemask,
+                            );
+                            saved_bitbuf = self.bitbuf;
+                            self.bitbuf >>= (entry & 0xFF) as u64;
+                            self.bitsleft -= entry & 0xFF;
+                            self.buffer[self.write_pos] = lit;
+                            self.write_pos += 1;
+
+                            if entry & HUFFDEC_LITERAL != 0 {
+                                self.buffer[self.write_pos] = (entry >> 16) as u8;
+                                self.write_pos += 1;
+                                entry = table_lookup(
+                                    &self.inner.litlen_decode_table,
+                                    self.bitbuf & litlen_tablemask,
+                                );
+                                refill_bits_fast(
+                                    &mut self.bitbuf,
+                                    &mut self.bitsleft,
+                                    input,
+                                    &mut self.input_pos,
+                                );
+                                if self.input_pos < in_fastloop_end
+                                    && self.write_pos < out_fastloop_end
+                                {
+                                    continue 'fastloop;
+                                }
+                                break 'fastloop;
+                            }
+                        }
+                    }
+
+                    if entry & HUFFDEC_EXCEPTIONAL != 0 {
+                        if entry & HUFFDEC_END_OF_BLOCK != 0 {
+                            self.finish_block()?;
+                            return Ok(());
+                        }
+                        entry = table_lookup(
+                            &self.inner.litlen_decode_table,
+                            (entry >> 16) as u64
+                                + extract_varbits(self.bitbuf, (entry >> 8) & 0x3F),
+                        );
+                        saved_bitbuf = self.bitbuf;
+                        self.bitbuf >>= (entry & 0xFF) as u64;
+                        self.bitsleft -= entry & 0xFF;
 
                         if entry & HUFFDEC_LITERAL != 0 {
                             self.buffer[self.write_pos] = (entry >> 16) as u8;
@@ -955,14 +999,115 @@ impl<S: InputSource> StreamDecompressor<S> {
                             }
                             break 'fastloop;
                         }
+                        if entry & HUFFDEC_END_OF_BLOCK != 0 {
+                            self.finish_block()?;
+                            return Ok(());
+                        }
+                    }
+
+                    // Decode match length
+                    let length = (entry >> 16) as usize
+                        + (extract_varbits8(saved_bitbuf, entry) >> ((entry >> 8) as u8 as u64))
+                            as usize;
+
+                    // Decode match offset
+                    let mut oentry = table_lookup(
+                        &self.inner.offset_decode_table,
+                        self.bitbuf & bitmask(OFFSET_TABLEBITS),
+                    );
+                    if oentry & HUFFDEC_EXCEPTIONAL != 0 {
+                        self.bitbuf >>= OFFSET_TABLEBITS as u64;
+                        self.bitsleft -= OFFSET_TABLEBITS;
+                        oentry = table_lookup(
+                            &self.inner.offset_decode_table,
+                            (oentry >> 16) as u64
+                                + extract_varbits(self.bitbuf, (oentry >> 8) & 0x3F),
+                        );
+                    }
+                    let saved_bitbuf_off = self.bitbuf;
+                    self.bitbuf >>= (oentry & 0xFF) as u64;
+                    self.bitsleft -= oentry & 0xFF;
+
+                    let offset = (oentry >> 16) as usize
+                        + (extract_varbits8(saved_bitbuf_off, oentry)
+                            >> ((oentry >> 8) as u8 as u64)) as usize;
+
+                    if offset == 0 || offset > self.write_pos {
+                        return Err(bad.into());
+                    }
+
+                    entry = table_lookup(
+                        &self.inner.litlen_decode_table,
+                        self.bitbuf & litlen_tablemask,
+                    );
+                    refill_bits_fast(
+                        &mut self.bitbuf,
+                        &mut self.bitsleft,
+                        input,
+                        &mut self.input_pos,
+                    );
+
+                    super::fastloop_match_copy(
+                        &mut self.buffer,
+                        self.write_pos,
+                        self.write_pos - offset,
+                        length,
+                        offset,
+                    );
+                    self.write_pos += length;
+
+                    if self.input_pos >= in_fastloop_end || self.write_pos >= out_fastloop_end {
+                        break 'fastloop;
+                    }
+                }
+            }
+
+            // --- Generic loop ---
+            // Handles remaining symbols when the fastloop can't run (not enough
+            // input runway or output space). Refills the staging buffer as needed
+            // and jumps back to the fastloop via 'refill when fresh data arrives.
+            loop {
+                // Refill staging buffer when running low
+                if self.input_len - self.input_pos < 16 {
+                    let old_avail = self.input_len - self.input_pos;
+                    self.fill_input().map_err(StreamError::Source)?;
+                    let new_avail = self.input_len - self.input_pos;
+
+                    // If new data was loaded and we had overread zeros in bitbuf
+                    // from the previous staging buffer, purge them.
+                    if self.overread_count > 0 && new_avail > old_avail {
+                        let real_bits = self.bitsleft - (self.overread_count as u32 * 8);
+                        self.bitsleft = real_bits;
+                        self.bitbuf &= bitmask(real_bits);
+                        self.overread_count = 0;
+                    }
+
+                    // Re-enter fastloop if we got enough fresh data and have output space
+                    if new_avail >= FASTLOOP_MAX_BYTES_READ + 16
+                        && self.write_pos < out_fastloop_end
+                    {
+                        continue 'refill;
                     }
                 }
 
-                if entry & HUFFDEC_EXCEPTIONAL != 0 {
-                    if entry & HUFFDEC_END_OF_BLOCK != 0 {
-                        self.finish_block()?;
-                        return Ok(());
-                    }
+                let input = &self.input_buf[..self.input_len];
+                refill_bits(
+                    &mut self.bitbuf,
+                    &mut self.bitsleft,
+                    input,
+                    &mut self.input_pos,
+                    &mut self.overread_count,
+                )?;
+
+                let mut entry = table_lookup(
+                    &self.inner.litlen_decode_table,
+                    self.bitbuf & litlen_tablemask,
+                );
+                let mut saved_bitbuf = self.bitbuf;
+                self.bitbuf >>= (entry & 0xFF) as u64;
+                self.bitsleft -= entry & 0xFF;
+
+                if entry & HUFFDEC_SUBTABLE_POINTER != 0 {
                     entry = table_lookup(
                         &self.inner.litlen_decode_table,
                         (entry >> 16) as u64 + extract_varbits(self.bitbuf, (entry >> 8) & 0x3F),
@@ -970,33 +1115,31 @@ impl<S: InputSource> StreamDecompressor<S> {
                     saved_bitbuf = self.bitbuf;
                     self.bitbuf >>= (entry & 0xFF) as u64;
                     self.bitsleft -= entry & 0xFF;
+                }
 
-                    if entry & HUFFDEC_LITERAL != 0 {
-                        self.buffer[self.write_pos] = (entry >> 16) as u8;
-                        self.write_pos += 1;
-                        entry = table_lookup(
-                            &self.inner.litlen_decode_table,
-                            self.bitbuf & litlen_tablemask,
-                        );
-                        refill_bits_fast(
-                            &mut self.bitbuf,
-                            &mut self.bitsleft,
-                            input,
-                            &mut self.input_pos,
-                        );
-                        if self.input_pos < in_fastloop_end && self.write_pos < out_fastloop_end {
-                            continue 'fastloop;
-                        }
-                        break 'fastloop;
-                    }
-                    if entry & HUFFDEC_END_OF_BLOCK != 0 {
-                        self.finish_block()?;
+                let value = entry >> 16;
+
+                if entry & HUFFDEC_LITERAL != 0 {
+                    if self.write_pos >= self.buffer.len() {
+                        // Output buffer full — save literal and return to let fill() compact.
+                        self.pending_literal = Some(value as u8);
                         return Ok(());
                     }
+                    self.buffer[self.write_pos] = value as u8;
+                    self.write_pos += 1;
+                    if self.peek_len() >= self.capacity {
+                        return Ok(());
+                    }
+                    continue;
+                }
+
+                if entry & HUFFDEC_END_OF_BLOCK != 0 {
+                    self.finish_block()?;
+                    return Ok(());
                 }
 
                 // Decode match length
-                let length = (entry >> 16) as usize
+                let length = value as usize
                     + (extract_varbits8(saved_bitbuf, entry) >> ((entry >> 8) as u8 as u64))
                         as usize;
 
@@ -1025,150 +1168,25 @@ impl<S: InputSource> StreamDecompressor<S> {
                     return Err(bad.into());
                 }
 
-                entry = table_lookup(
-                    &self.inner.litlen_decode_table,
-                    self.bitbuf & litlen_tablemask,
-                );
-                refill_bits_fast(
-                    &mut self.bitbuf,
-                    &mut self.bitsleft,
-                    input,
-                    &mut self.input_pos,
-                );
-
-                super::fastloop_match_copy(
-                    &mut self.buffer,
-                    self.write_pos,
-                    self.write_pos - offset,
-                    length,
-                    offset,
-                );
-                self.write_pos += length;
-
-                if self.input_pos >= in_fastloop_end || self.write_pos >= out_fastloop_end {
-                    break 'fastloop;
-                }
-            }
-        }
-
-        // --- Generic loop ---
-        // This loop refills the staging buffer from the source as needed,
-        // so it never overreads unless the source is truly exhausted.
-        loop {
-            // Refill staging buffer when running low. This prevents false
-            // overreads when there's still source data available.
-            if self.input_len - self.input_pos < 16 {
-                let old_avail = self.input_len - self.input_pos;
-                self.fill_input().map_err(StreamError::Source)?;
-                let new_avail = self.input_len - self.input_pos;
-
-                // If new data was loaded and we had overread zeros in bitbuf
-                // from the previous staging buffer, purge them. The overread
-                // zeros sit at the top of bitbuf and would corrupt decoding
-                // if not cleared.
-                if self.overread_count > 0 && new_avail > old_avail {
-                    let real_bits = self.bitsleft - (self.overread_count as u32 * 8);
-                    self.bitsleft = real_bits;
-                    self.bitbuf &= bitmask(real_bits);
-                    self.overread_count = 0;
-                }
-            }
-
-            let input = &self.input_buf[..self.input_len];
-            refill_bits(
-                &mut self.bitbuf,
-                &mut self.bitsleft,
-                input,
-                &mut self.input_pos,
-                &mut self.overread_count,
-            )?;
-
-            let mut entry = table_lookup(
-                &self.inner.litlen_decode_table,
-                self.bitbuf & litlen_tablemask,
-            );
-            let mut saved_bitbuf = self.bitbuf;
-            self.bitbuf >>= (entry & 0xFF) as u64;
-            self.bitsleft -= entry & 0xFF;
-
-            if entry & HUFFDEC_SUBTABLE_POINTER != 0 {
-                entry = table_lookup(
-                    &self.inner.litlen_decode_table,
-                    (entry >> 16) as u64 + extract_varbits(self.bitbuf, (entry >> 8) & 0x3F),
-                );
-                saved_bitbuf = self.bitbuf;
-                self.bitbuf >>= (entry & 0xFF) as u64;
-                self.bitsleft -= entry & 0xFF;
-            }
-
-            let value = entry >> 16;
-
-            if entry & HUFFDEC_LITERAL != 0 {
-                if self.write_pos >= self.buffer.len() {
-                    // Output buffer full — save literal and return to let fill() compact.
-                    self.pending_literal = Some(value as u8);
+                let space = self.output_space();
+                if length > space {
+                    if space > 0 {
+                        self.write_match_inline(offset, space);
+                        self.pending_match = Some(PendingMatch {
+                            offset,
+                            length: length - space,
+                        });
+                    } else {
+                        self.pending_match = Some(PendingMatch { offset, length });
+                    }
                     return Ok(());
                 }
-                self.buffer[self.write_pos] = value as u8;
-                self.write_pos += 1;
+
+                self.write_match_inline(offset, length);
+
                 if self.peek_len() >= self.capacity {
                     return Ok(());
                 }
-                continue;
-            }
-
-            if entry & HUFFDEC_END_OF_BLOCK != 0 {
-                self.finish_block()?;
-                return Ok(());
-            }
-
-            // Decode match length
-            let length = value as usize
-                + (extract_varbits8(saved_bitbuf, entry) >> ((entry >> 8) as u8 as u64)) as usize;
-
-            // Decode match offset
-            let mut oentry = table_lookup(
-                &self.inner.offset_decode_table,
-                self.bitbuf & bitmask(OFFSET_TABLEBITS),
-            );
-            if oentry & HUFFDEC_EXCEPTIONAL != 0 {
-                self.bitbuf >>= OFFSET_TABLEBITS as u64;
-                self.bitsleft -= OFFSET_TABLEBITS;
-                oentry = table_lookup(
-                    &self.inner.offset_decode_table,
-                    (oentry >> 16) as u64 + extract_varbits(self.bitbuf, (oentry >> 8) & 0x3F),
-                );
-            }
-            let saved_bitbuf_off = self.bitbuf;
-            self.bitbuf >>= (oentry & 0xFF) as u64;
-            self.bitsleft -= oentry & 0xFF;
-
-            let offset = (oentry >> 16) as usize
-                + (extract_varbits8(saved_bitbuf_off, oentry) >> ((oentry >> 8) as u8 as u64))
-                    as usize;
-
-            if offset == 0 || offset > self.write_pos {
-                return Err(bad.into());
-            }
-
-            let space = self.output_space();
-            if length > space {
-                if space > 0 {
-                    self.write_match_inline(offset, space);
-                    self.pending_match = Some(PendingMatch {
-                        offset,
-                        length: length - space,
-                    });
-                } else {
-                    self.pending_match = Some(PendingMatch { offset, length });
-                }
-                return Ok(());
-            }
-
-            self.write_match_inline(offset, length);
-
-            if self.peek_len() >= self.capacity {
-                return Ok(());
             }
         }
     }
