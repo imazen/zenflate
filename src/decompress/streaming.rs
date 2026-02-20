@@ -1,0 +1,1595 @@
+//! Streaming DEFLATE/zlib/gzip decompression.
+//!
+//! Provides [`StreamDecompressor`], a pull-based streaming decompressor that
+//! works with any input source via the [`InputSource`] trait. Supports
+//! `no_std + alloc` environments.
+
+use alloc::vec;
+use alloc::vec::Vec;
+
+use crate::error::{DecompressionError, StreamError};
+
+use super::{
+    bitmask, build_decode_table, extract_varbits, extract_varbits8, refill_bits, refill_bits_fast,
+    table_lookup, Decompressor, DEFLATE_BLOCKTYPE_DYNAMIC_HUFFMAN,
+    DEFLATE_BLOCKTYPE_STATIC_HUFFMAN, DEFLATE_BLOCKTYPE_UNCOMPRESSED, DEFLATE_MAX_PRE_CODEWORD_LEN,
+    DEFLATE_NUM_PRECODE_SYMS, DEFLATE_PRECODE_LENS_PERMUTATION, FASTLOOP_MAX_BYTES_READ,
+    FASTLOOP_MAX_BYTES_WRITTEN, GZIP_CM_DEFLATE, GZIP_FCOMMENT, GZIP_FEXTRA, GZIP_FHCRC,
+    GZIP_FNAME, GZIP_FRESERVED, GZIP_ID1, GZIP_ID2, HUFFDEC_END_OF_BLOCK, HUFFDEC_EXCEPTIONAL,
+    HUFFDEC_LITERAL, HUFFDEC_SUBTABLE_POINTER, LITLEN_DECODE_RESULTS, LITLEN_TABLEBITS,
+    OFFSET_DECODE_RESULTS, OFFSET_TABLEBITS, PRECODE_DECODE_RESULTS, PRECODE_TABLEBITS,
+    ZLIB_CINFO_32K_WINDOW, ZLIB_CM_DEFLATE,
+};
+
+// ---------------------------------------------------------------------------
+// InputSource trait
+// ---------------------------------------------------------------------------
+
+/// Buffered input source for streaming decompression.
+///
+/// This trait abstracts over different input sources (slices, `BufRead`, etc.)
+/// with zero overhead when monomorphized. The design mirrors `BufRead` but
+/// works in `no_std + alloc` environments.
+pub trait InputSource {
+    /// Error type for this source. Use `core::convert::Infallible` for infallible sources.
+    type Error;
+
+    /// Return a reference to available input bytes.
+    ///
+    /// Returns an empty slice when no more data is available (EOF).
+    fn fill_buf(&mut self) -> Result<&[u8], Self::Error>;
+
+    /// Mark `n` bytes as consumed. Must not exceed the length returned by `fill_buf`.
+    fn consume(&mut self, n: usize);
+}
+
+/// `&[u8]` as an infallible, zero-cost input source.
+impl InputSource for &[u8] {
+    type Error = core::convert::Infallible;
+
+    #[inline(always)]
+    fn fill_buf(&mut self) -> Result<&[u8], core::convert::Infallible> {
+        Ok(*self)
+    }
+
+    #[inline(always)]
+    fn consume(&mut self, n: usize) {
+        *self = &self[n..];
+    }
+}
+
+/// Wraps a [`std::io::BufRead`] as an [`InputSource`].
+#[cfg(feature = "std")]
+pub struct BufReadSource<R>(pub R);
+
+#[cfg(feature = "std")]
+impl<R: std::io::BufRead> InputSource for BufReadSource<R> {
+    type Error = std::io::Error;
+
+    #[inline]
+    fn fill_buf(&mut self) -> Result<&[u8], std::io::Error> {
+        std::io::BufRead::fill_buf(&mut self.0)
+    }
+
+    #[inline]
+    fn consume(&mut self, n: usize) {
+        std::io::BufRead::consume(&mut self.0, n);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Wrapper format
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WrapperFormat {
+    Raw,
+    Zlib,
+    Gzip,
+}
+
+// ---------------------------------------------------------------------------
+// State machine
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StreamState {
+    WrapperHeader,
+    BlockHeader,
+    DynamicPrecodeLens {
+        num_litlen_syms: usize,
+        num_offset_syms: usize,
+        num_explicit_precode_lens: usize,
+        precode_idx: usize,
+    },
+    DynamicCodeLengths {
+        num_litlen_syms: usize,
+        num_offset_syms: usize,
+    },
+    CompressedData,
+    UncompressedData {
+        remaining: usize,
+    },
+    WrapperFooter,
+    Done,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PendingMatch {
+    offset: usize,
+    length: usize,
+}
+
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+/// Size of the internal input staging buffer.
+const INPUT_BUF_SIZE: usize = 512;
+
+/// Minimum lookback required for match references (32KB window).
+const LOOKBACK_SIZE: usize = 32 * 1024;
+
+// ---------------------------------------------------------------------------
+// StreamDecompressor
+// ---------------------------------------------------------------------------
+
+/// Pull-based streaming DEFLATE/zlib/gzip decompressor.
+///
+/// Generic over any [`InputSource`]. For `&[u8]`, this has zero overhead
+/// from the source abstraction (the `Result<_, Infallible>` is eliminated).
+///
+/// # Usage pattern
+///
+/// ```no_run
+/// # use zenflate::decompress::streaming::{StreamDecompressor, InputSource};
+/// # let compressed_data: &[u8] = &[];
+/// let mut dec = StreamDecompressor::deflate(compressed_data, 64 * 1024);
+/// while !dec.is_done() {
+///     dec.fill().unwrap();
+///     let data = dec.peek();
+///     // process data...
+///     let n = data.len();
+///     dec.advance(n);
+/// }
+/// ```
+pub struct StreamDecompressor<S> {
+    source: S,
+    inner: Decompressor,
+
+    // Output buffer: [lookback (32KB) | peekable (capacity)]
+    buffer: Vec<u8>,
+    capacity: usize,
+    write_pos: usize,
+    read_pos: usize,
+
+    // Internal input staging buffer
+    input_buf: Vec<u8>,
+    input_len: usize,
+    input_pos: usize,
+
+    // Bitstream state
+    bitbuf: u64,
+    bitsleft: u32,
+    overread_count: usize,
+
+    // State machine
+    state: StreamState,
+    is_final_block: bool,
+    pending_match: Option<PendingMatch>,
+
+    // Wrapper format
+    wrapper: WrapperFormat,
+
+    // Checksum (Adler-32 for zlib, CRC-32 for gzip)
+    checksum: u32,
+    total_output: u64,
+    // Position in buffer up to which checksum has been computed
+    checksum_watermark: usize,
+}
+
+impl<S: InputSource> StreamDecompressor<S> {
+    fn new(source: S, capacity: usize, wrapper: WrapperFormat) -> Self {
+        let buf_size = LOOKBACK_SIZE + capacity;
+        let initial_state = if wrapper == WrapperFormat::Raw {
+            StreamState::BlockHeader
+        } else {
+            StreamState::WrapperHeader
+        };
+        let checksum_init = match wrapper {
+            WrapperFormat::Zlib => 1, // Adler-32 starts at 1
+            _ => 0,
+        };
+        Self {
+            source,
+            inner: Decompressor::new(),
+            buffer: vec![0u8; buf_size],
+            capacity,
+            write_pos: LOOKBACK_SIZE,
+            read_pos: LOOKBACK_SIZE,
+            input_buf: vec![0u8; INPUT_BUF_SIZE],
+            input_len: 0,
+            input_pos: 0,
+            bitbuf: 0,
+            bitsleft: 0,
+            overread_count: 0,
+            state: initial_state,
+            is_final_block: false,
+            pending_match: None,
+            wrapper,
+            checksum: checksum_init,
+            total_output: 0,
+            checksum_watermark: LOOKBACK_SIZE,
+        }
+    }
+
+    /// Create a streaming decompressor for raw DEFLATE data.
+    pub fn deflate(source: S, capacity: usize) -> Self {
+        Self::new(source, capacity, WrapperFormat::Raw)
+    }
+
+    /// Create a streaming decompressor for zlib-wrapped data.
+    pub fn zlib(source: S, capacity: usize) -> Self {
+        Self::new(source, capacity, WrapperFormat::Zlib)
+    }
+
+    /// Create a streaming decompressor for gzip-wrapped data.
+    pub fn gzip(source: S, capacity: usize) -> Self {
+        Self::new(source, capacity, WrapperFormat::Gzip)
+    }
+
+    /// Borrow all available decompressed output. Zero-copy.
+    #[inline]
+    pub fn peek(&self) -> &[u8] {
+        &self.buffer[self.read_pos..self.write_pos]
+    }
+
+    /// Mark `n` bytes of output as consumed.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `n` exceeds the length of `peek()`.
+    #[inline]
+    pub fn advance(&mut self, n: usize) {
+        assert!(
+            n <= self.write_pos - self.read_pos,
+            "advance({n}) exceeds available output ({})",
+            self.write_pos - self.read_pos
+        );
+        self.read_pos += n;
+    }
+
+    /// Returns `true` when the stream is fully decompressed and checksums verified.
+    #[inline]
+    pub fn is_done(&self) -> bool {
+        self.state == StreamState::Done
+    }
+
+    /// Reset the decompressor for a new stream, keeping buffer allocations.
+    pub fn reset(&mut self, source: S) {
+        let wrapper = self.wrapper;
+        let checksum_init = match wrapper {
+            WrapperFormat::Zlib => 1,
+            _ => 0,
+        };
+        self.source = source;
+        self.inner = Decompressor::new();
+        self.write_pos = LOOKBACK_SIZE;
+        self.read_pos = LOOKBACK_SIZE;
+        self.input_len = 0;
+        self.input_pos = 0;
+        self.bitbuf = 0;
+        self.bitsleft = 0;
+        self.overread_count = 0;
+        self.state = if wrapper == WrapperFormat::Raw {
+            StreamState::BlockHeader
+        } else {
+            StreamState::WrapperHeader
+        };
+        self.is_final_block = false;
+        self.pending_match = None;
+        self.checksum = checksum_init;
+        self.total_output = 0;
+        self.checksum_watermark = LOOKBACK_SIZE;
+    }
+
+    // -----------------------------------------------------------------------
+    // Internal: staging buffer management
+    // -----------------------------------------------------------------------
+
+    /// Compact the staging buffer and pull more data from the source.
+    /// Safe to call at any time — preserves bytes from input_pos onward.
+    fn fill_input(&mut self) -> Result<(), S::Error> {
+        // Compact: move unconsumed data to front
+        if self.input_pos > 0 {
+            self.input_buf
+                .copy_within(self.input_pos..self.input_len, 0);
+            self.input_len -= self.input_pos;
+            self.input_pos = 0;
+        }
+        // Fill remaining space from source
+        while self.input_len < INPUT_BUF_SIZE {
+            let src = self.source.fill_buf()?;
+            if src.is_empty() {
+                break;
+            }
+            let can_copy = src.len().min(INPUT_BUF_SIZE - self.input_len);
+            self.input_buf[self.input_len..self.input_len + can_copy]
+                .copy_from_slice(&src[..can_copy]);
+            self.input_len += can_copy;
+            self.source.consume(can_copy);
+        }
+        Ok(())
+    }
+
+    /// Ensure the staging buffer has at least `min_bytes` available.
+    /// Returns false only if source is exhausted and fewer bytes remain.
+    fn ensure_input_bytes(&mut self, min_bytes: usize) -> Result<bool, S::Error> {
+        let available = self.input_len - self.input_pos;
+        if available >= min_bytes {
+            return Ok(true);
+        }
+        self.fill_input()?;
+        Ok(self.input_len - self.input_pos >= min_bytes)
+    }
+
+    // -----------------------------------------------------------------------
+    // Internal: output buffer management
+    // -----------------------------------------------------------------------
+
+    /// Compact the output buffer. Keeps the last 32KB as lookback.
+    /// Must be called only after updating checksum up to write_pos.
+    fn compact_output(&mut self) {
+        if self.read_pos <= LOOKBACK_SIZE {
+            return;
+        }
+        // Update checksum for any data not yet checksummed before compaction
+        self.flush_checksum();
+
+        let keep_start = self.read_pos.saturating_sub(LOOKBACK_SIZE);
+        let keep_len = self.write_pos - keep_start;
+        self.buffer.copy_within(keep_start..self.write_pos, 0);
+        self.read_pos -= keep_start;
+        self.write_pos = keep_len;
+        self.checksum_watermark = self.write_pos;
+    }
+
+    fn output_space(&self) -> usize {
+        self.buffer.len() - self.write_pos
+    }
+
+    fn peek_len(&self) -> usize {
+        self.write_pos - self.read_pos
+    }
+
+    // -----------------------------------------------------------------------
+    // Internal: checksum tracking
+    // -----------------------------------------------------------------------
+
+    /// Update checksum for all output written since last flush.
+    fn flush_checksum(&mut self) {
+        if self.wrapper == WrapperFormat::Raw || self.checksum_watermark >= self.write_pos {
+            return;
+        }
+        let data = &self.buffer[self.checksum_watermark..self.write_pos];
+        match self.wrapper {
+            WrapperFormat::Zlib => {
+                self.checksum = crate::checksum::adler32(self.checksum, data);
+            }
+            WrapperFormat::Gzip => {
+                self.checksum = crate::checksum::crc32(self.checksum, data);
+            }
+            WrapperFormat::Raw => {}
+        }
+        self.total_output += data.len() as u64;
+        self.checksum_watermark = self.write_pos;
+    }
+
+    // -----------------------------------------------------------------------
+    // fill() — the main entry point
+    // -----------------------------------------------------------------------
+
+    /// Pull from source, decompress into internal buffer.
+    ///
+    /// Returns a reference to available decompressed output (same as `peek()`).
+    /// Call `peek()`/`advance()` to consume output, then `fill()` again.
+    pub fn fill(&mut self) -> Result<&[u8], StreamError<S::Error>> {
+        if self.peek_len() >= self.capacity || self.state == StreamState::Done {
+            return Ok(self.peek());
+        }
+
+        if self.output_space() == 0 {
+            self.compact_output();
+        }
+
+        loop {
+            let prev_write_pos = self.write_pos;
+
+            match self.state {
+                StreamState::WrapperHeader => {
+                    self.parse_wrapper_header()?;
+                }
+                StreamState::BlockHeader => {
+                    self.fill_input().map_err(StreamError::Source)?;
+                    self.parse_block_header()?;
+                }
+                StreamState::DynamicPrecodeLens {
+                    num_litlen_syms,
+                    num_offset_syms,
+                    num_explicit_precode_lens,
+                    precode_idx,
+                } => {
+                    self.fill_input().map_err(StreamError::Source)?;
+                    self.parse_dynamic_precode_lens(
+                        num_litlen_syms,
+                        num_offset_syms,
+                        num_explicit_precode_lens,
+                        precode_idx,
+                    )?;
+                }
+                StreamState::DynamicCodeLengths {
+                    num_litlen_syms,
+                    num_offset_syms,
+                } => {
+                    self.fill_input().map_err(StreamError::Source)?;
+                    self.parse_dynamic_code_lengths(num_litlen_syms, num_offset_syms)?;
+                }
+                StreamState::CompressedData => {
+                    self.decompress_block()?;
+                }
+                StreamState::UncompressedData { remaining } => {
+                    self.copy_uncompressed(remaining)?;
+                }
+                StreamState::WrapperFooter => {
+                    self.parse_wrapper_footer()?;
+                }
+                StreamState::Done => {
+                    return Ok(self.peek());
+                }
+            }
+
+            if self.peek_len() >= self.capacity || self.state == StreamState::Done {
+                return Ok(self.peek());
+            }
+
+            // If no output progress was made and we have data to return,
+            // return to the caller so they can drain and we can compact.
+            if self.write_pos == prev_write_pos && self.peek_len() > 0 {
+                return Ok(self.peek());
+            }
+
+            if self.output_space() == 0 {
+                self.compact_output();
+                if self.output_space() == 0 {
+                    return Ok(self.peek());
+                }
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Wrapper header parsing
+    // -----------------------------------------------------------------------
+
+    fn parse_wrapper_header(&mut self) -> Result<(), StreamError<S::Error>> {
+        self.fill_input().map_err(StreamError::Source)?;
+        let input = &self.input_buf[self.input_pos..self.input_len];
+
+        match self.wrapper {
+            WrapperFormat::Zlib => {
+                if input.len() < 2 {
+                    return Err(StreamError::Decompress(DecompressionError::BadData));
+                }
+                let hdr = u16::from_be_bytes([input[0], input[1]]);
+                if !hdr.is_multiple_of(31)
+                    || (input[0] & 0xF) != ZLIB_CM_DEFLATE
+                    || (input[0] >> 4) > ZLIB_CINFO_32K_WINDOW
+                    || (input[1] >> 5) & 1 != 0
+                {
+                    return Err(StreamError::Decompress(DecompressionError::BadData));
+                }
+                self.input_pos += 2;
+                self.state = StreamState::BlockHeader;
+            }
+            WrapperFormat::Gzip => {
+                self.parse_gzip_header()?;
+            }
+            WrapperFormat::Raw => {
+                self.state = StreamState::BlockHeader;
+            }
+        }
+        Ok(())
+    }
+
+    fn parse_gzip_header(&mut self) -> Result<(), StreamError<S::Error>> {
+        let bad = StreamError::Decompress(DecompressionError::BadData);
+        let input = &self.input_buf[self.input_pos..self.input_len];
+
+        if input.len() < 10 {
+            return Err(bad);
+        }
+        if input[0] != GZIP_ID1
+            || input[1] != GZIP_ID2
+            || input[2] != GZIP_CM_DEFLATE
+            || input[3] & GZIP_FRESERVED != 0
+        {
+            return Err(bad);
+        }
+        let flg = input[3];
+        let mut pos = 10;
+
+        if flg & GZIP_FEXTRA != 0 {
+            if pos + 2 > input.len() {
+                return Err(bad);
+            }
+            let xlen = u16::from_le_bytes([input[pos], input[pos + 1]]) as usize;
+            pos += 2;
+            if pos + xlen > input.len() {
+                return Err(bad);
+            }
+            pos += xlen;
+        }
+        if flg & GZIP_FNAME != 0 {
+            while pos < input.len() && input[pos] != 0 {
+                pos += 1;
+            }
+            if pos >= input.len() {
+                return Err(bad);
+            }
+            pos += 1;
+        }
+        if flg & GZIP_FCOMMENT != 0 {
+            while pos < input.len() && input[pos] != 0 {
+                pos += 1;
+            }
+            if pos >= input.len() {
+                return Err(bad);
+            }
+            pos += 1;
+        }
+        if flg & GZIP_FHCRC != 0 {
+            if pos + 2 > input.len() {
+                return Err(bad);
+            }
+            pos += 2;
+        }
+
+        self.input_pos += pos;
+        self.state = StreamState::BlockHeader;
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Block header parsing
+    // -----------------------------------------------------------------------
+
+    fn parse_block_header(&mut self) -> Result<(), StreamError<S::Error>> {
+        let bad = DecompressionError::BadData;
+        let input = &self.input_buf[..self.input_len];
+
+        refill_bits(
+            &mut self.bitbuf,
+            &mut self.bitsleft,
+            input,
+            &mut self.input_pos,
+            &mut self.overread_count,
+        )?;
+
+        self.is_final_block = (self.bitbuf & 1) != 0;
+        let block_type = ((self.bitbuf >> 1) & 3) as u32;
+
+        if block_type == DEFLATE_BLOCKTYPE_DYNAMIC_HUFFMAN {
+            let num_litlen_syms = 257 + ((self.bitbuf >> 3) & bitmask(5)) as usize;
+            let num_offset_syms = 1 + ((self.bitbuf >> 8) & bitmask(5)) as usize;
+            let num_explicit_precode_lens = 4 + ((self.bitbuf >> 13) & bitmask(4)) as usize;
+
+            self.inner.static_codes_loaded = false;
+
+            self.inner.precode_lens[DEFLATE_PRECODE_LENS_PERMUTATION[0] as usize] =
+                ((self.bitbuf >> 17) & 7) as u8;
+            self.bitbuf >>= 20;
+            self.bitsleft -= 20;
+
+            self.state = StreamState::DynamicPrecodeLens {
+                num_litlen_syms,
+                num_offset_syms,
+                num_explicit_precode_lens,
+                precode_idx: 1,
+            };
+        } else if block_type == DEFLATE_BLOCKTYPE_UNCOMPRESSED {
+            self.bitsleft -= 3;
+
+            let extra_bytes = (self.bitsleft / 8) as usize;
+            if self.overread_count > extra_bytes {
+                return Err(bad.into());
+            }
+            self.input_pos -= extra_bytes - self.overread_count;
+            self.overread_count = 0;
+            self.bitbuf = 0;
+            self.bitsleft = 0;
+
+            let inp = &self.input_buf[..self.input_len];
+            if self.input_pos + 4 > inp.len() {
+                return Err(bad.into());
+            }
+            let len =
+                u16::from_le_bytes([inp[self.input_pos], inp[self.input_pos + 1]]) as usize;
+            let nlen = u16::from_le_bytes([inp[self.input_pos + 2], inp[self.input_pos + 3]]);
+            self.input_pos += 4;
+
+            if len != (!nlen) as usize {
+                return Err(bad.into());
+            }
+
+            self.state = StreamState::UncompressedData { remaining: len };
+        } else if block_type == DEFLATE_BLOCKTYPE_STATIC_HUFFMAN {
+            self.bitbuf >>= 3;
+            self.bitsleft -= 3;
+
+            if !self.inner.static_codes_loaded {
+                self.inner.static_codes_loaded = true;
+
+                for i in 0..144 {
+                    self.inner.lens[i] = 8;
+                }
+                for i in 144..256 {
+                    self.inner.lens[i] = 9;
+                }
+                for i in 256..280 {
+                    self.inner.lens[i] = 7;
+                }
+                for i in 280..288 {
+                    self.inner.lens[i] = 8;
+                }
+                for i in 288..320 {
+                    self.inner.lens[i] = 5;
+                }
+
+                if !build_decode_table(
+                    &mut self.inner.offset_decode_table,
+                    &self.inner.lens[288..],
+                    32,
+                    &OFFSET_DECODE_RESULTS,
+                    OFFSET_TABLEBITS,
+                    15,
+                    &mut self.inner.sorted_syms,
+                    None,
+                ) {
+                    return Err(bad.into());
+                }
+                if !build_decode_table(
+                    &mut self.inner.litlen_decode_table,
+                    &self.inner.lens,
+                    288,
+                    &LITLEN_DECODE_RESULTS,
+                    LITLEN_TABLEBITS,
+                    15,
+                    &mut self.inner.sorted_syms,
+                    Some(&mut self.inner.litlen_tablebits),
+                ) {
+                    return Err(bad.into());
+                }
+            }
+
+            self.state = StreamState::CompressedData;
+        } else {
+            return Err(bad.into());
+        }
+
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Dynamic Huffman: precode lengths
+    // -----------------------------------------------------------------------
+
+    fn parse_dynamic_precode_lens(
+        &mut self,
+        num_litlen_syms: usize,
+        num_offset_syms: usize,
+        num_explicit_precode_lens: usize,
+        mut precode_idx: usize,
+    ) -> Result<(), StreamError<S::Error>> {
+        let bad = DecompressionError::BadData;
+        let input = &self.input_buf[..self.input_len];
+
+        refill_bits(
+            &mut self.bitbuf,
+            &mut self.bitsleft,
+            input,
+            &mut self.input_pos,
+            &mut self.overread_count,
+        )?;
+
+        while precode_idx < num_explicit_precode_lens {
+            self.inner.precode_lens[DEFLATE_PRECODE_LENS_PERMUTATION[precode_idx] as usize] =
+                (self.bitbuf & 7) as u8;
+            self.bitbuf >>= 3;
+            self.bitsleft -= 3;
+            precode_idx += 1;
+        }
+
+        for &perm in
+            &DEFLATE_PRECODE_LENS_PERMUTATION[num_explicit_precode_lens..DEFLATE_NUM_PRECODE_SYMS]
+        {
+            self.inner.precode_lens[perm as usize] = 0;
+        }
+
+        if !build_decode_table(
+            &mut self.inner.precode_decode_table,
+            &self.inner.precode_lens,
+            DEFLATE_NUM_PRECODE_SYMS,
+            &PRECODE_DECODE_RESULTS,
+            PRECODE_TABLEBITS,
+            DEFLATE_MAX_PRE_CODEWORD_LEN,
+            &mut self.inner.sorted_syms,
+            None,
+        ) {
+            return Err(bad.into());
+        }
+
+        self.state = StreamState::DynamicCodeLengths {
+            num_litlen_syms,
+            num_offset_syms,
+        };
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Dynamic Huffman: code lengths from precode
+    // -----------------------------------------------------------------------
+
+    fn parse_dynamic_code_lengths(
+        &mut self,
+        num_litlen_syms: usize,
+        num_offset_syms: usize,
+    ) -> Result<(), StreamError<S::Error>> {
+        let bad = DecompressionError::BadData;
+        let total_syms = num_litlen_syms + num_offset_syms;
+        // We stored lens_idx in self.inner.lens during previous calls — we need
+        // to track progress. Use a local that we save back on return.
+        // Actually, we re-enter this function from scratch each time via the
+        // state machine. The state stores num_litlen_syms and num_offset_syms.
+        // We decode all code lengths in one go (they fit in a single staging fill).
+        let mut i = 0usize;
+
+        while i < total_syms {
+            let input = &self.input_buf[..self.input_len];
+            if self.bitsleft < DEFLATE_MAX_PRE_CODEWORD_LEN + 7 {
+                refill_bits(
+                    &mut self.bitbuf,
+                    &mut self.bitsleft,
+                    input,
+                    &mut self.input_pos,
+                    &mut self.overread_count,
+                )?;
+            }
+
+            let entry = self.inner.precode_decode_table
+                [(self.bitbuf & bitmask(DEFLATE_MAX_PRE_CODEWORD_LEN)) as usize];
+            self.bitbuf >>= (entry & 0xFF) as u64;
+            self.bitsleft -= entry & 0xFF;
+            let presym = (entry >> 16) as usize;
+
+            if presym < 16 {
+                self.inner.lens[i] = presym as u8;
+                i += 1;
+                continue;
+            }
+
+            if presym == 16 {
+                if i == 0 {
+                    return Err(bad.into());
+                }
+                let rep_val = self.inner.lens[i - 1];
+                let rep_count = 3 + (self.bitbuf & 3) as usize;
+                self.bitbuf >>= 2;
+                self.bitsleft -= 2;
+                for j in 0..6 {
+                    self.inner.lens[i + j] = rep_val;
+                }
+                i += rep_count;
+            } else if presym == 17 {
+                let rep_count = 3 + (self.bitbuf & 7) as usize;
+                self.bitbuf >>= 3;
+                self.bitsleft -= 3;
+                for j in 0..10 {
+                    self.inner.lens[i + j] = 0;
+                }
+                i += rep_count;
+            } else {
+                let rep_count = 11 + (self.bitbuf & bitmask(7)) as usize;
+                self.bitbuf >>= 7;
+                self.bitsleft -= 7;
+                self.inner.lens[i..i + rep_count].fill(0);
+                i += rep_count;
+            }
+        }
+
+        if i != total_syms {
+            return Err(bad.into());
+        }
+
+        if !build_decode_table(
+            &mut self.inner.offset_decode_table,
+            &self.inner.lens[num_litlen_syms..],
+            num_offset_syms,
+            &OFFSET_DECODE_RESULTS,
+            OFFSET_TABLEBITS,
+            15,
+            &mut self.inner.sorted_syms,
+            None,
+        ) {
+            return Err(bad.into());
+        }
+
+        if !build_decode_table(
+            &mut self.inner.litlen_decode_table,
+            &self.inner.lens,
+            num_litlen_syms,
+            &LITLEN_DECODE_RESULTS,
+            LITLEN_TABLEBITS,
+            15,
+            &mut self.inner.sorted_syms,
+            Some(&mut self.inner.litlen_tablebits),
+        ) {
+            return Err(bad.into());
+        }
+
+        self.state = StreamState::CompressedData;
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Compressed data decoding (Huffman)
+    // -----------------------------------------------------------------------
+
+    fn decompress_block(&mut self) -> Result<(), StreamError<S::Error>> {
+        let bad = DecompressionError::BadData;
+
+        // Handle pending match from previous fill()
+        if let Some(pm) = self.pending_match.take() {
+            let space = self.output_space();
+            if space == 0 {
+                self.pending_match = Some(pm);
+                return Ok(());
+            }
+            if pm.length > space {
+                // Partial write: fill available space, save remainder.
+                // Match offset is relative, so the remaining portion
+                // references the same lookback distance from the new write_pos.
+                self.write_match_inline(pm.offset, space);
+                self.pending_match = Some(PendingMatch {
+                    offset: pm.offset,
+                    length: pm.length - space,
+                });
+                return Ok(());
+            }
+            self.write_match_inline(pm.offset, pm.length);
+            if self.peek_len() >= self.capacity {
+                return Ok(());
+            }
+        }
+
+        // Refill staging buffer from source
+        self.fill_input().map_err(StreamError::Source)?;
+
+        let litlen_tablemask = bitmask(self.inner.litlen_tablebits);
+        let input = &self.input_buf[..self.input_len];
+        let in_fastloop_end = input.len().saturating_sub(FASTLOOP_MAX_BYTES_READ);
+        let out_fastloop_end = self
+            .buffer
+            .len()
+            .saturating_sub(FASTLOOP_MAX_BYTES_WRITTEN);
+
+        // --- Fastloop ---
+        if self.input_pos < in_fastloop_end && self.write_pos < out_fastloop_end {
+            refill_bits_fast(
+                &mut self.bitbuf,
+                &mut self.bitsleft,
+                input,
+                &mut self.input_pos,
+            );
+            let mut entry = table_lookup(
+                &self.inner.litlen_decode_table,
+                self.bitbuf & litlen_tablemask,
+            );
+
+            'fastloop: loop {
+                let mut saved_bitbuf = self.bitbuf;
+                self.bitbuf >>= (entry & 0xFF) as u64;
+                self.bitsleft -= entry & 0xFF;
+
+                if entry & HUFFDEC_LITERAL != 0 {
+                    let lit = (entry >> 16) as u8;
+                    entry = table_lookup(
+                        &self.inner.litlen_decode_table,
+                        self.bitbuf & litlen_tablemask,
+                    );
+                    saved_bitbuf = self.bitbuf;
+                    self.bitbuf >>= (entry & 0xFF) as u64;
+                    self.bitsleft -= entry & 0xFF;
+                    self.buffer[self.write_pos] = lit;
+                    self.write_pos += 1;
+
+                    if entry & HUFFDEC_LITERAL != 0 {
+                        let lit = (entry >> 16) as u8;
+                        entry = table_lookup(
+                            &self.inner.litlen_decode_table,
+                            self.bitbuf & litlen_tablemask,
+                        );
+                        saved_bitbuf = self.bitbuf;
+                        self.bitbuf >>= (entry & 0xFF) as u64;
+                        self.bitsleft -= entry & 0xFF;
+                        self.buffer[self.write_pos] = lit;
+                        self.write_pos += 1;
+
+                        if entry & HUFFDEC_LITERAL != 0 {
+                            self.buffer[self.write_pos] = (entry >> 16) as u8;
+                            self.write_pos += 1;
+                            entry = table_lookup(
+                                &self.inner.litlen_decode_table,
+                                self.bitbuf & litlen_tablemask,
+                            );
+                            refill_bits_fast(
+                                &mut self.bitbuf,
+                                &mut self.bitsleft,
+                                input,
+                                &mut self.input_pos,
+                            );
+                            if self.input_pos < in_fastloop_end
+                                && self.write_pos < out_fastloop_end
+                            {
+                                continue 'fastloop;
+                            }
+                            break 'fastloop;
+                        }
+                    }
+                }
+
+                if entry & HUFFDEC_EXCEPTIONAL != 0 {
+                    if entry & HUFFDEC_END_OF_BLOCK != 0 {
+                        self.finish_block()?;
+                        return Ok(());
+                    }
+                    entry = table_lookup(
+                        &self.inner.litlen_decode_table,
+                        (entry >> 16) as u64
+                            + extract_varbits(self.bitbuf, (entry >> 8) & 0x3F),
+                    );
+                    saved_bitbuf = self.bitbuf;
+                    self.bitbuf >>= (entry & 0xFF) as u64;
+                    self.bitsleft -= entry & 0xFF;
+
+                    if entry & HUFFDEC_LITERAL != 0 {
+                        self.buffer[self.write_pos] = (entry >> 16) as u8;
+                        self.write_pos += 1;
+                        entry = table_lookup(
+                            &self.inner.litlen_decode_table,
+                            self.bitbuf & litlen_tablemask,
+                        );
+                        refill_bits_fast(
+                            &mut self.bitbuf,
+                            &mut self.bitsleft,
+                            input,
+                            &mut self.input_pos,
+                        );
+                        if self.input_pos < in_fastloop_end
+                            && self.write_pos < out_fastloop_end
+                        {
+                            continue 'fastloop;
+                        }
+                        break 'fastloop;
+                    }
+                    if entry & HUFFDEC_END_OF_BLOCK != 0 {
+                        self.finish_block()?;
+                        return Ok(());
+                    }
+                }
+
+                // Decode match length
+                let length = (entry >> 16) as usize
+                    + (extract_varbits8(saved_bitbuf, entry) >> ((entry >> 8) as u8 as u64))
+                        as usize;
+
+                // Decode match offset
+                let mut oentry = table_lookup(
+                    &self.inner.offset_decode_table,
+                    self.bitbuf & bitmask(OFFSET_TABLEBITS),
+                );
+                if oentry & HUFFDEC_EXCEPTIONAL != 0 {
+                    self.bitbuf >>= OFFSET_TABLEBITS as u64;
+                    self.bitsleft -= OFFSET_TABLEBITS;
+                    oentry = table_lookup(
+                        &self.inner.offset_decode_table,
+                        (oentry >> 16) as u64
+                            + extract_varbits(self.bitbuf, (oentry >> 8) & 0x3F),
+                    );
+                }
+                let saved_bitbuf_off = self.bitbuf;
+                self.bitbuf >>= (oentry & 0xFF) as u64;
+                self.bitsleft -= oentry & 0xFF;
+
+                let offset = (oentry >> 16) as usize
+                    + (extract_varbits8(saved_bitbuf_off, oentry)
+                        >> ((oentry >> 8) as u8 as u64)) as usize;
+
+                if offset == 0 || offset > self.write_pos {
+                    return Err(bad.into());
+                }
+
+                entry = table_lookup(
+                    &self.inner.litlen_decode_table,
+                    self.bitbuf & litlen_tablemask,
+                );
+                refill_bits_fast(
+                    &mut self.bitbuf,
+                    &mut self.bitsleft,
+                    input,
+                    &mut self.input_pos,
+                );
+
+                super::fastloop_match_copy(
+                    &mut self.buffer,
+                    self.write_pos,
+                    self.write_pos - offset,
+                    length,
+                    offset,
+                );
+                self.write_pos += length;
+
+                if self.input_pos >= in_fastloop_end || self.write_pos >= out_fastloop_end {
+                    break 'fastloop;
+                }
+            }
+        }
+
+        // --- Generic loop ---
+        // This loop refills the staging buffer from the source as needed,
+        // so it never overreads unless the source is truly exhausted.
+        loop {
+            // Refill staging buffer when running low. This prevents false
+            // overreads when there's still source data available.
+            if self.input_len - self.input_pos < 16 {
+                self.fill_input().map_err(StreamError::Source)?;
+            }
+
+            let input = &self.input_buf[..self.input_len];
+            refill_bits(
+                &mut self.bitbuf,
+                &mut self.bitsleft,
+                input,
+                &mut self.input_pos,
+                &mut self.overread_count,
+            )?;
+
+            let mut entry = table_lookup(
+                &self.inner.litlen_decode_table,
+                self.bitbuf & litlen_tablemask,
+            );
+            let mut saved_bitbuf = self.bitbuf;
+            self.bitbuf >>= (entry & 0xFF) as u64;
+            self.bitsleft -= entry & 0xFF;
+
+            if entry & HUFFDEC_SUBTABLE_POINTER != 0 {
+                entry = table_lookup(
+                    &self.inner.litlen_decode_table,
+                    (entry >> 16) as u64
+                        + extract_varbits(self.bitbuf, (entry >> 8) & 0x3F),
+                );
+                saved_bitbuf = self.bitbuf;
+                self.bitbuf >>= (entry & 0xFF) as u64;
+                self.bitsleft -= entry & 0xFF;
+            }
+
+            let value = entry >> 16;
+
+            if entry & HUFFDEC_LITERAL != 0 {
+                if self.write_pos >= self.buffer.len() {
+                    return Err(bad.into());
+                }
+                self.buffer[self.write_pos] = value as u8;
+                self.write_pos += 1;
+                if self.peek_len() >= self.capacity {
+                    return Ok(());
+                }
+                continue;
+            }
+
+            if entry & HUFFDEC_END_OF_BLOCK != 0 {
+                self.finish_block()?;
+                return Ok(());
+            }
+
+            // Decode match length
+            let length = value as usize
+                + (extract_varbits8(saved_bitbuf, entry) >> ((entry >> 8) as u8 as u64))
+                    as usize;
+
+            // Decode match offset
+            let mut oentry = table_lookup(
+                &self.inner.offset_decode_table,
+                self.bitbuf & bitmask(OFFSET_TABLEBITS),
+            );
+            if oentry & HUFFDEC_EXCEPTIONAL != 0 {
+                self.bitbuf >>= OFFSET_TABLEBITS as u64;
+                self.bitsleft -= OFFSET_TABLEBITS;
+                oentry = table_lookup(
+                    &self.inner.offset_decode_table,
+                    (oentry >> 16) as u64
+                        + extract_varbits(self.bitbuf, (oentry >> 8) & 0x3F),
+                );
+            }
+            let saved_bitbuf_off = self.bitbuf;
+            self.bitbuf >>= (oentry & 0xFF) as u64;
+            self.bitsleft -= oentry & 0xFF;
+
+            let offset = (oentry >> 16) as usize
+                + (extract_varbits8(saved_bitbuf_off, oentry)
+                    >> ((oentry >> 8) as u8 as u64)) as usize;
+
+            if offset == 0 || offset > self.write_pos {
+                return Err(bad.into());
+            }
+
+            let space = self.output_space();
+            if length > space {
+                if space > 0 {
+                    self.write_match_inline(offset, space);
+                    self.pending_match = Some(PendingMatch {
+                        offset,
+                        length: length - space,
+                    });
+                } else {
+                    self.pending_match = Some(PendingMatch { offset, length });
+                }
+                return Ok(());
+            }
+
+            self.write_match_inline(offset, length);
+
+            if self.peek_len() >= self.capacity {
+                return Ok(());
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Match writing helpers
+    // -----------------------------------------------------------------------
+
+    #[inline(always)]
+    fn write_match_inline(&mut self, offset: usize, length: usize) {
+        let src_start = self.write_pos - offset;
+        if offset >= length {
+            self.buffer
+                .copy_within(src_start..src_start + length, self.write_pos);
+        } else if offset == 1 {
+            let byte = self.buffer[src_start];
+            self.buffer[self.write_pos..self.write_pos + length].fill(byte);
+        } else if length <= 32 {
+            for i in 0..length {
+                self.buffer[self.write_pos + i] = self.buffer[src_start + i];
+            }
+        } else {
+            self.buffer
+                .copy_within(src_start..src_start + offset, self.write_pos);
+            let mut copied = offset;
+            while copied < length {
+                let chunk = copied.min(length - copied);
+                self.buffer.copy_within(
+                    self.write_pos..self.write_pos + chunk,
+                    self.write_pos + copied,
+                );
+                copied += chunk;
+            }
+        }
+        self.write_pos += length;
+    }
+
+    // -----------------------------------------------------------------------
+    // Block completion
+    // -----------------------------------------------------------------------
+
+    fn finish_block(&mut self) -> Result<(), StreamError<S::Error>> {
+        if self.is_final_block {
+            // Verify overread count
+            let extra_bytes = (self.bitsleft / 8) as usize;
+            if self.overread_count > extra_bytes {
+                return Err(DecompressionError::BadData.into());
+            }
+            if self.wrapper == WrapperFormat::Raw {
+                self.state = StreamState::Done;
+            } else {
+                self.state = StreamState::WrapperFooter;
+            }
+        } else {
+            self.state = StreamState::BlockHeader;
+        }
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Uncompressed block copying
+    // -----------------------------------------------------------------------
+
+    fn copy_uncompressed(&mut self, remaining: usize) -> Result<(), StreamError<S::Error>> {
+        self.ensure_input_bytes(1).map_err(StreamError::Source)?;
+        let available = (self.input_len - self.input_pos).min(remaining);
+        let can_write = available.min(self.output_space());
+
+        if can_write == 0 {
+            if remaining > 0 && self.output_space() == 0 {
+                self.state = StreamState::UncompressedData { remaining };
+                return Ok(());
+            }
+            if remaining > 0 {
+                return Err(DecompressionError::BadData.into());
+            }
+        }
+
+        self.buffer[self.write_pos..self.write_pos + can_write]
+            .copy_from_slice(&self.input_buf[self.input_pos..self.input_pos + can_write]);
+        self.write_pos += can_write;
+        self.input_pos += can_write;
+
+        let new_remaining = remaining - can_write;
+        if new_remaining == 0 {
+            self.finish_block()?;
+        } else {
+            self.state = StreamState::UncompressedData {
+                remaining: new_remaining,
+            };
+        }
+
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Wrapper footer parsing
+    // -----------------------------------------------------------------------
+
+    fn parse_wrapper_footer(&mut self) -> Result<(), StreamError<S::Error>> {
+        let bad = DecompressionError::BadData;
+
+        // Compute checksum for all output produced so far
+        self.flush_checksum();
+
+        // Byte-align: discard DEFLATE padding bits (bits after the last
+        // code up to the next byte boundary).
+        let padding = self.bitsleft % 8;
+        self.bitbuf >>= padding as u64;
+        self.bitsleft -= padding;
+
+        let footer_size: usize = match self.wrapper {
+            WrapperFormat::Zlib => 4,
+            WrapperFormat::Gzip => 8,
+            WrapperFormat::Raw => {
+                self.state = StreamState::Done;
+                return Ok(());
+            }
+        };
+
+        // Collect footer bytes from three sources (in order):
+        // 1. Real (non-overread) bytes already in bitbuf
+        // 2. Remaining bytes in the staging buffer past input_pos
+        // 3. More bytes pulled from the source
+        let real_in_bitbuf = (self.bitsleft / 8) as usize - self.overread_count;
+        let mut footer = [0u8; 8];
+        let mut pos = 0;
+
+        // Source 1: extract real bytes from bitbuf (LSB = earliest in stream)
+        let from_bitbuf = real_in_bitbuf.min(footer_size);
+        for _ in 0..from_bitbuf {
+            footer[pos] = (self.bitbuf & 0xFF) as u8;
+            self.bitbuf >>= 8;
+            self.bitsleft -= 8;
+            pos += 1;
+        }
+
+        // Done with bitbuf — clear it
+        self.bitbuf = 0;
+        self.bitsleft = 0;
+        self.overread_count = 0;
+
+        // Source 2 & 3: staging buffer then source
+        while pos < footer_size {
+            if self.input_pos < self.input_len {
+                footer[pos] = self.input_buf[self.input_pos];
+                self.input_pos += 1;
+                pos += 1;
+            } else {
+                self.fill_input().map_err(StreamError::Source)?;
+                if self.input_pos >= self.input_len {
+                    return Err(bad.into());
+                }
+            }
+        }
+
+        // Verify footer
+        match self.wrapper {
+            WrapperFormat::Zlib => {
+                let expected = u32::from_be_bytes([footer[0], footer[1], footer[2], footer[3]]);
+                if self.checksum != expected {
+                    return Err(bad.into());
+                }
+            }
+            WrapperFormat::Gzip => {
+                let expected_crc =
+                    u32::from_le_bytes([footer[0], footer[1], footer[2], footer[3]]);
+                if self.checksum != expected_crc {
+                    return Err(bad.into());
+                }
+                let expected_size =
+                    u32::from_le_bytes([footer[4], footer[5], footer[6], footer[7]]);
+                if (self.total_output as u32) != expected_size {
+                    return Err(bad.into());
+                }
+            }
+            WrapperFormat::Raw => unreachable!(),
+        }
+
+        self.state = StreamState::Done;
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// std integration: Read + BufRead
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "std")]
+impl<R: std::io::BufRead> StreamDecompressor<BufReadSource<R>> {
+    /// Create a streaming decompressor that reads raw DEFLATE from a `BufRead`.
+    pub fn from_reader_deflate(reader: R, capacity: usize) -> Self {
+        Self::deflate(BufReadSource(reader), capacity)
+    }
+
+    /// Create a streaming decompressor that reads zlib from a `BufRead`.
+    pub fn from_reader_zlib(reader: R, capacity: usize) -> Self {
+        Self::zlib(BufReadSource(reader), capacity)
+    }
+
+    /// Create a streaming decompressor that reads gzip from a `BufRead`.
+    pub fn from_reader_gzip(reader: R, capacity: usize) -> Self {
+        Self::gzip(BufReadSource(reader), capacity)
+    }
+}
+
+#[cfg(feature = "std")]
+impl<R: std::io::BufRead> std::io::BufRead for StreamDecompressor<BufReadSource<R>> {
+    fn fill_buf(&mut self) -> std::io::Result<&[u8]> {
+        if self.peek().is_empty() && !self.is_done() {
+            self.fill().map_err(|e| match e {
+                StreamError::Source(e) => e,
+                StreamError::Decompress(e) => {
+                    std::io::Error::new(std::io::ErrorKind::InvalidData, e)
+                }
+            })?;
+        }
+        Ok(self.peek())
+    }
+
+    fn consume(&mut self, amt: usize) {
+        self.advance(amt);
+    }
+}
+
+#[cfg(feature = "std")]
+impl<R: std::io::BufRead> std::io::Read for StreamDecompressor<BufReadSource<R>> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let available = std::io::BufRead::fill_buf(self)?;
+        let n = available.len().min(buf.len());
+        buf[..n].copy_from_slice(&available[..n]);
+        std::io::BufRead::consume(self, n);
+        Ok(n)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(all(test, not(miri)))]
+mod tests {
+    use super::*;
+    use alloc::vec;
+    use alloc::vec::Vec;
+
+    fn stream_decompress_all<S: InputSource>(
+        dec: &mut StreamDecompressor<S>,
+    ) -> Result<Vec<u8>, StreamError<S::Error>>
+    where
+        S::Error: core::fmt::Debug,
+    {
+        let mut output = Vec::new();
+        while !dec.is_done() {
+            dec.fill()?;
+            let data = dec.peek();
+            output.extend_from_slice(data);
+            let n = data.len();
+            dec.advance(n);
+        }
+        Ok(output)
+    }
+
+    #[test]
+    fn test_stream_deflate_basic() {
+        let data = b"Hello, World! Hello, World! Hello, World!";
+        let mut c = libdeflater::Compressor::new(libdeflater::CompressionLvl::new(6).unwrap());
+        let bound = c.deflate_compress_bound(data.len());
+        let mut compressed = vec![0u8; bound];
+        let csize = c.deflate_compress(data, &mut compressed).unwrap();
+
+        let mut dec = StreamDecompressor::deflate(&compressed[..csize], 64 * 1024);
+        let output = stream_decompress_all(&mut dec).unwrap();
+        assert_eq!(&output, data);
+    }
+
+    #[test]
+    fn test_stream_zlib_basic() {
+        let data = b"Hello, World! Hello, World! Hello, World!";
+        let mut c = libdeflater::Compressor::new(libdeflater::CompressionLvl::new(6).unwrap());
+        let bound = c.zlib_compress_bound(data.len());
+        let mut compressed = vec![0u8; bound];
+        let csize = c.zlib_compress(data, &mut compressed).unwrap();
+
+        let mut dec = StreamDecompressor::zlib(&compressed[..csize], 64 * 1024);
+        let output = stream_decompress_all(&mut dec).unwrap();
+        assert_eq!(&output, data);
+    }
+
+    #[test]
+    fn test_stream_gzip_basic() {
+        let data = b"Hello, World! Hello, World! Hello, World!";
+        let mut c = libdeflater::Compressor::new(libdeflater::CompressionLvl::new(6).unwrap());
+        let bound = c.gzip_compress_bound(data.len());
+        let mut compressed = vec![0u8; bound];
+        let csize = c.gzip_compress(data, &mut compressed).unwrap();
+
+        let mut dec = StreamDecompressor::gzip(&compressed[..csize], 64 * 1024);
+        let output = stream_decompress_all(&mut dec).unwrap();
+        assert_eq!(&output, data);
+    }
+
+    #[test]
+    fn test_stream_all_levels_deflate() {
+        let data: Vec<u8> = (0..=255).cycle().take(10_000).collect();
+        for level in 0..=12 {
+            let mut c =
+                libdeflater::Compressor::new(libdeflater::CompressionLvl::new(level).unwrap());
+            let bound = c.deflate_compress_bound(data.len());
+            let mut compressed = vec![0u8; bound];
+            let csize = c.deflate_compress(&data, &mut compressed).unwrap();
+
+            let mut dec = StreamDecompressor::deflate(&compressed[..csize], 64 * 1024);
+            let output = stream_decompress_all(&mut dec).unwrap();
+            assert_eq!(output, data, "deflate level {level}");
+        }
+    }
+
+    #[test]
+    fn test_stream_all_formats_all_levels() {
+        let data: Vec<u8> = (0..=255).cycle().take(50_000).collect();
+        for level in 0..=12 {
+            let mut c =
+                libdeflater::Compressor::new(libdeflater::CompressionLvl::new(level).unwrap());
+
+            // DEFLATE
+            {
+                let bound = c.deflate_compress_bound(data.len());
+                let mut compressed = vec![0u8; bound];
+                let csize = c.deflate_compress(&data, &mut compressed).unwrap();
+                let mut dec = StreamDecompressor::deflate(&compressed[..csize], 64 * 1024);
+                let output = stream_decompress_all(&mut dec).unwrap();
+                assert_eq!(output, data, "streaming deflate level {level}");
+            }
+
+            // zlib
+            {
+                let bound = c.zlib_compress_bound(data.len());
+                let mut compressed = vec![0u8; bound];
+                let csize = c.zlib_compress(&data, &mut compressed).unwrap();
+                let mut dec = StreamDecompressor::zlib(&compressed[..csize], 64 * 1024);
+                let output = stream_decompress_all(&mut dec).unwrap();
+                assert_eq!(output, data, "streaming zlib level {level}");
+            }
+
+            // gzip
+            {
+                let bound = c.gzip_compress_bound(data.len());
+                let mut compressed = vec![0u8; bound];
+                let csize = c.gzip_compress(&data, &mut compressed).unwrap();
+                let mut dec = StreamDecompressor::gzip(&compressed[..csize], 64 * 1024);
+                let output = stream_decompress_all(&mut dec).unwrap();
+                assert_eq!(output, data, "streaming gzip level {level}");
+            }
+        }
+    }
+
+    #[test]
+    fn test_stream_small_capacity() {
+        let data: Vec<u8> = (0..=255).cycle().take(10_000).collect();
+        let mut c = libdeflater::Compressor::new(libdeflater::CompressionLvl::new(6).unwrap());
+        let bound = c.deflate_compress_bound(data.len());
+        let mut compressed = vec![0u8; bound];
+        let csize = c.deflate_compress(&data, &mut compressed).unwrap();
+
+        // Small capacity to exercise compaction and re-entry
+        let mut dec = StreamDecompressor::deflate(&compressed[..csize], 512);
+        let output = stream_decompress_all(&mut dec).unwrap();
+        assert_eq!(output, data);
+    }
+
+    #[test]
+    fn test_stream_parity_with_whole_buffer() {
+        let data: Vec<u8> = (0..=255).cycle().take(100_000).collect();
+        for level in [1, 6, 12] {
+            let mut c =
+                libdeflater::Compressor::new(libdeflater::CompressionLvl::new(level).unwrap());
+            let bound = c.deflate_compress_bound(data.len());
+            let mut compressed = vec![0u8; bound];
+            let csize = c.deflate_compress(&data, &mut compressed).unwrap();
+
+            let mut d = Decompressor::new();
+            let mut wb_output = vec![0u8; data.len()];
+            let wb_size = d
+                .deflate_decompress(&compressed[..csize], &mut wb_output)
+                .unwrap();
+
+            let mut dec = StreamDecompressor::deflate(&compressed[..csize], 4096);
+            let stream_output = stream_decompress_all(&mut dec).unwrap();
+
+            assert_eq!(wb_size, stream_output.len(), "level {level}: size mismatch");
+            assert_eq!(
+                &wb_output[..wb_size],
+                &stream_output,
+                "level {level}: content mismatch"
+            );
+        }
+    }
+
+    #[test]
+    fn test_stream_empty() {
+        let mut c = libdeflater::Compressor::new(libdeflater::CompressionLvl::new(1).unwrap());
+        let bound = c.deflate_compress_bound(0);
+        let mut compressed = vec![0u8; bound];
+        let csize = c.deflate_compress(&[], &mut compressed).unwrap();
+
+        let mut dec = StreamDecompressor::deflate(&compressed[..csize], 1024);
+        let output = stream_decompress_all(&mut dec).unwrap();
+        assert!(output.is_empty());
+    }
+
+    #[test]
+    fn test_stream_all_zeros() {
+        let data = vec![0u8; 100_000];
+        let mut c = libdeflater::Compressor::new(libdeflater::CompressionLvl::new(6).unwrap());
+        let bound = c.deflate_compress_bound(data.len());
+        let mut compressed = vec![0u8; bound];
+        let csize = c.deflate_compress(&data, &mut compressed).unwrap();
+
+        let mut dec = StreamDecompressor::deflate(&compressed[..csize], 8192);
+        let output = stream_decompress_all(&mut dec).unwrap();
+        assert_eq!(output.len(), data.len());
+        assert_eq!(output, data);
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn test_stream_bufreader() {
+        let data: Vec<u8> = (0..=255).cycle().take(50_000).collect();
+        let mut c = libdeflater::Compressor::new(libdeflater::CompressionLvl::new(6).unwrap());
+        let bound = c.gzip_compress_bound(data.len());
+        let mut compressed = vec![0u8; bound];
+        let csize = c.gzip_compress(&data, &mut compressed).unwrap();
+
+        let cursor = std::io::Cursor::new(&compressed[..csize]);
+        let reader = std::io::BufReader::new(cursor);
+        let mut dec = StreamDecompressor::from_reader_gzip(reader, 64 * 1024);
+
+        let mut output = Vec::new();
+        std::io::Read::read_to_end(&mut dec, &mut output).unwrap();
+        assert_eq!(output, data);
+    }
+}

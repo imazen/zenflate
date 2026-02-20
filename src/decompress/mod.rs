@@ -1,6 +1,9 @@
 //! DEFLATE decompression, ported from libdeflate's deflate_decompress.c and
 //! decompress_template.h.
 
+#[cfg(feature = "alloc")]
+pub mod streaming;
+
 use crate::checksum;
 use crate::error::DecompressionError;
 
@@ -8,69 +11,69 @@ use crate::error::DecompressionError;
 // Decode table constants
 // ---------------------------------------------------------------------------
 
-const PRECODE_TABLEBITS: u32 = 7;
+pub(crate) const PRECODE_TABLEBITS: u32 = 7;
 const PRECODE_ENOUGH: usize = 128;
-const LITLEN_TABLEBITS: u32 = 11;
+pub(crate) const LITLEN_TABLEBITS: u32 = 11;
 const LITLEN_ENOUGH: usize = 2342;
-const OFFSET_TABLEBITS: u32 = 8;
+pub(crate) const OFFSET_TABLEBITS: u32 = 8;
 const OFFSET_ENOUGH: usize = 402;
 
 // Decode table entry flags
-const HUFFDEC_LITERAL: u32 = 0x8000_0000;
-const HUFFDEC_EXCEPTIONAL: u32 = 0x0000_8000;
-const HUFFDEC_SUBTABLE_POINTER: u32 = 0x0000_4000;
-const HUFFDEC_END_OF_BLOCK: u32 = 0x0000_2000;
+pub(crate) const HUFFDEC_LITERAL: u32 = 0x8000_0000;
+pub(crate) const HUFFDEC_EXCEPTIONAL: u32 = 0x0000_8000;
+pub(crate) const HUFFDEC_SUBTABLE_POINTER: u32 = 0x0000_4000;
+pub(crate) const HUFFDEC_END_OF_BLOCK: u32 = 0x0000_2000;
 
 // Bitstream constants (64-bit)
-const CONSUMABLE_NBITS: u32 = 56; // MAX_BITSLEFT(63) - 7
+pub(crate) const CONSUMABLE_NBITS: u32 = 56; // MAX_BITSLEFT(63) - 7
 
 // Fastloop safety margins — how many bytes the fastloop can read/write per iteration.
 // Max bytes that can be written past the nominal match end in one fastloop iteration.
 // Word copies (8 bytes) can overrun by at most 7 bytes; RLE uses fill() (exact length).
-const FASTLOOP_MAX_BYTES_WRITTEN: usize = 2 + crate::constants::DEFLATE_MAX_MATCH_LEN as usize + 7;
+pub(crate) const FASTLOOP_MAX_BYTES_WRITTEN: usize = 2 + crate::constants::DEFLATE_MAX_MATCH_LEN as usize + 7;
 // Input: worst-case bytes consumed per iteration + 8-byte read-ahead for branchless refill
-const FASTLOOP_MAX_BYTES_READ: usize = 32;
+pub(crate) const FASTLOOP_MAX_BYTES_READ: usize = 32;
 
 // DEFLATE format constants (local copies for internal use)
-const DEFLATE_BLOCKTYPE_UNCOMPRESSED: u32 = 0;
-const DEFLATE_BLOCKTYPE_STATIC_HUFFMAN: u32 = 1;
-const DEFLATE_BLOCKTYPE_DYNAMIC_HUFFMAN: u32 = 2;
-const DEFLATE_NUM_PRECODE_SYMS: usize = 19;
-const DEFLATE_NUM_LITLEN_SYMS: usize = 288;
-const DEFLATE_NUM_OFFSET_SYMS: usize = 32;
+pub(crate) const DEFLATE_BLOCKTYPE_UNCOMPRESSED: u32 = 0;
+pub(crate) const DEFLATE_BLOCKTYPE_STATIC_HUFFMAN: u32 = 1;
+pub(crate) const DEFLATE_BLOCKTYPE_DYNAMIC_HUFFMAN: u32 = 2;
+pub(crate) const DEFLATE_NUM_PRECODE_SYMS: usize = 19;
+pub(crate) const DEFLATE_NUM_LITLEN_SYMS: usize = 288;
+pub(crate) const DEFLATE_NUM_OFFSET_SYMS: usize = 32;
 const DEFLATE_MAX_NUM_SYMS: usize = 288;
 const DEFLATE_MAX_CODEWORD_LEN: usize = 15;
-const DEFLATE_MAX_PRE_CODEWORD_LEN: u32 = 7;
+pub(crate) const DEFLATE_MAX_PRE_CODEWORD_LEN: u32 = 7;
 const DEFLATE_MAX_LENS_OVERRUN: usize = 137;
 
-const DEFLATE_PRECODE_LENS_PERMUTATION: [u8; 19] = [
+pub(crate) const DEFLATE_PRECODE_LENS_PERMUTATION: [u8; 19] = [
     16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15,
 ];
 
 // gzip constants
 const GZIP_FOOTER_SIZE: usize = 8;
 const GZIP_MIN_OVERHEAD: usize = 10 + GZIP_FOOTER_SIZE;
-const GZIP_ID1: u8 = 0x1F;
-const GZIP_ID2: u8 = 0x8B;
-const GZIP_CM_DEFLATE: u8 = 8;
-const GZIP_FHCRC: u8 = 0x02;
-const GZIP_FEXTRA: u8 = 0x04;
-const GZIP_FNAME: u8 = 0x08;
-const GZIP_FCOMMENT: u8 = 0x10;
-const GZIP_FRESERVED: u8 = 0xE0;
+pub(crate) const GZIP_ID1: u8 = 0x1F;
+pub(crate) const GZIP_ID2: u8 = 0x8B;
+pub(crate) const GZIP_CM_DEFLATE: u8 = 8;
+pub(crate) const GZIP_FHCRC: u8 = 0x02;
+pub(crate) const GZIP_FEXTRA: u8 = 0x04;
+pub(crate) const GZIP_FNAME: u8 = 0x08;
+pub(crate) const GZIP_FCOMMENT: u8 = 0x10;
+pub(crate) const GZIP_FRESERVED: u8 = 0xE0;
 
 // zlib constants
 const ZLIB_FOOTER_SIZE: usize = 4;
 const ZLIB_MIN_OVERHEAD: usize = 2 + ZLIB_FOOTER_SIZE;
-const ZLIB_CM_DEFLATE: u8 = 8;
-const ZLIB_CINFO_32K_WINDOW: u8 = 7;
+pub(crate) const ZLIB_CM_DEFLATE: u8 = 8;
+pub(crate) const ZLIB_CINFO_32K_WINDOW: u8 = 7;
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
 #[inline(always)]
-fn bitmask(n: u32) -> u64 {
+pub(crate) fn bitmask(n: u32) -> u64 {
     (1u64 << n) - 1
 }
 
@@ -82,13 +85,13 @@ fn bsr32(v: u32) -> u32 {
 
 /// Extract variable number of bits from word. count must be < 64.
 #[inline(always)]
-fn extract_varbits(word: u64, count: u32) -> u64 {
+pub(crate) fn extract_varbits(word: u64, count: u32) -> u64 {
     word & bitmask(count)
 }
 
 /// Extract variable bits using the low byte of `entry` as the count.
 #[inline(always)]
-fn extract_varbits8(word: u64, entry: u32) -> u64 {
+pub(crate) fn extract_varbits8(word: u64, entry: u32) -> u64 {
     word & bitmask(entry & 0xFF)
 }
 
@@ -158,9 +161,9 @@ const fn gen_offset_decode_results() -> [u32; DEFLATE_NUM_OFFSET_SYMS] {
     r
 }
 
-static PRECODE_DECODE_RESULTS: [u32; DEFLATE_NUM_PRECODE_SYMS] = gen_precode_decode_results();
-static LITLEN_DECODE_RESULTS: [u32; DEFLATE_NUM_LITLEN_SYMS] = gen_litlen_decode_results();
-static OFFSET_DECODE_RESULTS: [u32; DEFLATE_NUM_OFFSET_SYMS] = gen_offset_decode_results();
+pub(crate) static PRECODE_DECODE_RESULTS: [u32; DEFLATE_NUM_PRECODE_SYMS] = gen_precode_decode_results();
+pub(crate) static LITLEN_DECODE_RESULTS: [u32; DEFLATE_NUM_LITLEN_SYMS] = gen_litlen_decode_results();
+pub(crate) static OFFSET_DECODE_RESULTS: [u32; DEFLATE_NUM_OFFSET_SYMS] = gen_offset_decode_results();
 
 // ---------------------------------------------------------------------------
 // Decompressor struct
@@ -191,14 +194,14 @@ const LENS_SIZE: usize =
 /// assert_eq!(&output[..dsize], &data[..]);
 /// ```
 pub struct Decompressor {
-    precode_lens: [u8; DEFLATE_NUM_PRECODE_SYMS],
-    precode_decode_table: [u32; PRECODE_ENOUGH],
-    lens: [u8; LENS_SIZE],
-    litlen_decode_table: [u32; LITLEN_ENOUGH],
-    offset_decode_table: [u32; OFFSET_ENOUGH],
-    sorted_syms: [u16; DEFLATE_MAX_NUM_SYMS],
-    static_codes_loaded: bool,
-    litlen_tablebits: u32,
+    pub(crate) precode_lens: [u8; DEFLATE_NUM_PRECODE_SYMS],
+    pub(crate) precode_decode_table: [u32; PRECODE_ENOUGH],
+    pub(crate) lens: [u8; LENS_SIZE],
+    pub(crate) litlen_decode_table: [u32; LITLEN_ENOUGH],
+    pub(crate) offset_decode_table: [u32; OFFSET_ENOUGH],
+    pub(crate) sorted_syms: [u16; DEFLATE_MAX_NUM_SYMS],
+    pub(crate) static_codes_loaded: bool,
+    pub(crate) litlen_tablebits: u32,
 }
 
 impl Default for Decompressor {
@@ -407,7 +410,7 @@ impl Decompressor {
 /// Uses branchless word refill when 8 bytes are available, otherwise
 /// falls back to byte-at-a-time with overread tracking.
 #[inline(always)]
-fn refill_bits(
+pub(crate) fn refill_bits(
     bitbuf: &mut u64,
     bitsleft: &mut u32,
     input: &[u8],
@@ -443,7 +446,7 @@ fn refill_bits(
 /// Same as the hot path of `refill_bits`, but without the end-of-input check
 /// or overread tracking. Only safe to call when `in_pos + 8 <= input.len()`.
 #[inline(always)]
-fn refill_bits_fast(bitbuf: &mut u64, bitsleft: &mut u32, input: &[u8], in_pos: &mut usize) {
+pub(crate) fn refill_bits_fast(bitbuf: &mut u64, bitsleft: &mut u32, input: &[u8], in_pos: &mut usize) {
     let word = crate::fast_bytes::load_u64_le(input, *in_pos);
     *bitbuf |= word << *bitsleft;
     *in_pos += 7 - ((*bitsleft as usize >> 3) & 7);
@@ -461,7 +464,7 @@ fn copy_word(output: &mut [u8], src: usize, dst: usize) {
 
 /// Look up a decode table entry by index.
 #[inline(always)]
-fn table_lookup(table: &[u32], idx: u64) -> u32 {
+pub(crate) fn table_lookup(table: &[u32], idx: u64) -> u32 {
     table[idx as usize]
 }
 
@@ -482,7 +485,7 @@ fn load_byte(output: &[u8], pos: usize) -> u8 {
 /// paths actually regress 5-6% on mixed/photo data because LLVM loses
 /// bounds information that enables better optimization.
 #[inline(always)]
-fn fastloop_match_copy(output: &mut [u8], out_pos: usize, src_start: usize, length: usize, offset: usize) {
+pub(crate) fn fastloop_match_copy(output: &mut [u8], out_pos: usize, src_start: usize, length: usize, offset: usize) {
     // Unified path for safe and unchecked modes. The `copy_word` function
     // already uses raw pointers when `unchecked` is enabled.
     // Keeping a single code path avoids instruction cache bloat from duplicated
@@ -521,7 +524,7 @@ fn fastloop_match_copy(output: &mut [u8], out_pos: usize, src_start: usize, leng
 /// Returns true on success, false if the lengths don't form a valid code.
 /// Faithfully ported from libdeflate's build_decode_table().
 #[allow(clippy::too_many_arguments)]
-fn build_decode_table(
+pub(crate) fn build_decode_table(
     decode_table: &mut [u32],
     lens: &[u8],
     num_syms: usize,
