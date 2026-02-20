@@ -16,6 +16,8 @@ pub enum DecompressionError {
     BadData,
     /// The output buffer is too small for the decompressed data.
     InsufficientSpace,
+    /// The operation was stopped by a cooperative cancellation signal.
+    Stopped(enough::StopReason),
 }
 
 impl core::fmt::Display for CompressionError {
@@ -31,7 +33,14 @@ impl core::fmt::Display for DecompressionError {
         match self {
             Self::BadData => write!(f, "invalid or corrupt compressed data"),
             Self::InsufficientSpace => write!(f, "output buffer too small for decompressed data"),
+            Self::Stopped(reason) => write!(f, "{reason}"),
         }
+    }
+}
+
+impl From<enough::StopReason> for DecompressionError {
+    fn from(reason: enough::StopReason) -> Self {
+        Self::Stopped(reason)
     }
 }
 

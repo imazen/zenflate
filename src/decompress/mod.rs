@@ -235,7 +235,23 @@ impl Decompressor {
         input: &[u8],
         output: &mut [u8],
     ) -> Result<usize, DecompressionError> {
-        let (_in_consumed, out_written) = self.deflate_decompress_core(input, output)?;
+        let (_in_consumed, out_written) =
+            self.deflate_decompress_core(input, output, &enough::Unstoppable)?;
+        Ok(out_written)
+    }
+
+    /// Decompress raw DEFLATE data with cooperative cancellation.
+    ///
+    /// Same as [`deflate_decompress`](Self::deflate_decompress), but checks
+    /// `stop` at each block boundary (typically every 32–65 KB of output).
+    /// With [`enough::Unstoppable`], all checks compile away to nothing.
+    pub fn deflate_decompress_with_stop(
+        &mut self,
+        input: &[u8],
+        output: &mut [u8],
+        stop: &impl enough::Stop,
+    ) -> Result<usize, DecompressionError> {
+        let (_in_consumed, out_written) = self.deflate_decompress_core(input, output, stop)?;
         Ok(out_written)
     }
 
@@ -249,7 +265,21 @@ impl Decompressor {
         input: &[u8],
         output: &mut [u8],
     ) -> Result<(usize, usize), DecompressionError> {
-        self.deflate_decompress_core(input, output)
+        self.deflate_decompress_core(input, output, &enough::Unstoppable)
+    }
+
+    /// Decompress raw DEFLATE data with cooperative cancellation, returning
+    /// `(input_consumed, output_written)`.
+    ///
+    /// Same as [`deflate_decompress_ex`](Self::deflate_decompress_ex), but checks
+    /// `stop` at each block boundary.
+    pub fn deflate_decompress_ex_with_stop(
+        &mut self,
+        input: &[u8],
+        output: &mut [u8],
+        stop: &impl enough::Stop,
+    ) -> Result<(usize, usize), DecompressionError> {
+        self.deflate_decompress_core(input, output, stop)
     }
 
     /// Decompress zlib-wrapped data. Returns the number of output bytes written.
@@ -257,6 +287,19 @@ impl Decompressor {
         &mut self,
         input: &[u8],
         output: &mut [u8],
+    ) -> Result<usize, DecompressionError> {
+        self.zlib_decompress_with_stop(input, output, &enough::Unstoppable)
+    }
+
+    /// Decompress zlib-wrapped data with cooperative cancellation.
+    ///
+    /// Same as [`zlib_decompress`](Self::zlib_decompress), but checks
+    /// `stop` at each block boundary.
+    pub fn zlib_decompress_with_stop(
+        &mut self,
+        input: &[u8],
+        output: &mut [u8],
+        stop: &impl enough::Stop,
     ) -> Result<usize, DecompressionError> {
         if input.len() < ZLIB_MIN_OVERHEAD {
             return Err(DecompressionError::BadData);
@@ -281,7 +324,8 @@ impl Decompressor {
         }
 
         let deflate_data = &input[2..input.len() - ZLIB_FOOTER_SIZE];
-        let (in_consumed, out_written) = self.deflate_decompress_core(deflate_data, output)?;
+        let (in_consumed, out_written) =
+            self.deflate_decompress_core(deflate_data, output, stop)?;
 
         // Verify Adler-32 (big-endian, after DEFLATE data)
         let footer_start = 2 + in_consumed;
@@ -303,6 +347,19 @@ impl Decompressor {
         &mut self,
         input: &[u8],
         output: &mut [u8],
+    ) -> Result<usize, DecompressionError> {
+        self.gzip_decompress_with_stop(input, output, &enough::Unstoppable)
+    }
+
+    /// Decompress gzip-wrapped data with cooperative cancellation.
+    ///
+    /// Same as [`gzip_decompress`](Self::gzip_decompress), but checks
+    /// `stop` at each block boundary.
+    pub fn gzip_decompress_with_stop(
+        &mut self,
+        input: &[u8],
+        output: &mut [u8],
+        stop: &impl enough::Stop,
     ) -> Result<usize, DecompressionError> {
         if input.len() < GZIP_MIN_OVERHEAD {
             return Err(DecompressionError::BadData);
@@ -376,7 +433,7 @@ impl Decompressor {
             return Err(DecompressionError::BadData);
         }
         let (in_consumed, out_written) =
-            self.deflate_decompress_core(&input[pos..deflate_end], output)?;
+            self.deflate_decompress_core(&input[pos..deflate_end], output, stop)?;
 
         let footer_start = pos + in_consumed;
 
@@ -721,6 +778,7 @@ impl Decompressor {
         &mut self,
         input: &[u8],
         output: &mut [u8],
+        stop: &impl enough::Stop,
     ) -> Result<(usize, usize), DecompressionError> {
         let mut in_pos: usize = 0;
         let mut out_pos: usize = 0;
@@ -732,6 +790,10 @@ impl Decompressor {
         let no_space = DecompressionError::InsufficientSpace;
 
         loop {
+            // Cooperative cancellation check at each block boundary.
+            // With Unstoppable, this compiles to nothing.
+            stop.check()?;
+
             // --- Read block header ---
             refill_bits(
                 &mut bitbuf,
@@ -1119,6 +1181,7 @@ impl Decompressor {
 
             // --- Generic decode loop (handles remainder after fastloop) ---
             if !block_done {
+                stop.check()?;
                 loop {
                     refill_bits(
                         &mut bitbuf,

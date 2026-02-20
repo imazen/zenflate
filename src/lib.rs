@@ -57,6 +57,7 @@ pub use decompress::Decompressor;
 pub use decompress::streaming::BufReadSource;
 #[cfg(feature = "alloc")]
 pub use decompress::streaming::{InputSource, StreamDecompressor};
+pub use enough::{Stop, StopReason, Unstoppable};
 #[cfg(feature = "alloc")]
 pub use error::StreamError;
 pub use error::{CompressionError, DecompressionError};
