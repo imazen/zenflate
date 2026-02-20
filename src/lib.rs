@@ -52,11 +52,11 @@ pub(crate) mod matchfinder;
 pub use checksum::{adler32, crc32};
 #[cfg(feature = "alloc")]
 pub use compress::{CompressionLevel, Compressor};
-pub use decompress::Decompressor;
 #[cfg(all(feature = "alloc", feature = "std"))]
 pub use decompress::streaming::BufReadSource;
 #[cfg(feature = "alloc")]
 pub use decompress::streaming::{InputSource, StreamDecompressor};
+pub use decompress::{DecompressOutcome, Decompressor};
 pub use enough::{Stop, StopReason, Unstoppable};
 #[cfg(feature = "alloc")]
 pub use error::StreamError;

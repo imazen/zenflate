@@ -176,6 +176,15 @@ pub(crate) static OFFSET_DECODE_RESULTS: [u32; DEFLATE_NUM_OFFSET_SYMS] =
 const LENS_SIZE: usize =
     DEFLATE_NUM_LITLEN_SYMS + DEFLATE_NUM_OFFSET_SYMS + DEFLATE_MAX_LENS_OVERRUN;
 
+/// Result of [`Decompressor::deflate_decompress_ex`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DecompressOutcome {
+    /// How many bytes of the input slice were consumed by the DEFLATE stream.
+    pub input_consumed: usize,
+    /// How many decompressed bytes were written to the output buffer.
+    pub output_written: usize,
+}
+
 /// DEFLATE/zlib/gzip decompressor.
 ///
 /// Reusable across multiple decompression calls. Caches static Huffman
@@ -244,7 +253,7 @@ impl Decompressor {
     ///
     /// Same as [`deflate_decompress`](Self::deflate_decompress), but checks
     /// `stop` at each block boundary (typically every 32–65 KB of output).
-    /// With [`enough::Unstoppable`], all checks compile away to nothing.
+    /// With [`Unstoppable`](enough::Unstoppable), all checks compile away to nothing.
     pub fn deflate_decompress_with_stop(
         &mut self,
         input: &[u8],
@@ -255,31 +264,40 @@ impl Decompressor {
         Ok(out_written)
     }
 
-    /// Decompress raw DEFLATE data, returning `(input_consumed, output_written)`.
+    /// Decompress raw DEFLATE data, returning both input consumed and output written.
     ///
-    /// Like [`deflate_decompress`](Self::deflate_decompress), but also reports how many
-    /// bytes of `input` were consumed. Useful when the compressed data is embedded in a
-    /// larger buffer and you need to know where it ends.
+    /// DEFLATE is self-terminating, so the input slice may extend past the
+    /// compressed data. [`DecompressOutcome::input_consumed`] tells you where
+    /// the stream ended.
     pub fn deflate_decompress_ex(
         &mut self,
         input: &[u8],
         output: &mut [u8],
-    ) -> Result<(usize, usize), DecompressionError> {
-        self.deflate_decompress_core(input, output, &enough::Unstoppable)
+    ) -> Result<DecompressOutcome, DecompressionError> {
+        let (input_consumed, output_written) =
+            self.deflate_decompress_core(input, output, &enough::Unstoppable)?;
+        Ok(DecompressOutcome {
+            input_consumed,
+            output_written,
+        })
     }
 
     /// Decompress raw DEFLATE data with cooperative cancellation, returning
-    /// `(input_consumed, output_written)`.
+    /// both input consumed and output written.
     ///
-    /// Same as [`deflate_decompress_ex`](Self::deflate_decompress_ex), but checks
-    /// `stop` at each block boundary.
+    /// Same as [`deflate_decompress_ex`](Self::deflate_decompress_ex), but
+    /// checks `stop` at each block boundary.
     pub fn deflate_decompress_ex_with_stop(
         &mut self,
         input: &[u8],
         output: &mut [u8],
         stop: &impl enough::Stop,
-    ) -> Result<(usize, usize), DecompressionError> {
-        self.deflate_decompress_core(input, output, stop)
+    ) -> Result<DecompressOutcome, DecompressionError> {
+        let (input_consumed, output_written) = self.deflate_decompress_core(input, output, stop)?;
+        Ok(DecompressOutcome {
+            input_consumed,
+            output_written,
+        })
     }
 
     /// Decompress zlib-wrapped data. Returns the number of output bytes written.
