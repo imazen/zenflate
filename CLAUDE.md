@@ -127,12 +127,16 @@ using `get_unchecked` for table lookups and match copy).
 |-----------|----------------|----------------------|---------------------|----------|
 | Sequential | 36µs | 44µs (1.22x whole) | 101µs | 77µs |
 | Zeros | 32µs | 38µs (1.19x whole) | 95µs | 47µs |
-| Mixed | 1.38ms | 1.54ms (1.12x whole) | 1.69ms | 1.44ms |
-| Photo | 1.71ms | 1.93ms (1.13x whole) | 2.15ms | 1.82ms |
+| Mixed | 1.34ms | 1.45ms (1.08x whole) | 1.60ms | 1.43ms |
+| Photo | 1.71ms | 1.85ms (1.08x whole) | 2.09ms | 1.82ms |
 
-Streaming overhead vs whole-buffer: 12-22% with 64K capacity.
-Streaming zenflate dominates fdeflate on sequential/zeros (1.3-1.7x faster),
-competitive on mixed/photo (0.94-1.07x).
+Streaming overhead vs whole-buffer: 8-22% with 64K capacity.
+Streaming zenflate dominates fdeflate on sequential/zeros (1.2-1.7x faster),
+neck-and-neck on mixed/photo (0.98-1.02x).
+
+Remaining 7-8% overhead vs whole-buffer is irreducible: staging buffer
+management, output compaction, and the generic loop's struct field access.
+Fastloop uses local variables for register promotion (confirmed 5-6% win).
 
 ### Checksums (1MB sequential, --features unchecked)
 
