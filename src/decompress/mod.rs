@@ -415,7 +415,7 @@ fn refill_bits(
 ) -> Result<(), DecompressionError> {
     if *in_pos + 8 <= input.len() {
         // Branchless refill: read 8 bytes, merge, advance by consumed bytes
-        let word = u64::from_le_bytes(input[*in_pos..*in_pos + 8].try_into().unwrap());
+        let word = crate::fast_bytes::load_u64_le(input, *in_pos);
         *bitbuf |= word << *bitsleft;
         *in_pos += 7 - ((*bitsleft as usize >> 3) & 7);
         *bitsleft |= 56; // MAX_BITSLEFT & !7
@@ -443,7 +443,7 @@ fn refill_bits(
 /// or overread tracking. Only safe to call when `in_pos + 8 <= input.len()`.
 #[inline(always)]
 fn refill_bits_fast(bitbuf: &mut u64, bitsleft: &mut u32, input: &[u8], in_pos: &mut usize) {
-    let word = u64::from_le_bytes(input[*in_pos..*in_pos + 8].try_into().unwrap());
+    let word = crate::fast_bytes::load_u64_le(input, *in_pos);
     *bitbuf |= word << *bitsleft;
     *in_pos += 7 - ((*bitsleft as usize >> 3) & 7);
     *bitsleft |= 56;
