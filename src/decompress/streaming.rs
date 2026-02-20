@@ -481,7 +481,7 @@ impl<S: InputSource> StreamDecompressor<S> {
         match self.wrapper {
             WrapperFormat::Zlib => {
                 if input.len() < 2 {
-                    return Err(StreamError::Decompress(DecompressionError::BadData));
+                    return Err(StreamError::Decompress(DecompressionError::InvalidHeader));
                 }
                 let hdr = u16::from_be_bytes([input[0], input[1]]);
                 if !hdr.is_multiple_of(31)
@@ -489,7 +489,7 @@ impl<S: InputSource> StreamDecompressor<S> {
                     || (input[0] >> 4) > ZLIB_CINFO_32K_WINDOW
                     || (input[1] >> 5) & 1 != 0
                 {
-                    return Err(StreamError::Decompress(DecompressionError::BadData));
+                    return Err(StreamError::Decompress(DecompressionError::InvalidHeader));
                 }
                 self.input_pos += 2;
                 self.state = StreamState::BlockHeader;
@@ -505,7 +505,7 @@ impl<S: InputSource> StreamDecompressor<S> {
     }
 
     fn parse_gzip_header(&mut self) -> Result<(), StreamError<S::Error>> {
-        let bad = StreamError::Decompress(DecompressionError::BadData);
+        let bad = StreamError::Decompress(DecompressionError::InvalidHeader);
         let input = &self.input_buf[self.input_pos..self.input_len];
 
         if input.len() < 10 {
@@ -1360,18 +1360,18 @@ impl<S: InputSource> StreamDecompressor<S> {
             WrapperFormat::Zlib => {
                 let expected = u32::from_be_bytes([footer[0], footer[1], footer[2], footer[3]]);
                 if self.checksum != expected {
-                    return Err(bad.into());
+                    return Err(DecompressionError::ChecksumMismatch.into());
                 }
             }
             WrapperFormat::Gzip => {
                 let expected_crc = u32::from_le_bytes([footer[0], footer[1], footer[2], footer[3]]);
                 if self.checksum != expected_crc {
-                    return Err(bad.into());
+                    return Err(DecompressionError::ChecksumMismatch.into());
                 }
                 let expected_size =
                     u32::from_le_bytes([footer[4], footer[5], footer[6], footer[7]]);
                 if (self.total_output as u32) != expected_size {
-                    return Err(bad.into());
+                    return Err(DecompressionError::ChecksumMismatch.into());
                 }
             }
             WrapperFormat::Raw => unreachable!(),
@@ -1582,8 +1582,9 @@ mod tests {
             let mut d = Decompressor::new();
             let mut wb_output = vec![0u8; data.len()];
             let wb_size = d
-                .deflate_decompress(&compressed[..csize], &mut wb_output)
-                .unwrap();
+                .deflate_decompress(&compressed[..csize], &mut wb_output, enough::Unstoppable)
+                .unwrap()
+                .output_written;
 
             let mut dec = StreamDecompressor::deflate(&compressed[..csize], 4096);
             let stream_output = stream_decompress_all(&mut dec).unwrap();

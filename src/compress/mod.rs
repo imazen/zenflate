@@ -1303,7 +1303,7 @@ impl Compressor {
     /// Falls back to single-threaded compression for small inputs or `num_threads <= 1`.
     ///
     /// ```
-    /// use zenflate::{Compressor, CompressionLevel, Decompressor};
+    /// use zenflate::{Compressor, CompressionLevel, Decompressor, Unstoppable};
     ///
     /// let data = vec![0u8; 100_000];
     /// let mut compressor = Compressor::new(CompressionLevel::balanced());
@@ -1313,8 +1313,8 @@ impl Compressor {
     ///
     /// let mut decompressor = Decompressor::new();
     /// let mut output = vec![0u8; data.len()];
-    /// let dsize = decompressor.gzip_decompress(&compressed[..csize], &mut output).unwrap();
-    /// assert_eq!(&output[..dsize], &data[..]);
+    /// let result = decompressor.gzip_decompress(&compressed[..csize], &mut output, Unstoppable).unwrap();
+    /// assert_eq!(&output[..result.output_written], &data[..]);
     /// ```
     #[cfg(feature = "std")]
     pub fn gzip_compress_parallel(
@@ -1625,8 +1625,9 @@ mod tests {
         let mut d = crate::Decompressor::new();
         let mut decompressed = vec![0u8; 0];
         let dsize = d
-            .deflate_decompress(&output[..size], &mut decompressed)
-            .unwrap();
+            .deflate_decompress(&output[..size], &mut decompressed, enough::Unstoppable)
+            .unwrap()
+            .output_written;
         assert_eq!(dsize, 0);
     }
 
@@ -1641,8 +1642,9 @@ mod tests {
         let mut d = crate::Decompressor::new();
         let mut decompressed = vec![0u8; data.len()];
         let dsize = d
-            .deflate_decompress(&compressed[..csize], &mut decompressed)
-            .unwrap();
+            .deflate_decompress(&compressed[..csize], &mut decompressed, enough::Unstoppable)
+            .unwrap()
+            .output_written;
         assert_eq!(&decompressed[..dsize], &data[..]);
     }
 
@@ -1657,8 +1659,9 @@ mod tests {
         let mut d = crate::Decompressor::new();
         let mut decompressed = vec![0u8; data.len()];
         let dsize = d
-            .deflate_decompress(&compressed[..csize], &mut decompressed)
-            .unwrap();
+            .deflate_decompress(&compressed[..csize], &mut decompressed, enough::Unstoppable)
+            .unwrap()
+            .output_written;
         assert_eq!(&decompressed[..dsize], &data[..]);
     }
 
@@ -1674,8 +1677,9 @@ mod tests {
         let mut d = crate::Decompressor::new();
         let mut decompressed = vec![0u8; data.len()];
         let dsize = d
-            .deflate_decompress(&compressed[..csize], &mut decompressed)
-            .unwrap();
+            .deflate_decompress(&compressed[..csize], &mut decompressed, enough::Unstoppable)
+            .unwrap()
+            .output_written;
         assert_eq!(&decompressed[..dsize], &data[..]);
     }
 
@@ -1708,8 +1712,9 @@ mod tests {
         let mut d = crate::Decompressor::new();
         let mut decompressed = vec![0u8; data.len()];
         let dsize = d
-            .zlib_decompress(&compressed[..csize], &mut decompressed)
-            .unwrap();
+            .zlib_decompress(&compressed[..csize], &mut decompressed, enough::Unstoppable)
+            .unwrap()
+            .output_written;
         assert_eq!(&decompressed[..dsize], &data[..]);
     }
 
@@ -1724,8 +1729,9 @@ mod tests {
         let mut d = crate::Decompressor::new();
         let mut decompressed = vec![0u8; data.len()];
         let dsize = d
-            .gzip_decompress(&compressed[..csize], &mut decompressed)
-            .unwrap();
+            .gzip_decompress(&compressed[..csize], &mut decompressed, enough::Unstoppable)
+            .unwrap()
+            .output_written;
         assert_eq!(&decompressed[..dsize], &data[..]);
     }
 
@@ -1760,8 +1766,9 @@ mod tests {
         let mut d = crate::Decompressor::new();
         let mut decompressed = vec![0u8; data.len()];
         let dsize = d
-            .deflate_decompress(&compressed[..csize], &mut decompressed)
-            .unwrap_or_else(|e| panic!("level {level}: zenflate decompress failed: {e}"));
+            .deflate_decompress(&compressed[..csize], &mut decompressed, enough::Unstoppable)
+            .unwrap_or_else(|e| panic!("level {level}: zenflate decompress failed: {e}"))
+            .output_written;
         assert_eq!(
             &decompressed[..dsize],
             data,
@@ -1846,8 +1853,13 @@ mod tests {
         let mut d = crate::Decompressor::new();
         let mut decompressed = vec![0u8; data.len()];
         let dsize = d
-            .deflate_decompress(&c_compressed[..c_csize], &mut decompressed)
-            .unwrap();
+            .deflate_decompress(
+                &c_compressed[..c_csize],
+                &mut decompressed,
+                enough::Unstoppable,
+            )
+            .unwrap()
+            .output_written;
         assert_eq!(&decompressed[..dsize], &data[..]);
     }
 
@@ -2067,10 +2079,15 @@ mod tests {
             let mut d = crate::Decompressor::new();
             let mut decompressed = vec![0u8; data.len()];
             let dsize = d
-                .deflate_decompress(&c_compressed[..c_csize], &mut decompressed)
+                .deflate_decompress(
+                    &c_compressed[..c_csize],
+                    &mut decompressed,
+                    enough::Unstoppable,
+                )
                 .unwrap_or_else(|e| {
                     panic!("level {level}: zenflate decompress of C output failed: {e}")
-                });
+                })
+                .output_written;
             assert_eq!(
                 &decompressed[..dsize],
                 &data[..],
@@ -2117,8 +2134,9 @@ mod tests {
             let mut d = crate::Decompressor::new();
             let mut decompressed = vec![0u8; data.len()];
             let dsize = d
-                .zlib_decompress(&compressed[..csize], &mut decompressed)
-                .unwrap_or_else(|e| panic!("level {level}: zlib decompress failed: {e}"));
+                .zlib_decompress(&compressed[..csize], &mut decompressed, enough::Unstoppable)
+                .unwrap_or_else(|e| panic!("level {level}: zlib decompress failed: {e}"))
+                .output_written;
             assert_eq!(
                 &decompressed[..dsize],
                 &data[..],
@@ -2143,8 +2161,9 @@ mod tests {
             let mut d = crate::Decompressor::new();
             let mut decompressed = vec![0u8; data.len()];
             let dsize = d
-                .gzip_decompress(&compressed[..csize], &mut decompressed)
-                .unwrap_or_else(|e| panic!("level {level}: gzip decompress failed: {e}"));
+                .gzip_decompress(&compressed[..csize], &mut decompressed, enough::Unstoppable)
+                .unwrap_or_else(|e| panic!("level {level}: gzip decompress failed: {e}"))
+                .output_written;
             assert_eq!(
                 &decompressed[..dsize],
                 &data[..],
@@ -2207,8 +2226,9 @@ mod tests {
         let mut decompressor = crate::decompress::Decompressor::new();
         let mut decompressed = vec![0u8; data.len()];
         let dsize = decompressor
-            .gzip_decompress(&compressed[..csize], &mut decompressed)
-            .unwrap();
+            .gzip_decompress(&compressed[..csize], &mut decompressed, enough::Unstoppable)
+            .unwrap()
+            .output_written;
         assert_eq!(dsize, data.len(), "decompressed size mismatch");
         assert_eq!(&decompressed[..dsize], data, "data mismatch");
     }
@@ -2436,8 +2456,9 @@ mod tests {
             let mut decompressor = crate::Decompressor::new();
             let mut decompressed = vec![0u8; data_owned.len()];
             let dsize = decompressor
-                .deflate_decompress(&compressed[..csize], &mut decompressed)
-                .map_err(|e| format!("decompression error: {e}"))?;
+                .deflate_decompress(&compressed[..csize], &mut decompressed, enough::Unstoppable)
+                .map_err(|e| format!("decompression error: {e}"))?
+                .output_written;
 
             if &decompressed[..dsize] != &data_owned[..] {
                 return Err("roundtrip data mismatch".to_string());

@@ -12,7 +12,7 @@
 //! # Quick start
 //!
 //! ```
-//! use zenflate::{Compressor, CompressionLevel, Decompressor};
+//! use zenflate::{Compressor, CompressionLevel, Decompressor, Unstoppable};
 //!
 //! let data = b"Hello, World! Hello, World! Hello, World!";
 //!
@@ -25,10 +25,10 @@
 //! // Decompress
 //! let mut decompressor = Decompressor::new();
 //! let mut output = vec![0u8; data.len()];
-//! let dsize = decompressor
-//!     .deflate_decompress(&compressed[..csize], &mut output)
+//! let result = decompressor
+//!     .deflate_decompress(&compressed[..csize], &mut output, Unstoppable)
 //!     .unwrap();
-//! assert_eq!(&output[..dsize], &data[..]);
+//! assert_eq!(&output[..result.output_written], &data[..]);
 //! ```
 
 #![cfg_attr(not(feature = "unchecked"), forbid(unsafe_code))]

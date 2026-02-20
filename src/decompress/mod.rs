@@ -191,7 +191,7 @@ pub struct DecompressOutcome {
 /// decode tables between calls for efficiency.
 ///
 /// ```
-/// use zenflate::{Compressor, CompressionLevel, Decompressor};
+/// use zenflate::{Compressor, CompressionLevel, Decompressor, Unstoppable};
 ///
 /// // Compress some data
 /// let data = b"The quick brown fox jumps over the lazy dog.";
@@ -203,8 +203,8 @@ pub struct DecompressOutcome {
 /// // Decompress it back
 /// let mut d = Decompressor::new();
 /// let mut output = vec![0u8; data.len()];
-/// let dsize = d.deflate_decompress(&compressed[..csize], &mut output).unwrap();
-/// assert_eq!(&output[..dsize], &data[..]);
+/// let result = d.deflate_decompress(&compressed[..csize], &mut output, Unstoppable).unwrap();
+/// assert_eq!(&output[..result.output_written], &data[..]);
 /// ```
 pub struct Decompressor {
     pub(crate) precode_lens: [u8; DEFLATE_NUM_PRECODE_SYMS],
@@ -238,159 +238,106 @@ impl Decompressor {
         }
     }
 
-    /// Decompress raw DEFLATE data. Returns the number of output bytes written.
+    /// Decompress raw DEFLATE data.
+    ///
+    /// DEFLATE is self-terminating, so the input slice may extend past the
+    /// compressed data. Use [`DecompressOutcome::input_consumed`] to find
+    /// where the stream ended.
+    ///
+    /// The `stop` parameter enables cooperative cancellation — checked at each
+    /// block boundary (typically every 32–65 KB of output). Pass
+    /// [`Unstoppable`](enough::Unstoppable) when cancellation is not needed;
+    /// the compiler eliminates all checks.
     pub fn deflate_decompress(
         &mut self,
         input: &[u8],
         output: &mut [u8],
-    ) -> Result<usize, DecompressionError> {
-        let (_in_consumed, out_written) =
-            self.deflate_decompress_core(input, output, &enough::Unstoppable)?;
-        Ok(out_written)
-    }
-
-    /// Decompress raw DEFLATE data with cooperative cancellation.
-    ///
-    /// Same as [`deflate_decompress`](Self::deflate_decompress), but checks
-    /// `stop` at each block boundary (typically every 32–65 KB of output).
-    /// With [`Unstoppable`](enough::Unstoppable), all checks compile away to nothing.
-    pub fn deflate_decompress_with_stop(
-        &mut self,
-        input: &[u8],
-        output: &mut [u8],
-        stop: &impl enough::Stop,
-    ) -> Result<usize, DecompressionError> {
-        let (_in_consumed, out_written) = self.deflate_decompress_core(input, output, stop)?;
-        Ok(out_written)
-    }
-
-    /// Decompress raw DEFLATE data, returning both input consumed and output written.
-    ///
-    /// DEFLATE is self-terminating, so the input slice may extend past the
-    /// compressed data. [`DecompressOutcome::input_consumed`] tells you where
-    /// the stream ended.
-    pub fn deflate_decompress_ex(
-        &mut self,
-        input: &[u8],
-        output: &mut [u8],
+        stop: impl enough::Stop,
     ) -> Result<DecompressOutcome, DecompressionError> {
         let (input_consumed, output_written) =
-            self.deflate_decompress_core(input, output, &enough::Unstoppable)?;
+            self.deflate_decompress_core(input, output, &stop)?;
         Ok(DecompressOutcome {
             input_consumed,
             output_written,
         })
     }
 
-    /// Decompress raw DEFLATE data with cooperative cancellation, returning
-    /// both input consumed and output written.
+    /// Decompress zlib-wrapped data.
     ///
-    /// Same as [`deflate_decompress_ex`](Self::deflate_decompress_ex), but
-    /// checks `stop` at each block boundary.
-    pub fn deflate_decompress_ex_with_stop(
-        &mut self,
-        input: &[u8],
-        output: &mut [u8],
-        stop: &impl enough::Stop,
-    ) -> Result<DecompressOutcome, DecompressionError> {
-        let (input_consumed, output_written) = self.deflate_decompress_core(input, output, stop)?;
-        Ok(DecompressOutcome {
-            input_consumed,
-            output_written,
-        })
-    }
-
-    /// Decompress zlib-wrapped data. Returns the number of output bytes written.
+    /// See [`deflate_decompress`](Self::deflate_decompress) for the `stop`
+    /// parameter.
     pub fn zlib_decompress(
         &mut self,
         input: &[u8],
         output: &mut [u8],
-    ) -> Result<usize, DecompressionError> {
-        self.zlib_decompress_with_stop(input, output, &enough::Unstoppable)
-    }
+        stop: impl enough::Stop,
+    ) -> Result<DecompressOutcome, DecompressionError> {
+        let hdr_err = DecompressionError::InvalidHeader;
 
-    /// Decompress zlib-wrapped data with cooperative cancellation.
-    ///
-    /// Same as [`zlib_decompress`](Self::zlib_decompress), but checks
-    /// `stop` at each block boundary.
-    pub fn zlib_decompress_with_stop(
-        &mut self,
-        input: &[u8],
-        output: &mut [u8],
-        stop: &impl enough::Stop,
-    ) -> Result<usize, DecompressionError> {
         if input.len() < ZLIB_MIN_OVERHEAD {
-            return Err(DecompressionError::BadData);
+            return Err(hdr_err);
         }
         // 2-byte header (big-endian)
         let hdr = u16::from_be_bytes([input[0], input[1]]);
-        // FCHECK
         if !hdr.is_multiple_of(31) {
-            return Err(DecompressionError::BadData);
+            return Err(hdr_err);
         }
-        // CM (low 4 bits of CMF = first byte)
         if (input[0] & 0xF) != ZLIB_CM_DEFLATE {
-            return Err(DecompressionError::BadData);
+            return Err(hdr_err);
         }
-        // CINFO (high 4 bits of CMF)
         if (input[0] >> 4) > ZLIB_CINFO_32K_WINDOW {
-            return Err(DecompressionError::BadData);
+            return Err(hdr_err);
         }
-        // FDICT (bit 5 of FLG = second byte)
+        // FDICT not supported
         if (input[1] >> 5) & 1 != 0 {
-            return Err(DecompressionError::BadData);
+            return Err(hdr_err);
         }
 
         let deflate_data = &input[2..input.len() - ZLIB_FOOTER_SIZE];
-        let (in_consumed, out_written) =
-            self.deflate_decompress_core(deflate_data, output, stop)?;
+        let (deflate_consumed, output_written) =
+            self.deflate_decompress_core(deflate_data, output, &stop)?;
 
         // Verify Adler-32 (big-endian, after DEFLATE data)
-        let footer_start = 2 + in_consumed;
+        let footer_start = 2 + deflate_consumed;
         let expected = u32::from_be_bytes([
             input[footer_start],
             input[footer_start + 1],
             input[footer_start + 2],
             input[footer_start + 3],
         ]);
-        let actual = checksum::adler32(1, &output[..out_written]);
+        let actual = checksum::adler32(1, &output[..output_written]);
         if actual != expected {
-            return Err(DecompressionError::BadData);
+            return Err(DecompressionError::ChecksumMismatch);
         }
-        Ok(out_written)
+
+        Ok(DecompressOutcome {
+            input_consumed: footer_start + ZLIB_FOOTER_SIZE,
+            output_written,
+        })
     }
 
-    /// Decompress gzip-wrapped data. Returns the number of output bytes written.
+    /// Decompress gzip-wrapped data.
+    ///
+    /// See [`deflate_decompress`](Self::deflate_decompress) for the `stop`
+    /// parameter.
     pub fn gzip_decompress(
         &mut self,
         input: &[u8],
         output: &mut [u8],
-    ) -> Result<usize, DecompressionError> {
-        self.gzip_decompress_with_stop(input, output, &enough::Unstoppable)
-    }
+        stop: impl enough::Stop,
+    ) -> Result<DecompressOutcome, DecompressionError> {
+        let hdr_err = DecompressionError::InvalidHeader;
 
-    /// Decompress gzip-wrapped data with cooperative cancellation.
-    ///
-    /// Same as [`gzip_decompress`](Self::gzip_decompress), but checks
-    /// `stop` at each block boundary.
-    pub fn gzip_decompress_with_stop(
-        &mut self,
-        input: &[u8],
-        output: &mut [u8],
-        stop: &impl enough::Stop,
-    ) -> Result<usize, DecompressionError> {
         if input.len() < GZIP_MIN_OVERHEAD {
-            return Err(DecompressionError::BadData);
+            return Err(hdr_err);
         }
         let mut pos = 0;
-        // ID1, ID2
         if input[pos] != GZIP_ID1 || input[pos + 1] != GZIP_ID2 {
-            return Err(DecompressionError::BadData);
+            return Err(hdr_err);
         }
         pos += 2;
-        // CM
         if input[pos] != GZIP_CM_DEFLATE {
-            return Err(DecompressionError::BadData);
+            return Err(hdr_err);
         }
         pos += 1;
         let flg = input[pos];
@@ -399,18 +346,18 @@ impl Decompressor {
         pos += 6;
 
         if flg & GZIP_FRESERVED != 0 {
-            return Err(DecompressionError::BadData);
+            return Err(hdr_err);
         }
 
         // Extra field
         if flg & GZIP_FEXTRA != 0 {
             if pos + 2 > input.len() {
-                return Err(DecompressionError::BadData);
+                return Err(hdr_err);
             }
             let xlen = u16::from_le_bytes([input[pos], input[pos + 1]]) as usize;
             pos += 2;
             if input.len() - pos < xlen + GZIP_FOOTER_SIZE {
-                return Err(DecompressionError::BadData);
+                return Err(hdr_err);
             }
             pos += xlen;
         }
@@ -420,9 +367,9 @@ impl Decompressor {
             while pos < input.len() && input[pos] != 0 {
                 pos += 1;
             }
-            pos += 1; // skip the zero terminator
+            pos += 1;
             if input.len() - pos < GZIP_FOOTER_SIZE {
-                return Err(DecompressionError::BadData);
+                return Err(hdr_err);
             }
         }
 
@@ -433,7 +380,7 @@ impl Decompressor {
             }
             pos += 1;
             if input.len() - pos < GZIP_FOOTER_SIZE {
-                return Err(DecompressionError::BadData);
+                return Err(hdr_err);
             }
         }
 
@@ -441,19 +388,19 @@ impl Decompressor {
         if flg & GZIP_FHCRC != 0 {
             pos += 2;
             if input.len() - pos < GZIP_FOOTER_SIZE {
-                return Err(DecompressionError::BadData);
+                return Err(hdr_err);
             }
         }
 
         // Compressed DEFLATE data
         let deflate_end = input.len() - GZIP_FOOTER_SIZE;
         if pos > deflate_end {
-            return Err(DecompressionError::BadData);
+            return Err(hdr_err);
         }
-        let (in_consumed, out_written) =
-            self.deflate_decompress_core(&input[pos..deflate_end], output, stop)?;
+        let (deflate_consumed, output_written) =
+            self.deflate_decompress_core(&input[pos..deflate_end], output, &stop)?;
 
-        let footer_start = pos + in_consumed;
+        let footer_start = pos + deflate_consumed;
 
         // CRC32 (little-endian)
         let expected_crc = u32::from_le_bytes([
@@ -462,8 +409,8 @@ impl Decompressor {
             input[footer_start + 2],
             input[footer_start + 3],
         ]);
-        if checksum::crc32(0, &output[..out_written]) != expected_crc {
-            return Err(DecompressionError::BadData);
+        if checksum::crc32(0, &output[..output_written]) != expected_crc {
+            return Err(DecompressionError::ChecksumMismatch);
         }
 
         // ISIZE (little-endian, mod 2^32)
@@ -473,11 +420,14 @@ impl Decompressor {
             input[footer_start + 6],
             input[footer_start + 7],
         ]);
-        if (out_written as u32) != expected_size {
-            return Err(DecompressionError::BadData);
+        if (output_written as u32) != expected_size {
+            return Err(DecompressionError::ChecksumMismatch);
         }
 
-        Ok(out_written)
+        Ok(DecompressOutcome {
+            input_consumed: footer_start + GZIP_FOOTER_SIZE,
+            output_written,
+        })
     }
 }
 
@@ -1338,8 +1288,9 @@ mod tests {
         let mut d = Decompressor::new();
         let mut output = vec![0u8; 0];
         let out_size = d
-            .deflate_decompress(&compressed[..csize], &mut output)
-            .unwrap();
+            .deflate_decompress(&compressed[..csize], &mut output, enough::Unstoppable)
+            .unwrap()
+            .output_written;
         assert_eq!(out_size, 0);
     }
 
@@ -1354,8 +1305,9 @@ mod tests {
         let mut d = Decompressor::new();
         let mut output = vec![0u8; data.len()];
         let out_size = d
-            .deflate_decompress(&compressed[..csize], &mut output)
-            .unwrap();
+            .deflate_decompress(&compressed[..csize], &mut output, enough::Unstoppable)
+            .unwrap()
+            .output_written;
         assert_eq!(out_size, data.len());
         assert_eq!(&output, data);
     }
@@ -1373,8 +1325,9 @@ mod tests {
             let mut d = Decompressor::new();
             let mut output = vec![0u8; data.len()];
             let out_size = d
-                .deflate_decompress(&compressed[..csize], &mut output)
-                .unwrap();
+                .deflate_decompress(&compressed[..csize], &mut output, enough::Unstoppable)
+                .unwrap()
+                .output_written;
             assert_eq!(out_size, data.len(), "level {level}");
             assert_eq!(output, data, "level {level}");
         }
@@ -1391,8 +1344,9 @@ mod tests {
         let mut d = Decompressor::new();
         let mut output = vec![0u8; data.len()];
         let out_size = d
-            .deflate_decompress(&compressed[..csize], &mut output)
-            .unwrap();
+            .deflate_decompress(&compressed[..csize], &mut output, enough::Unstoppable)
+            .unwrap()
+            .output_written;
         assert_eq!(out_size, data.len());
         assert_eq!(output, data);
     }
@@ -1409,8 +1363,9 @@ mod tests {
         let mut d = Decompressor::new();
         let mut output = vec![0u8; data.len()];
         let out_size = d
-            .deflate_decompress(&compressed[..csize], &mut output)
-            .unwrap();
+            .deflate_decompress(&compressed[..csize], &mut output, enough::Unstoppable)
+            .unwrap()
+            .output_written;
         assert_eq!(out_size, data.len());
         assert_eq!(&output[..], data);
     }
@@ -1426,8 +1381,9 @@ mod tests {
         let mut d = Decompressor::new();
         let mut output = vec![0u8; data.len()];
         let out_size = d
-            .zlib_decompress(&compressed[..csize], &mut output)
-            .unwrap();
+            .zlib_decompress(&compressed[..csize], &mut output, enough::Unstoppable)
+            .unwrap()
+            .output_written;
         assert_eq!(out_size, data.len());
         assert_eq!(output, data);
     }
@@ -1443,8 +1399,9 @@ mod tests {
         let mut d = Decompressor::new();
         let mut output = vec![0u8; data.len()];
         let out_size = d
-            .gzip_decompress(&compressed[..csize], &mut output)
-            .unwrap();
+            .gzip_decompress(&compressed[..csize], &mut output, enough::Unstoppable)
+            .unwrap()
+            .output_written;
         assert_eq!(out_size, data.len());
         assert_eq!(output, data);
     }
@@ -1460,8 +1417,9 @@ mod tests {
         let mut d = Decompressor::new();
         let mut output = vec![0u8; data.len()];
         let out_size = d
-            .deflate_decompress(&compressed[..csize], &mut output)
-            .unwrap();
+            .deflate_decompress(&compressed[..csize], &mut output, enough::Unstoppable)
+            .unwrap()
+            .output_written;
         assert_eq!(out_size, data.len());
         assert_eq!(output, data);
     }
@@ -1478,8 +1436,9 @@ mod tests {
             let mut d = Decompressor::new();
             let mut output = vec![0u8; 1];
             let out_size = d
-                .deflate_decompress(&compressed[..csize], &mut output)
-                .unwrap();
+                .deflate_decompress(&compressed[..csize], &mut output, enough::Unstoppable)
+                .unwrap()
+                .output_written;
             assert_eq!(out_size, 1);
             assert_eq!(output[0], b);
         }
@@ -1499,8 +1458,9 @@ mod tests {
             let mut d = Decompressor::new();
             let mut output = vec![0u8; data.len()];
             let out_size = d
-                .deflate_decompress(&compressed[..csize], &mut output)
-                .unwrap();
+                .deflate_decompress(&compressed[..csize], &mut output, enough::Unstoppable)
+                .unwrap()
+                .output_written;
             assert_eq!(out_size, data.len(), "deflate level {level}");
             assert_eq!(output, data, "deflate level {level}");
 
@@ -1511,8 +1471,9 @@ mod tests {
             let mut d = Decompressor::new();
             let mut output = vec![0u8; data.len()];
             let out_size = d
-                .zlib_decompress(&compressed[..csize], &mut output)
-                .unwrap();
+                .zlib_decompress(&compressed[..csize], &mut output, enough::Unstoppable)
+                .unwrap()
+                .output_written;
             assert_eq!(out_size, data.len(), "zlib level {level}");
             assert_eq!(output, data, "zlib level {level}");
 
@@ -1523,8 +1484,9 @@ mod tests {
             let mut d = Decompressor::new();
             let mut output = vec![0u8; data.len()];
             let out_size = d
-                .gzip_decompress(&compressed[..csize], &mut output)
-                .unwrap();
+                .gzip_decompress(&compressed[..csize], &mut output, enough::Unstoppable)
+                .unwrap()
+                .output_written;
             assert_eq!(out_size, data.len(), "gzip level {level}");
             assert_eq!(output, data, "gzip level {level}");
         }

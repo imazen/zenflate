@@ -12,8 +12,12 @@ pub enum CompressionError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum DecompressionError {
-    /// The compressed data is invalid or corrupt.
+    /// The compressed data is corrupt or structurally invalid.
     BadData,
+    /// A zlib or gzip wrapper header is malformed.
+    InvalidHeader,
+    /// A checksum (CRC-32 or Adler-32) in the wrapper did not match the data.
+    ChecksumMismatch,
     /// The output buffer is too small for the decompressed data.
     InsufficientSpace,
     /// The operation was stopped by a cooperative cancellation signal.
@@ -32,6 +36,8 @@ impl core::fmt::Display for DecompressionError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::BadData => write!(f, "invalid or corrupt compressed data"),
+            Self::InvalidHeader => write!(f, "invalid zlib or gzip header"),
+            Self::ChecksumMismatch => write!(f, "checksum mismatch"),
             Self::InsufficientSpace => write!(f, "output buffer too small for decompressed data"),
             Self::Stopped(reason) => write!(f, "{reason}"),
         }
