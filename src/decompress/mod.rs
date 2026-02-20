@@ -30,7 +30,8 @@ pub(crate) const CONSUMABLE_NBITS: u32 = 56; // MAX_BITSLEFT(63) - 7
 // Fastloop safety margins — how many bytes the fastloop can read/write per iteration.
 // Max bytes that can be written past the nominal match end in one fastloop iteration.
 // Word copies (8 bytes) can overrun by at most 7 bytes; RLE uses fill() (exact length).
-pub(crate) const FASTLOOP_MAX_BYTES_WRITTEN: usize = 2 + crate::constants::DEFLATE_MAX_MATCH_LEN as usize + 7;
+pub(crate) const FASTLOOP_MAX_BYTES_WRITTEN: usize =
+    2 + crate::constants::DEFLATE_MAX_MATCH_LEN as usize + 7;
 // Input: worst-case bytes consumed per iteration + 8-byte read-ahead for branchless refill
 pub(crate) const FASTLOOP_MAX_BYTES_READ: usize = 32;
 
@@ -161,9 +162,12 @@ const fn gen_offset_decode_results() -> [u32; DEFLATE_NUM_OFFSET_SYMS] {
     r
 }
 
-pub(crate) static PRECODE_DECODE_RESULTS: [u32; DEFLATE_NUM_PRECODE_SYMS] = gen_precode_decode_results();
-pub(crate) static LITLEN_DECODE_RESULTS: [u32; DEFLATE_NUM_LITLEN_SYMS] = gen_litlen_decode_results();
-pub(crate) static OFFSET_DECODE_RESULTS: [u32; DEFLATE_NUM_OFFSET_SYMS] = gen_offset_decode_results();
+pub(crate) static PRECODE_DECODE_RESULTS: [u32; DEFLATE_NUM_PRECODE_SYMS] =
+    gen_precode_decode_results();
+pub(crate) static LITLEN_DECODE_RESULTS: [u32; DEFLATE_NUM_LITLEN_SYMS] =
+    gen_litlen_decode_results();
+pub(crate) static OFFSET_DECODE_RESULTS: [u32; DEFLATE_NUM_OFFSET_SYMS] =
+    gen_offset_decode_results();
 
 // ---------------------------------------------------------------------------
 // Decompressor struct
@@ -446,7 +450,12 @@ pub(crate) fn refill_bits(
 /// Same as the hot path of `refill_bits`, but without the end-of-input check
 /// or overread tracking. Only safe to call when `in_pos + 8 <= input.len()`.
 #[inline(always)]
-pub(crate) fn refill_bits_fast(bitbuf: &mut u64, bitsleft: &mut u32, input: &[u8], in_pos: &mut usize) {
+pub(crate) fn refill_bits_fast(
+    bitbuf: &mut u64,
+    bitsleft: &mut u32,
+    input: &[u8],
+    in_pos: &mut usize,
+) {
     let word = crate::fast_bytes::load_u64_le(input, *in_pos);
     *bitbuf |= word << *bitsleft;
     *in_pos += 7 - ((*bitsleft as usize >> 3) & 7);
@@ -485,7 +494,13 @@ fn load_byte(output: &[u8], pos: usize) -> u8 {
 /// paths actually regress 5-6% on mixed/photo data because LLVM loses
 /// bounds information that enables better optimization.
 #[inline(always)]
-pub(crate) fn fastloop_match_copy(output: &mut [u8], out_pos: usize, src_start: usize, length: usize, offset: usize) {
+pub(crate) fn fastloop_match_copy(
+    output: &mut [u8],
+    out_pos: usize,
+    src_start: usize,
+    length: usize,
+    offset: usize,
+) {
     // Unified path for safe and unchecked modes. The `copy_word` function
     // already uses raw pointers when `unchecked` is enabled.
     // Keeping a single code path avoids instruction cache bloat from duplicated
@@ -997,7 +1012,8 @@ impl Decompressor {
                         if entry & HUFFDEC_LITERAL != 0 {
                             // 2nd literal (extra)
                             let lit = (entry >> 16) as u8;
-                            entry = table_lookup(&self.litlen_decode_table, bitbuf & litlen_tablemask);
+                            entry =
+                                table_lookup(&self.litlen_decode_table, bitbuf & litlen_tablemask);
                             saved_bitbuf = bitbuf;
                             bitbuf >>= (entry & 0xFF) as u64;
                             bitsleft -= entry & 0xFF;
@@ -1008,8 +1024,10 @@ impl Decompressor {
                                 // 3rd literal (replaces primary for next iter)
                                 store_lit(output, out_pos, (entry >> 16) as u8);
                                 out_pos += 1;
-                                entry =
-                                    table_lookup(&self.litlen_decode_table, bitbuf & litlen_tablemask);
+                                entry = table_lookup(
+                                    &self.litlen_decode_table,
+                                    bitbuf & litlen_tablemask,
+                                );
                                 refill_bits_fast(&mut bitbuf, &mut bitsleft, input, &mut in_pos);
                                 if in_pos < in_fastloop_end && out_pos < out_fastloop_end {
                                     continue 'fastloop;
@@ -1027,9 +1045,10 @@ impl Decompressor {
                             break 'fastloop;
                         }
                         // Subtable lookup
-                        entry = table_lookup(&self.litlen_decode_table,
-                            (entry >> 16) as u64
-                            + extract_varbits(bitbuf, (entry >> 8) & 0x3F));
+                        entry = table_lookup(
+                            &self.litlen_decode_table,
+                            (entry >> 16) as u64 + extract_varbits(bitbuf, (entry >> 8) & 0x3F),
+                        );
                         saved_bitbuf = bitbuf;
                         bitbuf >>= (entry & 0xFF) as u64;
                         bitsleft -= entry & 0xFF;
@@ -1038,7 +1057,8 @@ impl Decompressor {
                             // Literal from subtable
                             store_lit(output, out_pos, (entry >> 16) as u8);
                             out_pos += 1;
-                            entry = table_lookup(&self.litlen_decode_table, bitbuf & litlen_tablemask);
+                            entry =
+                                table_lookup(&self.litlen_decode_table, bitbuf & litlen_tablemask);
                             refill_bits_fast(&mut bitbuf, &mut bitsleft, input, &mut in_pos);
                             if in_pos < in_fastloop_end && out_pos < out_fastloop_end {
                                 continue 'fastloop;
@@ -1058,14 +1078,17 @@ impl Decompressor {
                             as usize;
 
                     // --- Decode match offset ---
-                    let mut oentry =
-                        table_lookup(&self.offset_decode_table, bitbuf & bitmask(OFFSET_TABLEBITS));
+                    let mut oentry = table_lookup(
+                        &self.offset_decode_table,
+                        bitbuf & bitmask(OFFSET_TABLEBITS),
+                    );
                     if oentry & HUFFDEC_EXCEPTIONAL != 0 {
                         bitbuf >>= OFFSET_TABLEBITS as u64;
                         bitsleft -= OFFSET_TABLEBITS;
-                        oentry = table_lookup(&self.offset_decode_table,
-                            (oentry >> 16) as u64
-                            + extract_varbits(bitbuf, (oentry >> 8) & 0x3F));
+                        oentry = table_lookup(
+                            &self.offset_decode_table,
+                            (oentry >> 16) as u64 + extract_varbits(bitbuf, (oentry >> 8) & 0x3F),
+                        );
                     }
                     let saved_bitbuf_off = bitbuf;
                     bitbuf >>= (oentry & 0xFF) as u64;
@@ -1105,16 +1128,18 @@ impl Decompressor {
                         &mut overread_count,
                     )?;
 
-                    let mut entry = table_lookup(&self.litlen_decode_table, bitbuf & litlen_tablemask);
+                    let mut entry =
+                        table_lookup(&self.litlen_decode_table, bitbuf & litlen_tablemask);
                     let mut saved_bitbuf = bitbuf;
                     bitbuf >>= (entry & 0xFF) as u64;
                     bitsleft -= entry & 0xFF;
 
                     // Resolve subtable if needed
                     if entry & HUFFDEC_SUBTABLE_POINTER != 0 {
-                        entry = table_lookup(&self.litlen_decode_table,
-                            (entry >> 16) as u64
-                            + extract_varbits(bitbuf, (entry >> 8) & 0x3F));
+                        entry = table_lookup(
+                            &self.litlen_decode_table,
+                            (entry >> 16) as u64 + extract_varbits(bitbuf, (entry >> 8) & 0x3F),
+                        );
                         saved_bitbuf = bitbuf;
                         bitbuf >>= (entry & 0xFF) as u64;
                         bitsleft -= entry & 0xFF;
@@ -1149,14 +1174,17 @@ impl Decompressor {
                     // On 64-bit: CAN_CONSUME(48) is true, no refill needed here
 
                     // Decode offset
-                    let mut oentry =
-                        table_lookup(&self.offset_decode_table, bitbuf & bitmask(OFFSET_TABLEBITS));
+                    let mut oentry = table_lookup(
+                        &self.offset_decode_table,
+                        bitbuf & bitmask(OFFSET_TABLEBITS),
+                    );
                     if oentry & HUFFDEC_EXCEPTIONAL != 0 {
                         bitbuf >>= OFFSET_TABLEBITS as u64;
                         bitsleft -= OFFSET_TABLEBITS;
-                        oentry = table_lookup(&self.offset_decode_table,
-                            (oentry >> 16) as u64
-                            + extract_varbits(bitbuf, (oentry >> 8) & 0x3F));
+                        oentry = table_lookup(
+                            &self.offset_decode_table,
+                            (oentry >> 16) as u64 + extract_varbits(bitbuf, (oentry >> 8) & 0x3F),
+                        );
                     }
                     let saved_bitbuf_off = bitbuf;
                     bitbuf >>= (oentry & 0xFF) as u64;

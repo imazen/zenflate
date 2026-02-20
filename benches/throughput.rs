@@ -151,24 +151,32 @@ fn bench_compress(c: &mut Criterion) {
             // flate2 (miniz_oxide backend, reuses compressor with reset)
             {
                 let fl = flate2_level(level);
-                group.bench_with_input(BenchmarkId::new("flate2", format!("L{level}")), &level, |b, _| {
-                    let mut comp = flate2::Compress::new(fl, false);
-                    let mut out = vec![0u8; data.len() * 2];
-                    b.iter(|| {
-                        comp.reset();
-                        comp.compress(data, &mut out, flate2::FlushCompress::Finish)
-                            .unwrap();
-                        comp.total_out() as usize
-                    });
-                });
+                group.bench_with_input(
+                    BenchmarkId::new("flate2", format!("L{level}")),
+                    &level,
+                    |b, _| {
+                        let mut comp = flate2::Compress::new(fl, false);
+                        let mut out = vec![0u8; data.len() * 2];
+                        b.iter(|| {
+                            comp.reset();
+                            comp.compress(data, &mut out, flate2::FlushCompress::Finish)
+                                .unwrap();
+                            comp.total_out() as usize
+                        });
+                    },
+                );
             }
 
             // miniz_oxide (direct, allocates per call)
             {
                 let ml = miniz_level(level);
-                group.bench_with_input(BenchmarkId::new("miniz_oxide", format!("L{level}")), &level, |b, _| {
-                    b.iter(|| miniz_oxide::deflate::compress_to_vec(data, ml));
-                });
+                group.bench_with_input(
+                    BenchmarkId::new("miniz_oxide", format!("L{level}")),
+                    &level,
+                    |b, _| {
+                        b.iter(|| miniz_oxide::deflate::compress_to_vec(data, ml));
+                    },
+                );
             }
         }
 
@@ -269,7 +277,11 @@ fn bench_decompress(c: &mut Criterion) {
             b.iter(|| {
                 decomp.reset(false);
                 decomp
-                    .decompress(compressed_deflate, &mut out, flate2::FlushDecompress::Finish)
+                    .decompress(
+                        compressed_deflate,
+                        &mut out,
+                        flate2::FlushDecompress::Finish,
+                    )
                     .unwrap();
                 decomp.total_out() as usize
             });
@@ -352,10 +364,107 @@ fn bench_parallel_compress(c: &mut Criterion) {
                 let mut out = vec![0u8; bound];
                 b.iter(|| {
                     let mut compressor = zenflate::Compressor::new(level);
-                    compressor.gzip_compress_parallel(&data, &mut out, threads).unwrap();
+                    compressor
+                        .gzip_compress_parallel(&data, &mut out, threads)
+                        .unwrap();
                 });
             });
         }
+
+        group.finish();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Streaming decompression benchmarks
+// ---------------------------------------------------------------------------
+
+fn bench_stream_decompress(c: &mut Criterion) {
+    let size = 1_000_000;
+    let inputs: Vec<(&str, Vec<u8>)> = vec![
+        ("sequential", make_sequential(size)),
+        ("zeros", make_zeros(size)),
+        ("mixed", make_mixed(size)),
+        ("photo", make_photo_bitmap(577, 577)),
+    ];
+
+    let level = 6u32;
+
+    for (name, data) in &inputs {
+        let mut group = c.benchmark_group(format!("stream_decompress/{name}"));
+        group.throughput(Throughput::Bytes(data.len() as u64));
+
+        // Pre-compress as raw deflate
+        let mut compressor = zenflate::Compressor::new(zenflate::CompressionLevel::new(level));
+        let bound = zenflate::Compressor::deflate_compress_bound(data.len());
+        let mut compressed_deflate = vec![0u8; bound];
+        let deflate_len = compressor
+            .deflate_compress(data, &mut compressed_deflate)
+            .unwrap();
+        let compressed_deflate = &compressed_deflate[..deflate_len];
+
+        // Pre-compress as zlib (for fdeflate)
+        let zlib_bound = zenflate::Compressor::zlib_compress_bound(data.len());
+        let mut compressed_zlib = vec![0u8; zlib_bound];
+        let zlib_len = compressor
+            .zlib_compress(data, &mut compressed_zlib)
+            .unwrap();
+        let compressed_zlib = &compressed_zlib[..zlib_len];
+
+        // zenflate whole-buffer (baseline)
+        group.bench_function("zenflate_whole", |b| {
+            let mut decompressor = zenflate::Decompressor::new();
+            let mut out = vec![0u8; data.len()];
+            b.iter(|| {
+                decompressor
+                    .deflate_decompress(compressed_deflate, &mut out)
+                    .unwrap();
+            });
+        });
+
+        // zenflate streaming (large capacity — measure overhead vs whole-buffer)
+        group.bench_function("zenflate_stream", |b| {
+            b.iter(|| {
+                let mut dec =
+                    zenflate::StreamDecompressor::deflate(&compressed_deflate[..], 64 * 1024);
+                let mut total = 0;
+                while !dec.is_done() {
+                    dec.fill().unwrap();
+                    let n = dec.peek().len();
+                    total += n;
+                    dec.advance(n);
+                }
+                total
+            });
+        });
+
+        // zenflate streaming (small capacity — exercise compaction)
+        group.bench_function("zenflate_stream_4k", |b| {
+            b.iter(|| {
+                let mut dec = zenflate::StreamDecompressor::deflate(&compressed_deflate[..], 4096);
+                let mut total = 0;
+                while !dec.is_done() {
+                    dec.fill().unwrap();
+                    let n = dec.peek().len();
+                    total += n;
+                    dec.advance(n);
+                }
+                total
+            });
+        });
+
+        // fdeflate (streaming, zlib format)
+        group.bench_function("fdeflate", |b| {
+            let mut decompressor = fdeflate::Decompressor::new();
+            let mut out = vec![0u8; data.len()];
+            b.iter(|| {
+                decompressor = fdeflate::Decompressor::new();
+                let (_, produced) = decompressor
+                    .read(compressed_zlib, &mut out, 0, true)
+                    .unwrap();
+                produced
+            });
+        });
 
         group.finish();
     }
@@ -369,6 +478,7 @@ criterion_group!(
     benches,
     bench_compress,
     bench_decompress,
+    bench_stream_decompress,
     bench_checksums,
     bench_parallel_compress
 );

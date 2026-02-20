@@ -53,10 +53,10 @@ pub use checksum::{adler32, crc32};
 #[cfg(feature = "alloc")]
 pub use compress::{CompressionLevel, Compressor};
 pub use decompress::Decompressor;
-#[cfg(feature = "alloc")]
-pub use decompress::streaming::{InputSource, StreamDecompressor};
 #[cfg(all(feature = "alloc", feature = "std"))]
 pub use decompress::streaming::BufReadSource;
-pub use error::{CompressionError, DecompressionError};
+#[cfg(feature = "alloc")]
+pub use decompress::streaming::{InputSource, StreamDecompressor};
 #[cfg(feature = "alloc")]
 pub use error::StreamError;
+pub use error::{CompressionError, DecompressionError};

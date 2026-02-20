@@ -1372,8 +1372,7 @@ impl Compressor {
                             let chunk_crc = crc32(0, &input[data_start..data_end]);
 
                             // Compress chunk.
-                            let bound =
-                                Compressor::deflate_compress_bound(chunk_input.len()) + 5;
+                            let bound = Compressor::deflate_compress_bound(chunk_input.len()) + 5;
                             let mut buf = vec![0u8; bound];
                             let size = c.deflate_compress_chunk(
                                 chunk_input,
@@ -1525,7 +1524,6 @@ fn deflate_compress_none_chunk(
 
     Ok(out_pos)
 }
-
 
 /// Bit scan reverse: floor(log2(v)). v must be > 0.
 #[inline(always)]
@@ -2520,8 +2518,7 @@ mod tests {
 
         // All levels must roundtrip successfully
         for level in 1..=12 {
-            try_roundtrip(&filtered, level)
-                .unwrap_or_else(|msg| panic!("L{level} failed: {msg}"));
+            try_roundtrip(&filtered, level).unwrap_or_else(|msg| panic!("L{level} failed: {msg}"));
         }
     }
 }

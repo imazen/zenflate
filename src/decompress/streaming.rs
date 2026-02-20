@@ -10,15 +10,15 @@ use alloc::vec::Vec;
 use crate::error::{DecompressionError, StreamError};
 
 use super::{
-    bitmask, build_decode_table, extract_varbits, extract_varbits8, refill_bits, refill_bits_fast,
-    table_lookup, Decompressor, DEFLATE_BLOCKTYPE_DYNAMIC_HUFFMAN,
-    DEFLATE_BLOCKTYPE_STATIC_HUFFMAN, DEFLATE_BLOCKTYPE_UNCOMPRESSED, DEFLATE_MAX_PRE_CODEWORD_LEN,
-    DEFLATE_NUM_PRECODE_SYMS, DEFLATE_PRECODE_LENS_PERMUTATION, FASTLOOP_MAX_BYTES_READ,
+    DEFLATE_BLOCKTYPE_DYNAMIC_HUFFMAN, DEFLATE_BLOCKTYPE_STATIC_HUFFMAN,
+    DEFLATE_BLOCKTYPE_UNCOMPRESSED, DEFLATE_MAX_PRE_CODEWORD_LEN, DEFLATE_NUM_PRECODE_SYMS,
+    DEFLATE_PRECODE_LENS_PERMUTATION, Decompressor, FASTLOOP_MAX_BYTES_READ,
     FASTLOOP_MAX_BYTES_WRITTEN, GZIP_CM_DEFLATE, GZIP_FCOMMENT, GZIP_FEXTRA, GZIP_FHCRC,
     GZIP_FNAME, GZIP_FRESERVED, GZIP_ID1, GZIP_ID2, HUFFDEC_END_OF_BLOCK, HUFFDEC_EXCEPTIONAL,
     HUFFDEC_LITERAL, HUFFDEC_SUBTABLE_POINTER, LITLEN_DECODE_RESULTS, LITLEN_TABLEBITS,
     OFFSET_DECODE_RESULTS, OFFSET_TABLEBITS, PRECODE_DECODE_RESULTS, PRECODE_TABLEBITS,
-    ZLIB_CINFO_32K_WINDOW, ZLIB_CM_DEFLATE,
+    ZLIB_CINFO_32K_WINDOW, ZLIB_CM_DEFLATE, bitmask, build_decode_table, extract_varbits,
+    extract_varbits8, refill_bits, refill_bits_fast, table_lookup,
 };
 
 // ---------------------------------------------------------------------------
@@ -177,6 +177,7 @@ pub struct StreamDecompressor<S> {
     state: StreamState,
     is_final_block: bool,
     pending_match: Option<PendingMatch>,
+    pending_literal: Option<u8>,
 
     // Wrapper format
     wrapper: WrapperFormat,
@@ -216,6 +217,7 @@ impl<S: InputSource> StreamDecompressor<S> {
             state: initial_state,
             is_final_block: false,
             pending_match: None,
+            pending_literal: None,
             wrapper,
             checksum: checksum_init,
             total_output: 0,
@@ -288,6 +290,7 @@ impl<S: InputSource> StreamDecompressor<S> {
         };
         self.is_final_block = false;
         self.pending_match = None;
+        self.pending_literal = None;
         self.checksum = checksum_init;
         self.total_output = 0;
         self.checksum_watermark = LOOKBACK_SIZE;
@@ -612,8 +615,7 @@ impl<S: InputSource> StreamDecompressor<S> {
             if self.input_pos + 4 > inp.len() {
                 return Err(bad.into());
             }
-            let len =
-                u16::from_le_bytes([inp[self.input_pos], inp[self.input_pos + 1]]) as usize;
+            let len = u16::from_le_bytes([inp[self.input_pos], inp[self.input_pos + 1]]) as usize;
             let nlen = u16::from_le_bytes([inp[self.input_pos + 2], inp[self.input_pos + 3]]);
             self.input_pos += 4;
 
@@ -871,16 +873,26 @@ impl<S: InputSource> StreamDecompressor<S> {
             }
         }
 
+        // Handle pending literal from previous fill() (buffer was full)
+        if let Some(lit) = self.pending_literal.take() {
+            if self.write_pos >= self.buffer.len() {
+                self.pending_literal = Some(lit);
+                return Ok(());
+            }
+            self.buffer[self.write_pos] = lit;
+            self.write_pos += 1;
+            if self.peek_len() >= self.capacity {
+                return Ok(());
+            }
+        }
+
         // Refill staging buffer from source
         self.fill_input().map_err(StreamError::Source)?;
 
         let litlen_tablemask = bitmask(self.inner.litlen_tablebits);
         let input = &self.input_buf[..self.input_len];
         let in_fastloop_end = input.len().saturating_sub(FASTLOOP_MAX_BYTES_READ);
-        let out_fastloop_end = self
-            .buffer
-            .len()
-            .saturating_sub(FASTLOOP_MAX_BYTES_WRITTEN);
+        let out_fastloop_end = self.buffer.len().saturating_sub(FASTLOOP_MAX_BYTES_WRITTEN);
 
         // --- Fastloop ---
         if self.input_pos < in_fastloop_end && self.write_pos < out_fastloop_end {
@@ -937,8 +949,7 @@ impl<S: InputSource> StreamDecompressor<S> {
                                 input,
                                 &mut self.input_pos,
                             );
-                            if self.input_pos < in_fastloop_end
-                                && self.write_pos < out_fastloop_end
+                            if self.input_pos < in_fastloop_end && self.write_pos < out_fastloop_end
                             {
                                 continue 'fastloop;
                             }
@@ -954,8 +965,7 @@ impl<S: InputSource> StreamDecompressor<S> {
                     }
                     entry = table_lookup(
                         &self.inner.litlen_decode_table,
-                        (entry >> 16) as u64
-                            + extract_varbits(self.bitbuf, (entry >> 8) & 0x3F),
+                        (entry >> 16) as u64 + extract_varbits(self.bitbuf, (entry >> 8) & 0x3F),
                     );
                     saved_bitbuf = self.bitbuf;
                     self.bitbuf >>= (entry & 0xFF) as u64;
@@ -974,9 +984,7 @@ impl<S: InputSource> StreamDecompressor<S> {
                             input,
                             &mut self.input_pos,
                         );
-                        if self.input_pos < in_fastloop_end
-                            && self.write_pos < out_fastloop_end
-                        {
+                        if self.input_pos < in_fastloop_end && self.write_pos < out_fastloop_end {
                             continue 'fastloop;
                         }
                         break 'fastloop;
@@ -1002,8 +1010,7 @@ impl<S: InputSource> StreamDecompressor<S> {
                     self.bitsleft -= OFFSET_TABLEBITS;
                     oentry = table_lookup(
                         &self.inner.offset_decode_table,
-                        (oentry >> 16) as u64
-                            + extract_varbits(self.bitbuf, (oentry >> 8) & 0x3F),
+                        (oentry >> 16) as u64 + extract_varbits(self.bitbuf, (oentry >> 8) & 0x3F),
                     );
                 }
                 let saved_bitbuf_off = self.bitbuf;
@@ -1011,8 +1018,8 @@ impl<S: InputSource> StreamDecompressor<S> {
                 self.bitsleft -= oentry & 0xFF;
 
                 let offset = (oentry >> 16) as usize
-                    + (extract_varbits8(saved_bitbuf_off, oentry)
-                        >> ((oentry >> 8) as u8 as u64)) as usize;
+                    + (extract_varbits8(saved_bitbuf_off, oentry) >> ((oentry >> 8) as u8 as u64))
+                        as usize;
 
                 if offset == 0 || offset > self.write_pos {
                     return Err(bad.into());
@@ -1051,7 +1058,20 @@ impl<S: InputSource> StreamDecompressor<S> {
             // Refill staging buffer when running low. This prevents false
             // overreads when there's still source data available.
             if self.input_len - self.input_pos < 16 {
+                let old_avail = self.input_len - self.input_pos;
                 self.fill_input().map_err(StreamError::Source)?;
+                let new_avail = self.input_len - self.input_pos;
+
+                // If new data was loaded and we had overread zeros in bitbuf
+                // from the previous staging buffer, purge them. The overread
+                // zeros sit at the top of bitbuf and would corrupt decoding
+                // if not cleared.
+                if self.overread_count > 0 && new_avail > old_avail {
+                    let real_bits = self.bitsleft - (self.overread_count as u32 * 8);
+                    self.bitsleft = real_bits;
+                    self.bitbuf &= bitmask(real_bits);
+                    self.overread_count = 0;
+                }
             }
 
             let input = &self.input_buf[..self.input_len];
@@ -1074,8 +1094,7 @@ impl<S: InputSource> StreamDecompressor<S> {
             if entry & HUFFDEC_SUBTABLE_POINTER != 0 {
                 entry = table_lookup(
                     &self.inner.litlen_decode_table,
-                    (entry >> 16) as u64
-                        + extract_varbits(self.bitbuf, (entry >> 8) & 0x3F),
+                    (entry >> 16) as u64 + extract_varbits(self.bitbuf, (entry >> 8) & 0x3F),
                 );
                 saved_bitbuf = self.bitbuf;
                 self.bitbuf >>= (entry & 0xFF) as u64;
@@ -1086,7 +1105,9 @@ impl<S: InputSource> StreamDecompressor<S> {
 
             if entry & HUFFDEC_LITERAL != 0 {
                 if self.write_pos >= self.buffer.len() {
-                    return Err(bad.into());
+                    // Output buffer full — save literal and return to let fill() compact.
+                    self.pending_literal = Some(value as u8);
+                    return Ok(());
                 }
                 self.buffer[self.write_pos] = value as u8;
                 self.write_pos += 1;
@@ -1103,8 +1124,7 @@ impl<S: InputSource> StreamDecompressor<S> {
 
             // Decode match length
             let length = value as usize
-                + (extract_varbits8(saved_bitbuf, entry) >> ((entry >> 8) as u8 as u64))
-                    as usize;
+                + (extract_varbits8(saved_bitbuf, entry) >> ((entry >> 8) as u8 as u64)) as usize;
 
             // Decode match offset
             let mut oentry = table_lookup(
@@ -1116,8 +1136,7 @@ impl<S: InputSource> StreamDecompressor<S> {
                 self.bitsleft -= OFFSET_TABLEBITS;
                 oentry = table_lookup(
                     &self.inner.offset_decode_table,
-                    (oentry >> 16) as u64
-                        + extract_varbits(self.bitbuf, (oentry >> 8) & 0x3F),
+                    (oentry >> 16) as u64 + extract_varbits(self.bitbuf, (oentry >> 8) & 0x3F),
                 );
             }
             let saved_bitbuf_off = self.bitbuf;
@@ -1125,8 +1144,8 @@ impl<S: InputSource> StreamDecompressor<S> {
             self.bitsleft -= oentry & 0xFF;
 
             let offset = (oentry >> 16) as usize
-                + (extract_varbits8(saved_bitbuf_off, oentry)
-                    >> ((oentry >> 8) as u8 as u64)) as usize;
+                + (extract_varbits8(saved_bitbuf_off, oentry) >> ((oentry >> 8) as u8 as u64))
+                    as usize;
 
             if offset == 0 || offset > self.write_pos {
                 return Err(bad.into());
@@ -1315,8 +1334,7 @@ impl<S: InputSource> StreamDecompressor<S> {
                 }
             }
             WrapperFormat::Gzip => {
-                let expected_crc =
-                    u32::from_le_bytes([footer[0], footer[1], footer[2], footer[3]]);
+                let expected_crc = u32::from_le_bytes([footer[0], footer[1], footer[2], footer[3]]);
                 if self.checksum != expected_crc {
                     return Err(bad.into());
                 }
@@ -1685,6 +1703,45 @@ mod tests {
             dec.advance(row_stride);
         }
 
+        assert_eq!(output, data);
+    }
+
+    #[test]
+    fn test_stream_1mb_mixed() {
+        // Exercises multi-block decompression with pseudo-random data that
+        // triggers buffer-full compaction in the generic loop.
+        let size = 1_000_000;
+        let mut data = Vec::with_capacity(size);
+        let mut state: u32 = 0xDEAD_BEEF;
+        let mut i = 0;
+        while i < size {
+            state = state.wrapping_mul(1664525).wrapping_add(1013904223);
+            let byte = (state >> 16) as u8;
+            if i % 256 == 0 && i + 32 <= size {
+                data.extend(core::iter::repeat_n(byte, 32));
+                i += 32;
+            } else {
+                data.push(byte);
+                i += 1;
+            }
+        }
+        data.truncate(size);
+
+        let mut c = libdeflater::Compressor::new(libdeflater::CompressionLvl::new(6).unwrap());
+        let bound = c.deflate_compress_bound(data.len());
+        let mut compressed = vec![0u8; bound];
+        let csize = c.deflate_compress(&data, &mut compressed).unwrap();
+
+        let mut dec = StreamDecompressor::deflate(&compressed[..csize], 64 * 1024);
+        let mut output = Vec::new();
+        while !dec.is_done() {
+            dec.fill().unwrap();
+            let chunk = dec.peek();
+            output.extend_from_slice(chunk);
+            let n = chunk.len();
+            dec.advance(n);
+        }
+        assert_eq!(output.len(), data.len());
         assert_eq!(output, data);
     }
 
