@@ -15,7 +15,7 @@ Pure Rust port of libdeflate. DEFLATE/zlib/gzip compression and decompression.
 - `src/constants.rs` — DEFLATE format constants (from deflate_constants.h)
 - `src/error.rs` — Error types
 - `src/checksum/` — Adler-32 and CRC-32 (scalar + SIMD)
-- `src/decompress/` — Decompression (bitstream reader, Huffman tables, inflate loop)
+- `src/decompress/` — Decompression (bitstream reader, Huffman tables, inflate loop, streaming)
 - `src/compress/` — Compression (bitstream writer, Huffman construction, block flushing, strategies)
 - `src/fast_bytes.rs` — Unchecked byte load/store helpers (cfg-gated)
 - `src/matchfinder/` — Hash table, hash chain, binary tree matchfinders
@@ -32,6 +32,7 @@ Pure Rust port of libdeflate. DEFLATE/zlib/gzip compression and decompression.
   - Decompression fastloop + optimized match copy
 - [x] Phase 6: Benchmarks + Polish (criterion benchmarks, README, doc examples, #[non_exhaustive] errors)
 - [x] Phase 7: Ecosystem benchmarks (flate2, miniz_oxide), justfile, Dockerfile, CI bench checks
+- [x] Phase 8: Streaming decompression (StreamDecompressor, InputSource trait, fill/peek/advance API, BufRead/Read impls, 15 tests)
 
 ## Compression Speed vs C (1MB data)
 
@@ -119,6 +120,19 @@ dictionary overlap, sync flush at boundaries, combined CRC-32 via GF(2) matrix.
 Note: `unchecked` feature does NOT help decompression — safe bounds checks
 give LLVM information that enables better optimization (+5-6% regression when
 using `get_unchecked` for table lookups and match copy).
+
+### Streaming Decompression (1MB, compressed at L6, safe mode)
+
+| Data type | zenflate whole | zenflate stream (64K) | zenflate stream (4K) | fdeflate |
+|-----------|----------------|----------------------|---------------------|----------|
+| Sequential | 36µs | 44µs (1.22x whole) | 101µs | 77µs |
+| Zeros | 32µs | 38µs (1.19x whole) | 95µs | 47µs |
+| Mixed | 1.38ms | 1.54ms (1.12x whole) | 1.69ms | 1.44ms |
+| Photo | 1.71ms | 1.93ms (1.13x whole) | 2.15ms | 1.82ms |
+
+Streaming overhead vs whole-buffer: 12-22% with 64K capacity.
+Streaming zenflate dominates fdeflate on sequential/zeros (1.3-1.7x faster),
+competitive on mixed/photo (0.94-1.07x).
 
 ### Checksums (1MB sequential, --features unchecked)
 
