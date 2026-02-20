@@ -1575,6 +1575,119 @@ mod tests {
         assert_eq!(output, data);
     }
 
+    /// Custom InputSource that yields at most `chunk_size` bytes per fill_buf call.
+    struct ChunkedSource<'a> {
+        data: &'a [u8],
+        chunk_size: usize,
+    }
+
+    impl InputSource for ChunkedSource<'_> {
+        type Error = core::convert::Infallible;
+
+        fn fill_buf(&mut self) -> Result<&[u8], core::convert::Infallible> {
+            let n = self.data.len().min(self.chunk_size);
+            Ok(&self.data[..n])
+        }
+
+        fn consume(&mut self, n: usize) {
+            self.data = &self.data[n..];
+        }
+    }
+
+    #[test]
+    fn test_stream_chunk_stress_1byte() {
+        // 1-byte-at-a-time input source — exercises staging buffer refill heavily
+        let data: Vec<u8> = (0..=255).cycle().take(5_000).collect();
+        for level in [1, 6, 12] {
+            let mut c =
+                libdeflater::Compressor::new(libdeflater::CompressionLvl::new(level).unwrap());
+
+            for format in ["deflate", "zlib", "gzip"] {
+                let (compressed, csize) = match format {
+                    "deflate" => {
+                        let bound = c.deflate_compress_bound(data.len());
+                        let mut buf = vec![0u8; bound];
+                        let n = c.deflate_compress(&data, &mut buf).unwrap();
+                        (buf, n)
+                    }
+                    "zlib" => {
+                        let bound = c.zlib_compress_bound(data.len());
+                        let mut buf = vec![0u8; bound];
+                        let n = c.zlib_compress(&data, &mut buf).unwrap();
+                        (buf, n)
+                    }
+                    "gzip" => {
+                        let bound = c.gzip_compress_bound(data.len());
+                        let mut buf = vec![0u8; bound];
+                        let n = c.gzip_compress(&data, &mut buf).unwrap();
+                        (buf, n)
+                    }
+                    _ => unreachable!(),
+                };
+
+                let source = ChunkedSource {
+                    data: &compressed[..csize],
+                    chunk_size: 1,
+                };
+                let mut dec = match format {
+                    "deflate" => StreamDecompressor::deflate(source, 1024),
+                    "zlib" => StreamDecompressor::zlib(source, 1024),
+                    "gzip" => StreamDecompressor::gzip(source, 1024),
+                    _ => unreachable!(),
+                };
+                let output = stream_decompress_all(&mut dec).unwrap();
+                assert_eq!(output, data, "{format} L{level} 1-byte chunks");
+            }
+        }
+    }
+
+    #[test]
+    fn test_stream_chunk_stress_64byte() {
+        // 64-byte chunks — typical small BufRead buffer
+        let data: Vec<u8> = (0..=255).cycle().take(50_000).collect();
+        let mut c = libdeflater::Compressor::new(libdeflater::CompressionLvl::new(6).unwrap());
+        let bound = c.gzip_compress_bound(data.len());
+        let mut compressed = vec![0u8; bound];
+        let csize = c.gzip_compress(&data, &mut compressed).unwrap();
+
+        let source = ChunkedSource {
+            data: &compressed[..csize],
+            chunk_size: 64,
+        };
+        let mut dec = StreamDecompressor::gzip(source, 4096);
+        let output = stream_decompress_all(&mut dec).unwrap();
+        assert_eq!(output, data);
+    }
+
+    #[test]
+    fn test_stream_scanline() {
+        // Simulates PNG scanline-at-a-time decompression:
+        // fill until we have row_stride bytes, process, advance, repeat.
+        let row_width = 640;
+        let row_stride = 1 + row_width; // filter byte + pixel data
+        let height = 100;
+        let data: Vec<u8> = (0..=255).cycle().take(row_stride * height).collect();
+
+        let mut c = libdeflater::Compressor::new(libdeflater::CompressionLvl::new(6).unwrap());
+        let bound = c.zlib_compress_bound(data.len());
+        let mut compressed = vec![0u8; bound];
+        let csize = c.zlib_compress(&data, &mut compressed).unwrap();
+
+        let mut dec = StreamDecompressor::zlib(&compressed[..csize], 2 * row_stride);
+        let mut output = Vec::new();
+
+        for _row in 0..height {
+            while dec.peek().len() < row_stride {
+                dec.fill().unwrap();
+            }
+            let row_data = &dec.peek()[..row_stride];
+            output.extend_from_slice(row_data);
+            dec.advance(row_stride);
+        }
+
+        assert_eq!(output, data);
+    }
+
     #[cfg(feature = "std")]
     #[test]
     fn test_stream_bufreader() {
