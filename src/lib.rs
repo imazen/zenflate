@@ -22,7 +22,7 @@
 //! let mut compressor = Compressor::new(CompressionLevel::balanced());
 //! let bound = Compressor::deflate_compress_bound(data.len());
 //! let mut compressed = vec![0u8; bound];
-//! let csize = compressor.deflate_compress(data, &mut compressed).unwrap();
+//! let csize = compressor.deflate_compress(data, &mut compressed, Unstoppable).unwrap();
 //!
 //! // Decompress
 //! let mut decompressor = Decompressor::new();

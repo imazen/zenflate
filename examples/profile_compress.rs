@@ -34,6 +34,10 @@ fn main() {
 
     // Run many iterations for profiling
     for _ in 0..iters {
-        std::hint::black_box(compressor.deflate_compress(&data, &mut out).unwrap());
+        std::hint::black_box(
+            compressor
+                .deflate_compress(&data, &mut out, zenflate::Unstoppable)
+                .unwrap(),
+        );
     }
 }

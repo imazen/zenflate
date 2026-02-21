@@ -30,6 +30,8 @@ fn main() {
     let mut c = zenflate::Compressor::new(zenflate::CompressionLevel::new(level));
     let bound = zenflate::Compressor::deflate_compress_bound(data.len());
     let mut out = vec![0u8; bound];
-    let size = c.deflate_compress(&data, &mut out).unwrap();
+    let size = c
+        .deflate_compress(&data, &mut out, zenflate::Unstoppable)
+        .unwrap();
     eprintln!("zenflate L{level}: {size} bytes");
 }

@@ -14,7 +14,7 @@ zenflate = "0.1"
 ### Compress
 
 ```rust
-use zenflate::{Compressor, CompressionLevel};
+use zenflate::{Compressor, CompressionLevel, Unstoppable};
 
 let data = b"Hello, World! Hello, World! Hello, World!";
 let mut compressor = Compressor::new(CompressionLevel::balanced());
@@ -22,7 +22,7 @@ let mut compressor = Compressor::new(CompressionLevel::balanced());
 let bound = Compressor::deflate_compress_bound(data.len());
 let mut compressed = vec![0u8; bound];
 let compressed_len = compressor
-    .deflate_compress(data, &mut compressed)
+    .deflate_compress(data, &mut compressed, Unstoppable)
     .unwrap();
 let compressed = &compressed[..compressed_len];
 ```
@@ -47,15 +47,15 @@ All three DEFLATE-based formats are supported:
 
 ```rust
 // Raw DEFLATE
-compressor.deflate_compress(data, &mut out)?;
+compressor.deflate_compress(data, &mut out, Unstoppable)?;
 decompressor.deflate_decompress(compressed, &mut out, Unstoppable)?;
 
 // zlib (2-byte header + DEFLATE + Adler-32)
-compressor.zlib_compress(data, &mut out)?;
+compressor.zlib_compress(data, &mut out, Unstoppable)?;
 decompressor.zlib_decompress(compressed, &mut out, Unstoppable)?;
 
 // gzip (10-byte header + DEFLATE + CRC-32)
-compressor.gzip_compress(data, &mut out)?;
+compressor.gzip_compress(data, &mut out, Unstoppable)?;
 decompressor.gzip_decompress(compressed, &mut out, Unstoppable)?;
 ```
 

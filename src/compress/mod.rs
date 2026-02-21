@@ -126,14 +126,14 @@ impl Default for CompressionLevel {
 /// Reuse across multiple compressions for best performance (avoids re-initialization).
 ///
 /// ```
-/// use zenflate::{Compressor, CompressionLevel};
+/// use zenflate::{Compressor, CompressionLevel, Unstoppable};
 ///
 /// let mut compressor = Compressor::new(CompressionLevel::balanced());
 ///
 /// let data = b"Hello, World! Hello, World! Hello, World!";
 /// let bound = Compressor::deflate_compress_bound(data.len());
 /// let mut out = vec![0u8; bound];
-/// let size = compressor.deflate_compress(data, &mut out).unwrap();
+/// let size = compressor.deflate_compress(data, &mut out, Unstoppable).unwrap();
 /// assert!(size < data.len()); // compressed
 /// ```
 pub struct Compressor {
@@ -255,6 +255,7 @@ impl Compressor {
         &mut self,
         input: &[u8],
         output: &mut [u8],
+        stop: impl enough::Stop,
     ) -> Result<usize, CompressionError> {
         if input.len() <= self.max_passthrough_size {
             return deflate_compress_none(input, output);
@@ -267,22 +268,22 @@ impl Compressor {
                 return deflate_compress_none(input, output);
             }
             1 => {
-                self.compress_fastest(&mut os, input);
+                self.compress_fastest(&mut os, input, &stop)?;
             }
             2..=4 => {
-                self.compress_greedy(&mut os, input);
+                self.compress_greedy(&mut os, input, &stop)?;
             }
             5..=7 => {
-                self.compress_lazy_generic(&mut os, input, false);
+                self.compress_lazy_generic(&mut os, input, false, &stop)?;
             }
             8..=9 => {
-                self.compress_lazy_generic(&mut os, input, true);
+                self.compress_lazy_generic(&mut os, input, true, &stop)?;
             }
             10..=12 => {
-                self.compress_near_optimal(&mut os, input);
+                self.compress_near_optimal(&mut os, input, &stop)?;
             }
             _ => {
-                self.compress_literals(&mut os, input);
+                self.compress_literals(&mut os, input, &stop)?;
             }
         }
 
@@ -308,6 +309,7 @@ impl Compressor {
         &mut self,
         input: &[u8],
         output: &mut [u8],
+        stop: impl enough::Stop,
     ) -> Result<usize, CompressionError> {
         // zlib header: CMF=0x78, FLG depends on level
         let flg = match self.level.level() {
@@ -333,7 +335,7 @@ impl Compressor {
         output[0] = cmf;
         output[1] = flg;
 
-        let compressed_size = self.deflate_compress(input, &mut output[2..])?;
+        let compressed_size = self.deflate_compress(input, &mut output[2..], stop)?;
         let total = 2 + compressed_size;
 
         // Adler-32 checksum
@@ -350,6 +352,7 @@ impl Compressor {
         &mut self,
         input: &[u8],
         output: &mut [u8],
+        stop: impl enough::Stop,
     ) -> Result<usize, CompressionError> {
         if output.len() < 18 {
             return Err(CompressionError::InsufficientSpace);
@@ -363,7 +366,7 @@ impl Compressor {
         output[8] = 0x00; // XFL
         output[9] = 0xFF; // OS = unknown
 
-        let compressed_size = self.deflate_compress(input, &mut output[10..])?;
+        let compressed_size = self.deflate_compress(input, &mut output[10..], stop)?;
         let total = 10 + compressed_size;
 
         // CRC-32 + ISIZE (8 bytes)
@@ -400,7 +403,12 @@ impl Compressor {
     ///
     /// Simple greedy: find longest match, take it or emit literal.
     /// No block splitting (uses fixed FAST_SOFT_MAX_BLOCK_LENGTH).
-    fn compress_fastest(&mut self, os: &mut OutputBitstream<'_>, input: &[u8]) {
+    fn compress_fastest(
+        &mut self,
+        os: &mut OutputBitstream<'_>,
+        input: &[u8],
+        stop: &impl enough::Stop,
+    ) -> Result<(), CompressionError> {
         let mut mf = self.ht_mf.take().unwrap();
         mf.init();
 
@@ -424,6 +432,7 @@ impl Compressor {
         }
 
         while in_next < in_end && !os.overflow {
+            stop.check()?;
             let in_block_begin = in_next;
             let in_max_block_end =
                 choose_max_block_end(in_next, in_end, FAST_SOFT_MAX_BLOCK_LENGTH);
@@ -502,13 +511,19 @@ impl Compressor {
         }
 
         self.ht_mf = Some(mf);
+        Ok(())
     }
 
     /// Levels 2-4: greedy compression using hash chains matchfinder.
     ///
     /// Always takes the longest match at each position. Uses block splitting
     /// and adaptive min_match_len heuristic.
-    fn compress_greedy(&mut self, os: &mut OutputBitstream<'_>, input: &[u8]) {
+    fn compress_greedy(
+        &mut self,
+        os: &mut OutputBitstream<'_>,
+        input: &[u8],
+        stop: &impl enough::Stop,
+    ) -> Result<(), CompressionError> {
         let mut mf = self.hc_mf.take().unwrap();
         mf.init();
 
@@ -533,6 +548,7 @@ impl Compressor {
         }
 
         while in_next < in_end && !os.overflow {
+            stop.check()?;
             let in_block_begin = in_next;
             let in_max_block_end = choose_max_block_end(in_next, in_end, SOFT_MAX_BLOCK_LENGTH);
             let mut seq_idx = 0;
@@ -611,6 +627,7 @@ impl Compressor {
         }
 
         self.hc_mf = Some(mf);
+        Ok(())
     }
 
     /// Levels 5-9: lazy/lazy2 compression using hash chains matchfinder.
@@ -618,7 +635,13 @@ impl Compressor {
     /// Before committing to a match, looks ahead 1 position (lazy) or 2
     /// positions (lazy2) for a better match. Uses block splitting and
     /// adaptive min_match_len with periodic recalculation.
-    fn compress_lazy_generic(&mut self, os: &mut OutputBitstream<'_>, input: &[u8], lazy2: bool) {
+    fn compress_lazy_generic(
+        &mut self,
+        os: &mut OutputBitstream<'_>,
+        input: &[u8],
+        lazy2: bool,
+        stop: &impl enough::Stop,
+    ) -> Result<(), CompressionError> {
         let mut mf = self.hc_mf.take().unwrap();
         mf.init();
 
@@ -643,6 +666,7 @@ impl Compressor {
         }
 
         while in_next < in_end && !os.overflow {
+            stop.check()?;
             let in_block_begin = in_next;
             let in_max_block_end = choose_max_block_end(in_next, in_end, SOFT_MAX_BLOCK_LENGTH);
             let mut seq_idx = 0;
@@ -854,13 +878,19 @@ impl Compressor {
         }
 
         self.hc_mf = Some(mf);
+        Ok(())
     }
 
     /// Levels 10-12: near-optimal compression using binary tree matchfinder.
     ///
     /// Finds all matches at each position, caches them, then uses iterative
     /// backward DP to find the minimum-cost literal/match path.
-    fn compress_near_optimal(&mut self, os: &mut OutputBitstream<'_>, input: &[u8]) {
+    fn compress_near_optimal(
+        &mut self,
+        os: &mut OutputBitstream<'_>,
+        input: &[u8],
+        stop: &impl enough::Stop,
+    ) -> Result<(), CompressionError> {
         let mut ns = self.near_optimal.take().unwrap();
         ns.bt_mf.init();
 
@@ -917,6 +947,7 @@ impl Compressor {
         init_stats(&mut self.split_stats, &mut ns);
 
         loop {
+            stop.check()?;
             // Starting a new DEFLATE block
             let in_max_block_end =
                 choose_max_block_end(in_block_begin, in_end, SOFT_MAX_BLOCK_LENGTH);
@@ -1165,6 +1196,7 @@ impl Compressor {
         }
 
         self.near_optimal = Some(ns);
+        Ok(())
     }
 
     /// Compress a chunk of input with optional dictionary prefix (for parallel compression).
@@ -1181,6 +1213,7 @@ impl Compressor {
         chunk_start: usize,
         is_last_chunk: bool,
         output: &mut [u8],
+        stop: &impl enough::Stop,
     ) -> Result<usize, CompressionError> {
         // Level 0: no matchfinder, just uncompressed blocks of the data portion.
         if self.level.level() == 0 {
@@ -1192,13 +1225,18 @@ impl Compressor {
 
         let mut os = OutputBitstream::new(output);
 
-        match self.level.level() {
-            1 => self.compress_fastest(&mut os, input),
-            2..=4 => self.compress_greedy(&mut os, input),
-            5..=7 => self.compress_lazy_generic(&mut os, input, false),
-            8..=9 => self.compress_lazy_generic(&mut os, input, true),
-            10..=12 => self.compress_near_optimal(&mut os, input),
-            _ => self.compress_literals(&mut os, input),
+        let result = match self.level.level() {
+            1 => self.compress_fastest(&mut os, input, stop),
+            2..=4 => self.compress_greedy(&mut os, input, stop),
+            5..=7 => self.compress_lazy_generic(&mut os, input, false, stop),
+            8..=9 => self.compress_lazy_generic(&mut os, input, true, stop),
+            10..=12 => self.compress_near_optimal(&mut os, input, stop),
+            _ => self.compress_literals(&mut os, input, stop),
+        };
+        if let Err(e) = result {
+            self.chunk_start = 0;
+            self.force_nonfinal = false;
+            return Err(e);
         }
 
         if os.overflow {
@@ -1250,10 +1288,16 @@ impl Compressor {
     }
 
     /// Simple literal-only compressor that exercises the full block flushing path.
-    fn compress_literals(&mut self, os: &mut OutputBitstream<'_>, input: &[u8]) {
+    fn compress_literals(
+        &mut self,
+        os: &mut OutputBitstream<'_>,
+        input: &[u8],
+        stop: &impl enough::Stop,
+    ) -> Result<(), CompressionError> {
         let mut pos = 0;
 
         while pos < input.len() && !os.overflow {
+            stop.check()?;
             // Start a new block
             let block_begin = pos;
             let max_block_end = choose_max_block_end(pos, input.len(), SOFT_MAX_BLOCK_LENGTH);
@@ -1289,6 +1333,7 @@ impl Compressor {
                 is_final,
             );
         }
+        Ok(())
     }
 
     /// Compress data in gzip format using multiple threads.
@@ -1309,7 +1354,7 @@ impl Compressor {
     /// let mut compressor = Compressor::new(CompressionLevel::balanced());
     /// let bound = Compressor::gzip_compress_bound(data.len()) + 4 * 5;
     /// let mut compressed = vec![0u8; bound];
-    /// let csize = compressor.gzip_compress_parallel(&data, &mut compressed, 4).unwrap();
+    /// let csize = compressor.gzip_compress_parallel(&data, &mut compressed, 4, Unstoppable).unwrap();
     ///
     /// let mut decompressor = Decompressor::new();
     /// let mut output = vec![0u8; data.len()];
@@ -1322,6 +1367,7 @@ impl Compressor {
         input: &[u8],
         output: &mut [u8],
         num_threads: usize,
+        stop: impl enough::Stop,
     ) -> Result<usize, CompressionError> {
         use crate::checksum::crc32_combine;
         use alloc::vec;
@@ -1332,7 +1378,7 @@ impl Compressor {
 
         // For small inputs or single thread, fall back to single-threaded.
         if num_threads == 1 || input.len() < 32 * 1024 {
-            return self.gzip_compress(input, output);
+            return self.gzip_compress(input, output, stop);
         }
 
         const DICT_SIZE: usize = 32 * 1024; // MATCHFINDER_WINDOW_SIZE
@@ -1362,6 +1408,7 @@ impl Compressor {
                 let handles: Vec<_> = chunks
                     .iter()
                     .map(|&(dict_start, data_start, data_end, is_last)| {
+                        let stop = &stop;
                         s.spawn(move || {
                             let mut c = Compressor::new(level);
                             let chunk_input = &input[dict_start..data_end];
@@ -1379,6 +1426,7 @@ impl Compressor {
                                 chunk_start,
                                 is_last,
                                 &mut buf,
+                                stop,
                             )?;
                             buf.truncate(size);
 
@@ -1618,7 +1666,9 @@ mod tests {
     fn test_compress_level0_empty() {
         let mut c = Compressor::new(CompressionLevel::none());
         let mut output = vec![0u8; 100];
-        let size = c.deflate_compress(&[], &mut output).unwrap();
+        let size = c
+            .deflate_compress(&[], &mut output, enough::Unstoppable)
+            .unwrap();
         assert_eq!(size, 5);
 
         // Decompress with our own decompressor
@@ -1637,7 +1687,9 @@ mod tests {
         let mut c = Compressor::new(CompressionLevel::none());
         let bound = Compressor::deflate_compress_bound(data.len());
         let mut compressed = vec![0u8; bound];
-        let csize = c.deflate_compress(data, &mut compressed).unwrap();
+        let csize = c
+            .deflate_compress(data, &mut compressed, enough::Unstoppable)
+            .unwrap();
 
         let mut d = crate::Decompressor::new();
         let mut decompressed = vec![0u8; data.len()];
@@ -1654,7 +1706,9 @@ mod tests {
         let mut c = Compressor::new(CompressionLevel::none());
         let bound = Compressor::deflate_compress_bound(data.len());
         let mut compressed = vec![0u8; bound];
-        let csize = c.deflate_compress(&data, &mut compressed).unwrap();
+        let csize = c
+            .deflate_compress(&data, &mut compressed, enough::Unstoppable)
+            .unwrap();
 
         let mut d = crate::Decompressor::new();
         let mut decompressed = vec![0u8; data.len()];
@@ -1672,7 +1726,9 @@ mod tests {
         let mut c = Compressor::new(CompressionLevel::balanced());
         let bound = Compressor::deflate_compress_bound(data.len());
         let mut compressed = vec![0u8; bound];
-        let csize = c.deflate_compress(data, &mut compressed).unwrap();
+        let csize = c
+            .deflate_compress(data, &mut compressed, enough::Unstoppable)
+            .unwrap();
 
         let mut d = crate::Decompressor::new();
         let mut decompressed = vec![0u8; data.len()];
@@ -1690,7 +1746,9 @@ mod tests {
         let mut c = Compressor::new(CompressionLevel::balanced());
         let bound = Compressor::deflate_compress_bound(data.len());
         let mut compressed = vec![0u8; bound];
-        let csize = c.deflate_compress(&data, &mut compressed).unwrap();
+        let csize = c
+            .deflate_compress(&data, &mut compressed, enough::Unstoppable)
+            .unwrap();
 
         // Verify with libdeflater
         let mut d = libdeflater::Decompressor::new();
@@ -1707,7 +1765,9 @@ mod tests {
         let mut c = Compressor::new(CompressionLevel::balanced());
         let bound = Compressor::zlib_compress_bound(data.len());
         let mut compressed = vec![0u8; bound];
-        let csize = c.zlib_compress(data, &mut compressed).unwrap();
+        let csize = c
+            .zlib_compress(data, &mut compressed, enough::Unstoppable)
+            .unwrap();
 
         let mut d = crate::Decompressor::new();
         let mut decompressed = vec![0u8; data.len()];
@@ -1724,7 +1784,9 @@ mod tests {
         let mut c = Compressor::new(CompressionLevel::balanced());
         let bound = Compressor::gzip_compress_bound(data.len());
         let mut compressed = vec![0u8; bound];
-        let csize = c.gzip_compress(data, &mut compressed).unwrap();
+        let csize = c
+            .gzip_compress(data, &mut compressed, enough::Unstoppable)
+            .unwrap();
 
         let mut d = crate::Decompressor::new();
         let mut decompressed = vec![0u8; data.len()];
@@ -1743,7 +1805,9 @@ mod tests {
         let mut c = Compressor::new(CompressionLevel::balanced());
         let bound = Compressor::deflate_compress_bound(data.len());
         let mut compressed = vec![0u8; bound];
-        let csize = c.deflate_compress(&data, &mut compressed).unwrap();
+        let csize = c
+            .deflate_compress(&data, &mut compressed, enough::Unstoppable)
+            .unwrap();
 
         let mut d = libdeflater::Decompressor::new();
         let mut decompressed = vec![0u8; data.len()];
@@ -1759,7 +1823,7 @@ mod tests {
         let bound = Compressor::deflate_compress_bound(data.len());
         let mut compressed = vec![0u8; bound];
         let csize = c
-            .deflate_compress(data, &mut compressed)
+            .deflate_compress(data, &mut compressed, enough::Unstoppable)
             .unwrap_or_else(|e| panic!("level {level}: compress failed: {e}"));
 
         // Verify with our own decompressor
@@ -1831,7 +1895,9 @@ mod tests {
         let mut c = Compressor::new(CompressionLevel::fastest());
         let bound = Compressor::deflate_compress_bound(data.len());
         let mut compressed = vec![0u8; bound];
-        let csize = c.deflate_compress(&data, &mut compressed).unwrap();
+        let csize = c
+            .deflate_compress(&data, &mut compressed, enough::Unstoppable)
+            .unwrap();
         // All zeros should compress very well
         assert!(
             csize < data.len() / 10,
@@ -2105,7 +2171,9 @@ mod tests {
             let mut c = Compressor::new(CompressionLevel::new(level));
             let bound = Compressor::deflate_compress_bound(data.len());
             let mut compressed = vec![0u8; bound];
-            let csize = c.deflate_compress(&data, &mut compressed).unwrap();
+            let csize = c
+                .deflate_compress(&data, &mut compressed, enough::Unstoppable)
+                .unwrap();
             // Allow some tolerance — strategy transitions might not always improve
             if let Some(prev) = prev_size {
                 assert!(
@@ -2128,7 +2196,7 @@ mod tests {
             let bound = Compressor::zlib_compress_bound(data.len());
             let mut compressed = vec![0u8; bound];
             let csize = c
-                .zlib_compress(&data, &mut compressed)
+                .zlib_compress(&data, &mut compressed, enough::Unstoppable)
                 .unwrap_or_else(|e| panic!("level {level}: zlib compress failed: {e}"));
 
             let mut d = crate::Decompressor::new();
@@ -2155,7 +2223,7 @@ mod tests {
             let bound = Compressor::gzip_compress_bound(data.len());
             let mut compressed = vec![0u8; bound];
             let csize = c
-                .gzip_compress(&data, &mut compressed)
+                .gzip_compress(&data, &mut compressed, enough::Unstoppable)
                 .unwrap_or_else(|e| panic!("level {level}: gzip compress failed: {e}"));
 
             let mut d = crate::Decompressor::new();
@@ -2220,7 +2288,7 @@ mod tests {
         let mut compressed = vec![0u8; bound];
         let mut compressor = Compressor::new(level);
         let csize = compressor
-            .gzip_compress_parallel(data, &mut compressed, num_threads)
+            .gzip_compress_parallel(data, &mut compressed, num_threads, enough::Unstoppable)
             .unwrap();
 
         let mut decompressor = crate::decompress::Decompressor::new();
@@ -2296,7 +2364,7 @@ mod tests {
         let mut compressed = vec![0u8; bound];
         let mut compressor = Compressor::new(level);
         let csize = compressor
-            .gzip_compress_parallel(&data, &mut compressed, 4)
+            .gzip_compress_parallel(&data, &mut compressed, 4, enough::Unstoppable)
             .unwrap();
 
         // Decompress with C library to validate the gzip stream.
@@ -2449,7 +2517,7 @@ mod tests {
             let bound = Compressor::deflate_compress_bound(data_owned.len());
             let mut compressed = vec![0u8; bound];
             let csize = compressor
-                .deflate_compress(&data_owned, &mut compressed)
+                .deflate_compress(&data_owned, &mut compressed, enough::Unstoppable)
                 .map_err(|e| format!("compression error: {e}"))?;
 
             // Decompress with zenflate

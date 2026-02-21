@@ -35,14 +35,20 @@ fn bench_zenflate(data: &[u8], level: u32) -> (usize, f64) {
     let mut c = zenflate::Compressor::new(zenflate::CompressionLevel::new(level));
     let bound = zenflate::Compressor::deflate_compress_bound(data.len());
     let mut out = vec![0u8; bound];
-    let _ = c.deflate_compress(data, &mut out).unwrap();
+    let _ = c
+        .deflate_compress(data, &mut out, zenflate::Unstoppable)
+        .unwrap();
     let mut best = f64::MAX;
     for _ in 0..5 {
         let start = Instant::now();
-        let _ = c.deflate_compress(data, &mut out).unwrap();
+        let _ = c
+            .deflate_compress(data, &mut out, zenflate::Unstoppable)
+            .unwrap();
         best = best.min(start.elapsed().as_secs_f64());
     }
-    let len = c.deflate_compress(data, &mut out).unwrap();
+    let len = c
+        .deflate_compress(data, &mut out, zenflate::Unstoppable)
+        .unwrap();
     (len, best)
 }
 

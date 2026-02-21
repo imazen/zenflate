@@ -127,7 +127,9 @@ fn bench_compress(c: &mut Criterion) {
                     let bound = zenflate::Compressor::deflate_compress_bound(data.len());
                     let mut out = vec![0u8; bound];
                     b.iter(|| {
-                        compressor.deflate_compress(data, &mut out).unwrap();
+                        compressor
+                            .deflate_compress(data, &mut out, zenflate::Unstoppable)
+                            .unwrap();
                     });
                 },
             );
@@ -209,7 +211,7 @@ fn bench_decompress(c: &mut Criterion) {
         let bound = zenflate::Compressor::deflate_compress_bound(data.len());
         let mut compressed_deflate = vec![0u8; bound];
         let deflate_len = compressor
-            .deflate_compress(data, &mut compressed_deflate)
+            .deflate_compress(data, &mut compressed_deflate, zenflate::Unstoppable)
             .unwrap();
         let compressed_deflate = &compressed_deflate[..deflate_len];
 
@@ -217,7 +219,7 @@ fn bench_decompress(c: &mut Criterion) {
         let zlib_bound = zenflate::Compressor::zlib_compress_bound(data.len());
         let mut compressed_zlib = vec![0u8; zlib_bound];
         let zlib_len = compressor
-            .zlib_compress(data, &mut compressed_zlib)
+            .zlib_compress(data, &mut compressed_zlib, zenflate::Unstoppable)
             .unwrap();
         let compressed_zlib = &compressed_zlib[..zlib_len];
 
@@ -365,7 +367,7 @@ fn bench_parallel_compress(c: &mut Criterion) {
                 b.iter(|| {
                     let mut compressor = zenflate::Compressor::new(level);
                     compressor
-                        .gzip_compress_parallel(&data, &mut out, threads)
+                        .gzip_compress_parallel(&data, &mut out, threads, zenflate::Unstoppable)
                         .unwrap();
                 });
             });
@@ -399,7 +401,7 @@ fn bench_stream_decompress(c: &mut Criterion) {
         let bound = zenflate::Compressor::deflate_compress_bound(data.len());
         let mut compressed_deflate = vec![0u8; bound];
         let deflate_len = compressor
-            .deflate_compress(data, &mut compressed_deflate)
+            .deflate_compress(data, &mut compressed_deflate, zenflate::Unstoppable)
             .unwrap();
         let compressed_deflate = &compressed_deflate[..deflate_len];
 
@@ -407,7 +409,7 @@ fn bench_stream_decompress(c: &mut Criterion) {
         let zlib_bound = zenflate::Compressor::zlib_compress_bound(data.len());
         let mut compressed_zlib = vec![0u8; zlib_bound];
         let zlib_len = compressor
-            .zlib_compress(data, &mut compressed_zlib)
+            .zlib_compress(data, &mut compressed_zlib, zenflate::Unstoppable)
             .unwrap();
         let compressed_zlib = &compressed_zlib[..zlib_len];
 

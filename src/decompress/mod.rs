@@ -198,7 +198,7 @@ pub struct DecompressOutcome {
 /// let mut c = Compressor::new(CompressionLevel::fastest());
 /// let bound = Compressor::deflate_compress_bound(data.len());
 /// let mut compressed = vec![0u8; bound];
-/// let csize = c.deflate_compress(data, &mut compressed).unwrap();
+/// let csize = c.deflate_compress(data, &mut compressed, Unstoppable).unwrap();
 ///
 /// // Decompress it back
 /// let mut d = Decompressor::new();

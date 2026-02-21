@@ -6,6 +6,8 @@
 pub enum CompressionError {
     /// The output buffer is too small to hold the compressed data.
     InsufficientSpace,
+    /// The operation was stopped by a cooperative cancellation signal.
+    Stopped(enough::StopReason),
 }
 
 /// Error returned when decompression fails.
@@ -28,7 +30,14 @@ impl core::fmt::Display for CompressionError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::InsufficientSpace => write!(f, "output buffer too small for compressed data"),
+            Self::Stopped(reason) => write!(f, "{reason}"),
         }
+    }
+}
+
+impl From<enough::StopReason> for CompressionError {
+    fn from(reason: enough::StopReason) -> Self {
+        Self::Stopped(reason)
     }
 }
 

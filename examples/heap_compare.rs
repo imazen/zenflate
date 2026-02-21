@@ -32,7 +32,9 @@ fn main() {
     let mut zc = zenflate::Compressor::new(zenflate::CompressionLevel::new(level));
     let bound = zenflate::Compressor::deflate_compress_bound(data.len());
     let mut zout = vec![0u8; bound];
-    let zsize = zc.deflate_compress(&data, &mut zout).unwrap();
+    let zsize = zc
+        .deflate_compress(&data, &mut zout, zenflate::Unstoppable)
+        .unwrap();
 
     // --- libdeflate C ---
     let mut lc =
