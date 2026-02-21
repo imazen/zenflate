@@ -1077,4 +1077,38 @@ mod parity {
         let adler = super::adler32(1, data);
         assert_eq!(super::adler32_combine(adler, 1, 0), adler);
     }
+
+    /// Verify all SIMD dispatch tiers produce identical results to scalar.
+    ///
+    /// Uses archmage's `for_each_token_permutation` to disable tokens in every
+    /// valid combination, then checks that the dispatched result matches
+    /// the reference (libdeflater C). Run with `--test-threads=1` for full
+    /// correctness (token disabling is process-wide).
+    #[test]
+    fn adler32_all_simd_tiers() {
+        use archmage::testing::{CompileTimePolicy, for_each_token_permutation};
+
+        // Test data at various sizes to exercise scalar tail, SIMD inner loop,
+        // and chunk boundary (MAX_CHUNK_LEN = 5552) paths.
+        let sizes = [0, 1, 15, 16, 31, 32, 63, 64, 128, 256, 5552, 5553, 100_000];
+        let reference: alloc::vec::Vec<u32> = sizes
+            .iter()
+            .map(|&sz| {
+                let data: alloc::vec::Vec<u8> = (0..=255u8).cycle().take(sz).collect();
+                libdeflater::adler32(&data)
+            })
+            .collect();
+
+        let report = for_each_token_permutation(CompileTimePolicy::Warn, |perm| {
+            for (i, &sz) in sizes.iter().enumerate() {
+                let data: alloc::vec::Vec<u8> = (0..=255u8).cycle().take(sz).collect();
+                let result = super::adler32(1, &data);
+                assert_eq!(
+                    result, reference[i],
+                    "adler32 mismatch at size={sz}, tier: {perm}"
+                );
+            }
+        });
+        eprintln!("adler32 permutation test: {report}");
+    }
 }

@@ -976,4 +976,40 @@ mod parity {
             "X64V4xToken should be available on this CPU"
         );
     }
+
+    /// Verify all SIMD dispatch tiers produce identical results to scalar.
+    ///
+    /// Uses archmage's `for_each_token_permutation` to disable tokens in every
+    /// valid combination, then checks that the dispatched result matches
+    /// the reference (libdeflater C). Run with `--test-threads=1` for full
+    /// correctness (token disabling is process-wide).
+    #[test]
+    fn crc32_all_simd_tiers() {
+        use archmage::testing::{CompileTimePolicy, for_each_token_permutation};
+
+        // Test data at various sizes to exercise scalar tail, PCLMULQDQ small path,
+        // PCLMULQDQ 8-accumulator path, and VPCLMULQDQ 512-bit path.
+        let sizes = [
+            0, 1, 7, 8, 15, 16, 17, 32, 64, 127, 128, 129, 256, 512, 100_000,
+        ];
+        let reference: Vec<u32> = sizes
+            .iter()
+            .map(|&sz| {
+                let data: Vec<u8> = (0..=255u8).cycle().take(sz).collect();
+                libdeflater::crc32(&data)
+            })
+            .collect();
+
+        let report = for_each_token_permutation(CompileTimePolicy::Warn, |perm| {
+            for (i, &sz) in sizes.iter().enumerate() {
+                let data: Vec<u8> = (0..=255u8).cycle().take(sz).collect();
+                let result = super::crc32(0, &data);
+                assert_eq!(
+                    result, reference[i],
+                    "crc32 mismatch at size={sz}, tier: {perm}"
+                );
+            }
+        });
+        eprintln!("crc32 permutation test: {report}");
+    }
 }
