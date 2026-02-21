@@ -320,6 +320,15 @@ fn bench_checksums(c: &mut Criterion) {
             b.iter(|| libdeflater::adler32(&data));
         });
 
+        group.bench_function("simd-adler32", |b| {
+            let mut h = simd_adler32::Adler32::new();
+            b.iter(|| {
+                h = simd_adler32::Adler32::new();
+                h.write(&data);
+                h.finish()
+            });
+        });
+
         group.finish();
     }
 
@@ -333,6 +342,10 @@ fn bench_checksums(c: &mut Criterion) {
 
         group.bench_function("libdeflate", |b| {
             b.iter(|| libdeflater::crc32(&data));
+        });
+
+        group.bench_function("crc32fast", |b| {
+            b.iter(|| crc32fast::hash(&data));
         });
 
         group.finish();

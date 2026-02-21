@@ -38,6 +38,8 @@ miniz_oxide = "0.8"
 png = "0.17"
 fdeflate = "0.3"
 zlib-rs = "0.6"
+crc32fast = "1"
+simd-adler32 = "0.3"
 
 [[bench]]
 name = "throughput"
