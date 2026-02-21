@@ -1092,11 +1092,15 @@ impl<S: InputSource> StreamDecompressor<S> {
                             break 'fastloop Exit::BadData;
                         }
 
+                        // Refill BEFORE preload: after a multi-literal + match path,
+                        // bitsleft can be < litlen_tablebits, causing the preload to
+                        // read stale zero bits. Refilling first ensures enough valid
+                        // bits for the table lookup.
+                        refill_bits_fast(&mut bitbuf, &mut bitsleft, input, &mut in_pos);
                         entry = table_lookup(
                             &self.inner.litlen_decode_table,
                             bitbuf & litlen_tablemask,
                         );
-                        refill_bits_fast(&mut bitbuf, &mut bitsleft, input, &mut in_pos);
 
                         super::fastloop_match_copy(
                             &mut self.buffer,
