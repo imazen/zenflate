@@ -131,7 +131,7 @@ Zeros decompression is 2.4x faster than C (Rust's `fill()` auto-vectorizes).
 
 | Algorithm | zenflate | libdeflate (C) | Implementation |
 |-----------|----------|----------------|----------------|
-| Adler-32 | 105 GiB/s | 120 GiB/s | AVX2 (x86), NEON (aarch64) |
+| Adler-32 | 114 GiB/s | 121 GiB/s | AVX-512 VNNI (x86), dotprod (aarch64), WASM simd128 |
 | CRC-32 | 78 GiB/s | 77 GiB/s | PCLMULQDQ (x86), PMULL (aarch64) |
 
 **Parallel compression** (4 MB mixed data, gzip):

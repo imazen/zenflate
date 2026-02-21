@@ -27,7 +27,7 @@ Pure Rust port of libdeflate. DEFLATE/zlib/gzip compression and decompression.
 - [x] Phase 3: Compression Core (bitstream writer, Huffman construction, block flushing, 55 tests)
 - [x] Phase 4: Compression Strategies (levels 0-12: fastest, greedy, lazy, lazy2, near-optimal; 97 tests)
 - [x] Phase 5: SIMD Acceleration
-  - Adler-32: AVX2 (v3) + AVX-512 VNNI (modern) + NEON (aarch64) — 105 GiB/s (0.88x C)
+  - Adler-32: AVX-512 VNNI 512-bit (v4x) + AVX-512 (v4) + AVX2 (v3) + dotprod (arm_v2/v3) + NEON + WASM simd128 — 114 GiB/s (0.94x C)
   - CRC-32: PCLMULQDQ 128-bit (v2) + VPCLMULQDQ 512-bit zmm (modern) + PMULL (aarch64) — 78 GiB/s (1.01x C)
   - Decompression fastloop + optimized match copy
 - [x] Phase 6: Benchmarks + Polish (criterion benchmarks, README, doc examples, #[non_exhaustive] errors)
@@ -142,7 +142,7 @@ Fastloop uses local variables for register promotion (confirmed 5-6% win).
 
 | Algorithm | zenflate | libdeflate (C) | Ratio |
 |-----------|----------|----------------|-------|
-| Adler-32 | 105 GiB/s | 120 GiB/s | 0.88x |
+| Adler-32 | 114 GiB/s | 121 GiB/s | 0.94x |
 | CRC-32 | 78 GiB/s | 77 GiB/s | **1.01x** |
 
 ## Investigation Notes
