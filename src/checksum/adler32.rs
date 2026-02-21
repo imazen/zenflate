@@ -36,15 +36,12 @@ pub fn adler32(adler: u32, data: &[u8]) -> u32 {
     {
         incant!(
             adler32_impl(adler, data),
-            [v4x, v4, v3, arm_v3, arm_v2, neon, wasm128]
+            [v4x, v4, v3, arm_v2, neon, wasm128]
         )
     }
     #[cfg(not(feature = "avx512"))]
     {
-        incant!(
-            adler32_impl(adler, data),
-            [v3, arm_v3, arm_v2, neon, wasm128]
-        )
+        incant!(adler32_impl(adler, data), [v3, arm_v2, neon, wasm128])
     }
 }
 
@@ -524,114 +521,11 @@ fn adler32_impl_v3(_token: Desktop64, adler: u32, data: &[u8]) -> u32 {
 }
 
 // ---------------------------------------------------------------------------
-// ARM dotprod implementation (arm64-v3: Arm64V3Token = ARMv8.3+)
+// ARM dotprod implementation (arm64-v2: Arm64V2Token = ARMv8.2+ with dotprod)
 //
 // Uses `vdotq_u32` (4-byte unsigned dot product) for both s1 and s2
 // accumulation. Processes 64 bytes per inner loop iteration with 4
 // independent accumulators. Ported from libdeflate's adler32_arm_neon_dotprod.
-// ---------------------------------------------------------------------------
-#[cfg(target_arch = "aarch64")]
-#[arcane]
-fn adler32_impl_arm_v3(_token: Arm64V3Token, adler: u32, data: &[u8]) -> u32 {
-    use safe_unaligned_simd::aarch64::vld1q_u8;
-
-    static MULTS_A: [u8; 16] = [
-        64, 63, 62, 61, 60, 59, 58, 57, 56, 55, 54, 53, 52, 51, 50, 49,
-    ];
-    static MULTS_B: [u8; 16] = [
-        48, 47, 46, 45, 44, 43, 42, 41, 40, 39, 38, 37, 36, 35, 34, 33,
-    ];
-    static MULTS_C: [u8; 16] = [
-        32, 31, 30, 29, 28, 27, 26, 25, 24, 23, 22, 21, 20, 19, 18, 17,
-    ];
-    static MULTS_D: [u8; 16] = [16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1];
-
-    let mults_a = vld1q_u8(&MULTS_A);
-    let mults_b = vld1q_u8(&MULTS_B);
-    let mults_c = vld1q_u8(&MULTS_C);
-    let mults_d = vld1q_u8(&MULTS_D);
-    let ones = vdupq_n_u8(1);
-
-    let mut s1 = adler & 0xFFFF;
-    let mut s2 = adler >> 16;
-    let mut remaining = data;
-
-    while !remaining.is_empty() {
-        let n = remaining.len().min(MAX_CHUNK_LEN & !63);
-        let (chunk, rest) = remaining.split_at(n);
-        remaining = rest;
-        let mut p = chunk;
-
-        if p.len() >= 64 {
-            let mut v_s1_a = vdupq_n_u32(0);
-            let mut v_s1_b = vdupq_n_u32(0);
-            let mut v_s1_c = vdupq_n_u32(0);
-            let mut v_s1_d = vdupq_n_u32(0);
-            let mut v_s2_a = vdupq_n_u32(0);
-            let mut v_s2_b = vdupq_n_u32(0);
-            let mut v_s2_c = vdupq_n_u32(0);
-            let mut v_s2_d = vdupq_n_u32(0);
-            let mut v_s1_sums_a = vdupq_n_u32(0);
-            let mut v_s1_sums_b = vdupq_n_u32(0);
-            let mut v_s1_sums_c = vdupq_n_u32(0);
-            let mut v_s1_sums_d = vdupq_n_u32(0);
-
-            let vectorized_len = p.len() & !63;
-            s2 += s1 * vectorized_len as u32;
-
-            while p.len() >= 64 {
-                let data_a: &[u8; 16] = p[0..16].try_into().unwrap();
-                let data_b: &[u8; 16] = p[16..32].try_into().unwrap();
-                let data_c: &[u8; 16] = p[32..48].try_into().unwrap();
-                let data_d: &[u8; 16] = p[48..64].try_into().unwrap();
-                let data_a = vld1q_u8(data_a);
-                let data_b = vld1q_u8(data_b);
-                let data_c = vld1q_u8(data_c);
-                let data_d = vld1q_u8(data_d);
-
-                v_s1_sums_a = vaddq_u32(v_s1_sums_a, v_s1_a);
-                v_s1_a = vdotq_u32(v_s1_a, data_a, ones);
-                v_s2_a = vdotq_u32(v_s2_a, data_a, mults_a);
-
-                v_s1_sums_b = vaddq_u32(v_s1_sums_b, v_s1_b);
-                v_s1_b = vdotq_u32(v_s1_b, data_b, ones);
-                v_s2_b = vdotq_u32(v_s2_b, data_b, mults_b);
-
-                v_s1_sums_c = vaddq_u32(v_s1_sums_c, v_s1_c);
-                v_s1_c = vdotq_u32(v_s1_c, data_c, ones);
-                v_s2_c = vdotq_u32(v_s2_c, data_c, mults_c);
-
-                v_s1_sums_d = vaddq_u32(v_s1_sums_d, v_s1_d);
-                v_s1_d = vdotq_u32(v_s1_d, data_d, ones);
-                v_s2_d = vdotq_u32(v_s2_d, data_d, mults_d);
-
-                p = &p[64..];
-            }
-
-            let v_s1 = vaddq_u32(vaddq_u32(v_s1_a, v_s1_b), vaddq_u32(v_s1_c, v_s1_d));
-            let v_s1_sums = vaddq_u32(
-                vaddq_u32(v_s1_sums_a, v_s1_sums_b),
-                vaddq_u32(v_s1_sums_c, v_s1_sums_d),
-            );
-            let v_s2 = vaddq_u32(
-                vaddq_u32(vaddq_u32(v_s2_a, v_s2_b), vaddq_u32(v_s2_c, v_s2_d)),
-                vqshlq_n_u32::<6>(v_s1_sums), // * 64
-            );
-
-            s1 += vaddvq_u32(v_s1);
-            s2 += vaddvq_u32(v_s2);
-        }
-
-        adler32_chunk_scalar(&mut s1, &mut s2, p);
-    }
-
-    (s2 << 16) | s1
-}
-
-// ---------------------------------------------------------------------------
-// ARM dotprod implementation (arm64-v2: Arm64V2Token = ARMv8.2+ with dotprod)
-//
-// Same algorithm as arm_v3 — Arm64V2Token includes dotprod.
 // ---------------------------------------------------------------------------
 #[cfg(target_arch = "aarch64")]
 #[arcane]

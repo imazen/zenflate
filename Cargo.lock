@@ -522,6 +522,7 @@ name = "zenflate"
 version = "0.1.0"
 dependencies = [
  "archmage",
+ "crc32fast",
  "criterion",
  "enough",
  "fdeflate",
@@ -530,6 +531,7 @@ dependencies = [
  "miniz_oxide",
  "png",
  "safe_unaligned_simd",
+ "simd-adler32",
  "zlib-rs",
 ]
 
