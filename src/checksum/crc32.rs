@@ -50,7 +50,7 @@ pub fn crc32(crc: u32, data: &[u8]) -> u32 {
 /// Algorithm from zlib: CRC-32 is linear over GF(2), so
 /// `crc(A||B) = crc(A) * x^(8*len(B)) + crc(B)` in the CRC polynomial ring.
 /// The multiplication by `x^n mod G(x)` is computed via matrix repeated squaring.
-pub(crate) fn crc32_combine(crc1: u32, crc2: u32, len2: usize) -> u32 {
+pub fn crc32_combine(crc1: u32, crc2: u32, len2: usize) -> u32 {
     if len2 == 0 {
         return crc1;
     }
@@ -796,6 +796,92 @@ fn crc32_slice8(mut crc: u32, data: &[u8]) -> u32 {
     crc
 }
 
+/// Builder-style CRC-32 hasher — drop-in replacement for `crc32fast::Hasher`.
+///
+/// Wraps the SIMD-accelerated [`crc32`] function in a struct that tracks
+/// running state and byte count (for [`combine`](Crc32Hasher::combine)).
+///
+/// ```
+/// use zenflate::Crc32Hasher;
+///
+/// let mut h = Crc32Hasher::new();
+/// h.update(b"Hello");
+/// h.update(b" World");
+/// assert_eq!(h.finalize(), zenflate::crc32(0, b"Hello World"));
+/// ```
+#[derive(Clone, Debug)]
+pub struct Crc32Hasher {
+    crc: u32,
+    amount: u64,
+}
+
+impl Crc32Hasher {
+    /// Create a new hasher with initial CRC of 0.
+    pub fn new() -> Self {
+        Self { crc: 0, amount: 0 }
+    }
+
+    /// Create a hasher seeded with a pre-existing CRC value.
+    pub fn new_with_initial(init: u32) -> Self {
+        Self {
+            crc: init,
+            amount: 0,
+        }
+    }
+
+    /// One-shot CRC-32. Matches `crc32fast::hash()`.
+    pub fn hash(data: &[u8]) -> u32 {
+        crc32(0, data)
+    }
+
+    /// Feed data into the running CRC.
+    pub fn update(&mut self, buf: &[u8]) {
+        self.crc = crc32(self.crc, buf);
+        self.amount += buf.len() as u64;
+    }
+
+    /// Return the current CRC (non-consuming).
+    pub fn finalize(&self) -> u32 {
+        self.crc
+    }
+
+    /// Reset to the initial state.
+    pub fn reset(&mut self) {
+        self.crc = 0;
+        self.amount = 0;
+    }
+
+    /// Combine another hasher's state into this one.
+    ///
+    /// Equivalent to appending `other`'s input data after `self`'s.
+    /// Both hashers must have been started from initial CRC of 0.
+    pub fn combine(&mut self, other: &Self) {
+        self.crc = crc32_combine(self.crc, other.crc, other.amount as usize);
+        self.amount += other.amount;
+    }
+
+    /// Total bytes fed so far.
+    pub fn amount(&self) -> u64 {
+        self.amount
+    }
+}
+
+impl Default for Crc32Hasher {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl core::hash::Hasher for Crc32Hasher {
+    fn finish(&self) -> u64 {
+        self.crc as u64
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        self.update(bytes);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -818,6 +904,81 @@ mod tests {
         let partial = crc32(0, &data[..5]);
         let incremental = crc32(partial, &data[5..]);
         assert_eq!(full, incremental);
+    }
+
+    #[test]
+    fn hasher_new_update_finalize() {
+        let mut h = Crc32Hasher::new();
+        h.update(b"Hello");
+        h.update(b" World");
+        assert_eq!(h.finalize(), crc32(0, b"Hello World"));
+        assert_eq!(h.amount(), 11);
+    }
+
+    #[test]
+    fn hasher_default() {
+        let h = Crc32Hasher::default();
+        assert_eq!(h.finalize(), 0);
+        assert_eq!(h.amount(), 0);
+    }
+
+    #[test]
+    fn hasher_new_with_initial() {
+        let partial = crc32(0, b"Hello");
+        let mut h = Crc32Hasher::new_with_initial(partial);
+        h.update(b" World");
+        assert_eq!(h.finalize(), crc32(0, b"Hello World"));
+    }
+
+    #[test]
+    fn hasher_hash_one_shot() {
+        assert_eq!(Crc32Hasher::hash(b"123456789"), 0xCBF43926);
+        assert_eq!(Crc32Hasher::hash(b"123456789"), crc32(0, b"123456789"));
+    }
+
+    #[test]
+    fn hasher_reset() {
+        let mut h = Crc32Hasher::new();
+        h.update(b"data");
+        h.reset();
+        assert_eq!(h.finalize(), 0);
+        assert_eq!(h.amount(), 0);
+    }
+
+    #[test]
+    fn hasher_combine() {
+        let mut h1 = Crc32Hasher::new();
+        h1.update(b"Hello, ");
+        let mut h2 = Crc32Hasher::new();
+        h2.update(b"World!");
+        h1.combine(&h2);
+        assert_eq!(h1.finalize(), crc32(0, b"Hello, World!"));
+        assert_eq!(h1.amount(), 13);
+    }
+
+    #[test]
+    fn hasher_core_hash_hasher_trait() {
+        use core::hash::Hasher;
+        let mut h = Crc32Hasher::new();
+        Hasher::write(&mut h, b"Hello World");
+        assert_eq!(Hasher::finish(&h), crc32(0, b"Hello World") as u64);
+    }
+
+    #[test]
+    fn hasher_clone() {
+        let mut h = Crc32Hasher::new();
+        h.update(b"Hello");
+        let h2 = h.clone();
+        assert_eq!(h.finalize(), h2.finalize());
+        assert_eq!(h.amount(), h2.amount());
+    }
+
+    #[test]
+    fn hasher_empty_update() {
+        let mut h = Crc32Hasher::new();
+        h.update(b"");
+        assert_eq!(h.finalize(), 0);
+        assert_eq!(h.amount(), 0);
     }
 }
 
@@ -975,6 +1136,36 @@ mod parity {
             token.is_some(),
             "X64V4xToken should be available on this CPU"
         );
+    }
+
+    #[test]
+    fn hasher_parity_with_libdeflater() {
+        let data: Vec<u8> = (0..=255).cycle().take(100_000).collect();
+        let expected = libdeflater::crc32(&data);
+
+        // Single update
+        let mut h = Crc32Hasher::new();
+        h.update(&data);
+        assert_eq!(h.finalize(), expected);
+
+        // Incremental updates
+        let mut h = Crc32Hasher::new();
+        for chunk in data.chunks(1337) {
+            h.update(chunk);
+        }
+        assert_eq!(h.finalize(), expected);
+
+        // Combine
+        let (a, b) = data.split_at(50_000);
+        let mut h1 = Crc32Hasher::new();
+        h1.update(a);
+        let mut h2 = Crc32Hasher::new();
+        h2.update(b);
+        h1.combine(&h2);
+        assert_eq!(h1.finalize(), expected);
+
+        // One-shot hash
+        assert_eq!(Crc32Hasher::hash(&data), expected);
     }
 
     /// Verify all SIMD dispatch tiers produce identical results to scalar.

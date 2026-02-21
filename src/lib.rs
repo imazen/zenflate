@@ -51,7 +51,7 @@ pub mod decompress;
 #[cfg(feature = "alloc")]
 pub(crate) mod matchfinder;
 
-pub use checksum::{adler32, crc32};
+pub use checksum::{Adler32Hasher, Crc32Hasher, adler32, adler32_combine, crc32, crc32_combine};
 #[cfg(feature = "alloc")]
 pub use compress::{CompressionLevel, Compressor};
 #[cfg(all(feature = "alloc", feature = "std"))]

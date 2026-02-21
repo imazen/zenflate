@@ -50,8 +50,7 @@ pub fn adler32(adler: u32, data: &[u8]) -> u32 {
 /// Given `a1 = adler32(1, data1)` and `a2 = adler32(1, data2)`, returns
 /// `adler32(1, data1 || data2)` in O(1) time without needing the original data.
 /// Used for parallel checksum computation.
-#[allow(dead_code)] // Used by future zlib_compress_parallel
-pub(crate) fn adler32_combine(adler1: u32, adler2: u32, len2: usize) -> u32 {
+pub fn adler32_combine(adler1: u32, adler2: u32, len2: usize) -> u32 {
     let s1_1 = adler1 & 0xFFFF;
     let s2_1 = adler1 >> 16;
     let s1_2 = adler2 & 0xFFFF;
@@ -930,6 +929,90 @@ fn adler32_chunk_scalar(s1: &mut u32, s2: &mut u32, data: &[u8]) {
     *s2 %= DIVISOR;
 }
 
+/// Builder-style Adler-32 hasher — drop-in replacement for `simd_adler32::Adler32`.
+///
+/// Wraps the SIMD-accelerated [`adler32`] function in a struct that tracks
+/// running state and byte count (for [`combine`](Adler32Hasher::combine)).
+///
+/// ```
+/// use zenflate::Adler32Hasher;
+///
+/// let mut h = Adler32Hasher::new();
+/// h.write(b"Hello");
+/// h.write(b" World");
+/// assert_eq!(h.finish(), zenflate::adler32(1, b"Hello World"));
+/// ```
+#[derive(Clone, Debug)]
+pub struct Adler32Hasher {
+    checksum: u32,
+    amount: u64,
+}
+
+impl Adler32Hasher {
+    /// Create a new hasher with the standard initial value (1).
+    pub fn new() -> Self {
+        Self {
+            checksum: 1,
+            amount: 0,
+        }
+    }
+
+    /// Create a hasher seeded with a pre-existing checksum.
+    pub fn from_checksum(checksum: u32) -> Self {
+        Self {
+            checksum,
+            amount: 0,
+        }
+    }
+
+    /// Feed data into the running checksum.
+    pub fn write(&mut self, data: &[u8]) {
+        self.checksum = adler32(self.checksum, data);
+        self.amount += data.len() as u64;
+    }
+
+    /// Return the current checksum (non-consuming).
+    pub fn finish(&self) -> u32 {
+        self.checksum
+    }
+
+    /// Reset to the initial state.
+    pub fn reset(&mut self) {
+        self.checksum = 1;
+        self.amount = 0;
+    }
+
+    /// Combine another hasher's state into this one.
+    ///
+    /// Equivalent to appending `other`'s input data after `self`'s.
+    /// Both hashers must have been started from the initial value (1).
+    pub fn combine(&mut self, other: &Self) {
+        self.checksum = adler32_combine(self.checksum, other.checksum, other.amount as usize);
+        self.amount += other.amount;
+    }
+
+    /// Total bytes fed so far.
+    pub fn amount(&self) -> u64 {
+        self.amount
+    }
+}
+
+impl Default for Adler32Hasher {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl core::hash::Hasher for Adler32Hasher {
+    fn finish(&self) -> u64 {
+        self.checksum as u64
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        Adler32Hasher::write(self, bytes);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -961,6 +1044,75 @@ mod tests {
         let partial = adler32(1, &data[..5]);
         let incremental = adler32(partial, &data[5..]);
         assert_eq!(full, incremental);
+    }
+
+    #[test]
+    fn hasher_new_write_finish() {
+        let mut h = Adler32Hasher::new();
+        h.write(b"Hello");
+        h.write(b" World");
+        assert_eq!(h.finish(), adler32(1, b"Hello World"));
+        assert_eq!(h.amount(), 11);
+    }
+
+    #[test]
+    fn hasher_default() {
+        let h = Adler32Hasher::default();
+        assert_eq!(h.finish(), 1);
+        assert_eq!(h.amount(), 0);
+    }
+
+    #[test]
+    fn hasher_from_checksum() {
+        let partial = adler32(1, b"Hello");
+        let mut h = Adler32Hasher::from_checksum(partial);
+        h.write(b" World");
+        assert_eq!(h.finish(), adler32(1, b"Hello World"));
+    }
+
+    #[test]
+    fn hasher_reset() {
+        let mut h = Adler32Hasher::new();
+        h.write(b"data");
+        h.reset();
+        assert_eq!(h.finish(), 1);
+        assert_eq!(h.amount(), 0);
+    }
+
+    #[test]
+    fn hasher_combine() {
+        let mut h1 = Adler32Hasher::new();
+        h1.write(b"Hello, ");
+        let mut h2 = Adler32Hasher::new();
+        h2.write(b"World!");
+        h1.combine(&h2);
+        assert_eq!(h1.finish(), adler32(1, b"Hello, World!"));
+        assert_eq!(h1.amount(), 13);
+    }
+
+    #[test]
+    fn hasher_core_hash_hasher_trait() {
+        use core::hash::Hasher;
+        let mut h = Adler32Hasher::new();
+        Hasher::write(&mut h, b"Hello World");
+        assert_eq!(Hasher::finish(&h), adler32(1, b"Hello World") as u64);
+    }
+
+    #[test]
+    fn hasher_clone() {
+        let mut h = Adler32Hasher::new();
+        h.write(b"Hello");
+        let h2 = h.clone();
+        assert_eq!(h.finish(), h2.finish());
+        assert_eq!(h.amount(), h2.amount());
+    }
+
+    #[test]
+    fn hasher_empty_write() {
+        let mut h = Adler32Hasher::new();
+        h.write(b"");
+        assert_eq!(h.finish(), 1);
+        assert_eq!(h.amount(), 0);
     }
 }
 
@@ -1076,6 +1228,33 @@ mod parity {
         let data = b"test data";
         let adler = super::adler32(1, data);
         assert_eq!(super::adler32_combine(adler, 1, 0), adler);
+    }
+
+    #[test]
+    fn hasher_parity_with_libdeflater() {
+        let data: alloc::vec::Vec<u8> = (0..=255).cycle().take(100_000).collect();
+        let expected = libdeflater::adler32(&data);
+
+        // Single write
+        let mut h = Adler32Hasher::new();
+        h.write(&data);
+        assert_eq!(h.finish(), expected);
+
+        // Incremental writes
+        let mut h = Adler32Hasher::new();
+        for chunk in data.chunks(1337) {
+            h.write(chunk);
+        }
+        assert_eq!(h.finish(), expected);
+
+        // Combine
+        let (a, b) = data.split_at(50_000);
+        let mut h1 = Adler32Hasher::new();
+        h1.write(a);
+        let mut h2 = Adler32Hasher::new();
+        h2.write(b);
+        h1.combine(&h2);
+        assert_eq!(h1.finish(), expected);
     }
 
     /// Verify all SIMD dispatch tiers produce identical results to scalar.
