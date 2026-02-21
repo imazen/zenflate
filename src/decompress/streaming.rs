@@ -1078,6 +1078,14 @@ impl<S: InputSource> StreamDecompressor<S> {
                             &self.inner.offset_decode_table,
                             bitbuf & bitmask(OFFSET_TABLEBITS),
                         );
+
+                        // Conditional refill: after a multi-literal chain +
+                        // length decode, bitsleft may be too low to consume
+                        // the full offset entry and preload next litlen.
+                        if bitsleft < 28 + self.inner.litlen_tablebits {
+                            refill_bits_fast(&mut bitbuf, &mut bitsleft, input, &mut in_pos);
+                        }
+
                         if oentry & HUFFDEC_EXCEPTIONAL != 0 {
                             bitbuf >>= OFFSET_TABLEBITS as u64;
                             bitsleft -= OFFSET_TABLEBITS;

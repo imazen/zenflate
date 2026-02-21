@@ -1096,6 +1096,17 @@ impl Decompressor {
                         &self.offset_decode_table,
                         bitbuf & bitmask(OFFSET_TABLEBITS),
                     );
+
+                    // Conditional refill: after a multi-literal chain +
+                    // length decode, bitsleft may be too low to consume the
+                    // full offset entry (up to 28 bits) and still preload
+                    // the next litlen entry. Mirror libdeflate's conditional
+                    // REFILL_BITS_IN_FASTLOOP between offset preload and
+                    // offset consumption on 64-bit.
+                    if bitsleft < 28 + self.litlen_tablebits {
+                        refill_bits_fast(&mut bitbuf, &mut bitsleft, input, &mut in_pos);
+                    }
+
                     if oentry & HUFFDEC_EXCEPTIONAL != 0 {
                         bitbuf >>= OFFSET_TABLEBITS as u64;
                         bitsleft -= OFFSET_TABLEBITS;
