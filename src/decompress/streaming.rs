@@ -655,33 +655,37 @@ impl<S: InputSource> StreamDecompressor<S> {
                 precode_idx: 1,
             };
         } else if block_type == DEFLATE_BLOCKTYPE_UNCOMPRESSED {
-            self.bitsleft -= 3;
+            // Uncompressed block: skip 3 header bits + padding to byte boundary,
+            // then read LEN (16-bit LE) and NLEN (16-bit LE).
+            //
+            // We extract LEN/NLEN directly from bitbuf rather than rewinding
+            // input_pos, because staging buffer compaction can reset input_pos
+            // to near 0, making rewind impossible.
+            //
+            // After the 3 header bits, (bitsleft - 3) % 8 gives the padding
+            // to the next stream byte boundary.
+            let skip = 3 + (self.bitsleft - 3) % 8;
+            self.bitbuf >>= skip as u64;
+            self.bitsleft -= skip;
 
-            let extra_bytes = (self.bitsleft / 8) as usize;
-            if self.overread_count > extra_bytes {
+            // Now bitbuf is byte-aligned. We need 4 bytes for LEN/NLEN.
+            let real_bytes = ((self.bitsleft / 8) as usize).saturating_sub(self.overread_count);
+            if real_bytes < 4 {
                 return Err(bad.into());
             }
-            let rewind = extra_bytes - self.overread_count;
-            if rewind > self.input_pos {
-                return Err(bad.into());
-            }
-            self.input_pos -= rewind;
-            self.overread_count = 0;
-            self.bitbuf = 0;
-            self.bitsleft = 0;
 
-            let inp = &self.input_buf[..self.input_len];
-            if self.input_pos + 4 > inp.len() {
-                return Err(bad.into());
-            }
-            let len = u16::from_le_bytes([inp[self.input_pos], inp[self.input_pos + 1]]) as usize;
-            let nlen = u16::from_le_bytes([inp[self.input_pos + 2], inp[self.input_pos + 3]]);
-            self.input_pos += 4;
+            let len = (self.bitbuf & 0xFFFF) as u16 as usize;
+            let nlen = ((self.bitbuf >> 16) & 0xFFFF) as u16;
+            self.bitbuf >>= 32;
+            self.bitsleft -= 32;
 
             if len != (!nlen) as usize {
                 return Err(bad.into());
             }
 
+            // Any remaining real bytes in bitbuf are the first bytes of the
+            // uncompressed data. copy_uncompressed drains them before reading
+            // from the staging buffer.
             self.state = StreamState::UncompressedData { remaining: len };
         } else if block_type == DEFLATE_BLOCKTYPE_STATIC_HUFFMAN {
             self.bitbuf >>= 3;
@@ -1325,7 +1329,41 @@ impl<S: InputSource> StreamDecompressor<S> {
     // Uncompressed block copying
     // -----------------------------------------------------------------------
 
-    fn copy_uncompressed(&mut self, remaining: usize) -> Result<(), StreamError<S::Error>> {
+    fn copy_uncompressed(&mut self, mut remaining: usize) -> Result<(), StreamError<S::Error>> {
+        // Phase 1: Drain any real bytes left in bitbuf from header parsing.
+        // After parse_block_header extracts LEN/NLEN, the remaining bytes in
+        // bitbuf are the first bytes of uncompressed data (overread bytes at
+        // the high end are garbage and must not be copied).
+        while remaining > 0 && self.output_space() > 0 {
+            let real_in_bitbuf = ((self.bitsleft / 8) as usize).saturating_sub(self.overread_count);
+            if real_in_bitbuf == 0 {
+                break;
+            }
+            self.buffer[self.write_pos] = (self.bitbuf & 0xFF) as u8;
+            self.bitbuf >>= 8;
+            self.bitsleft -= 8;
+            self.write_pos += 1;
+            remaining -= 1;
+        }
+
+        // If all real bytes are drained, clear bitbuf entirely
+        if (self.bitsleft / 8) as usize <= self.overread_count {
+            self.bitbuf = 0;
+            self.bitsleft = 0;
+            self.overread_count = 0;
+        }
+
+        if remaining == 0 {
+            self.finish_block()?;
+            return Ok(());
+        }
+
+        if self.output_space() == 0 {
+            self.state = StreamState::UncompressedData { remaining };
+            return Ok(());
+        }
+
+        // Phase 2: Read from staging buffer (bitbuf is empty now).
         self.ensure_input_bytes(1).map_err(StreamError::Source)?;
         let available = (self.input_len - self.input_pos).min(remaining);
         let can_write = available.min(self.output_space());
