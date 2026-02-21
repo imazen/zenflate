@@ -661,7 +661,11 @@ impl<S: InputSource> StreamDecompressor<S> {
             if self.overread_count > extra_bytes {
                 return Err(bad.into());
             }
-            self.input_pos -= extra_bytes - self.overread_count;
+            let rewind = extra_bytes - self.overread_count;
+            if rewind > self.input_pos {
+                return Err(bad.into());
+            }
+            self.input_pos -= rewind;
             self.overread_count = 0;
             self.bitbuf = 0;
             self.bitsleft = 0;
