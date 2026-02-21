@@ -487,15 +487,6 @@ pub(crate) fn refill_bits_fast(
     *bitsleft |= 56;
 }
 
-/// Copy an 8-byte word within the output buffer (for stride-by-offset match copies).
-/// The read completes before the write, so overlapping src/dst ranges are safe.
-#[inline(always)]
-fn copy_word(output: &mut [u8], src: usize, dst: usize) {
-    let mut tmp = [0u8; 8];
-    tmp.copy_from_slice(&output[src..src + 8]);
-    output[dst..dst + 8].copy_from_slice(&tmp);
-}
-
 /// Look up a decode table entry by index.
 #[inline(always)]
 pub(crate) fn table_lookup(table: &[u32], idx: u64) -> u32 {
@@ -526,10 +517,6 @@ pub(crate) fn fastloop_match_copy(
     length: usize,
     offset: usize,
 ) {
-    // Unified path for safe and unchecked modes. The `copy_word` function
-    // already uses raw pointers when `unchecked` is enabled.
-    // Keeping a single code path avoids instruction cache bloat from duplicated
-    // match copy logic (benchmarked: separate unchecked paths regressed 6%).
     let end = out_pos + length;
     if offset >= length {
         // Non-overlapping: memcpy via copy_within (SIMD-optimized in libc)
@@ -539,12 +526,9 @@ pub(crate) fn fastloop_match_copy(
         let byte = load_byte(output, src_start);
         output[out_pos..end].fill(byte);
     } else if offset < 8 {
-        // Small offset (2-7): stride-by-offset word copy
-        let work = &mut output[src_start..end + 8];
-        let mut d = offset;
-        while d + 8 <= work.len() {
-            copy_word(work, d - offset, d);
-            d += offset;
+        // Small offset (2-7): byte-by-byte to handle overlap correctly.
+        for i in 0..length {
+            output[out_pos + i] = output[src_start + i];
         }
     } else {
         // Overlapping with offset >= 8: copy first `offset` bytes, then forward
@@ -1132,12 +1116,14 @@ impl Decompressor {
                         return Err(bad);
                     }
 
-                    // Preload next entry and refill BEFORE copy to overlap latency
-                    entry = table_lookup(&self.litlen_decode_table, bitbuf & litlen_tablemask);
+                    // Refill BEFORE preload: after a multi-literal + match path,
+                    // bitsleft can be < litlen_tablebits, causing the preload to
+                    // read stale zero bits. Refilling first ensures enough valid
+                    // bits for the table lookup.
                     refill_bits_fast(&mut bitbuf, &mut bitsleft, input, &mut in_pos);
+                    entry = table_lookup(&self.litlen_decode_table, bitbuf & litlen_tablemask);
 
-                    // Copy match data — dispatches to unchecked raw-pointer
-                    // word copies or safe slice operations.
+                    // Copy match data
                     fastloop_match_copy(output, out_pos, out_pos - offset, length, offset);
                     out_pos += length;
 
