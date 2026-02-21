@@ -1,13 +1,15 @@
 //! zenflate: Pure Rust DEFLATE/zlib/gzip compression and decompression.
 //!
 //! A port of [libdeflate](https://github.com/ebiggers/libdeflate) to safe Rust.
-//! Provides **buffer-to-buffer** (non-streaming) compression and decompression for
-//! the DEFLATE, zlib, and gzip formats. The entire input and output must fit in
-//! memory — there are no `Read`/`Write` adapters. This design enables the
-//! aggressive optimizations that make zenflate 2x faster than flate2/miniz_oxide.
 //!
-//! For streaming use cases, consider using zenflate as a backend inside a
-//! buffering wrapper, or use `flate2` directly.
+//! Two decompression modes:
+//!
+//! - **Whole-buffer** ([`Decompressor`]) — fastest, requires input and output in memory.
+//! - **Streaming** ([`StreamDecompressor`]) — pull-based, works with any [`InputSource`]
+//!   including `&[u8]` (zero-cost) and [`BufReadSource`] for `std::io::BufRead`.
+//!   Implements `Read` + `BufRead` when wrapping a `BufRead` source.
+//!
+//! Compression is buffer-to-buffer only ([`Compressor`]).
 //!
 //! # Quick start
 //!
@@ -55,7 +57,7 @@ pub use compress::{CompressionLevel, Compressor};
 #[cfg(all(feature = "alloc", feature = "std"))]
 pub use decompress::streaming::BufReadSource;
 #[cfg(feature = "alloc")]
-pub use decompress::streaming::{InputSource, StreamDecompressor};
+pub use decompress::streaming::{DEFAULT_CAPACITY, InputSource, StreamDecompressor};
 pub use decompress::{DecompressOutcome, Decompressor};
 pub use enough::{Stop, StopReason, Unstoppable};
 #[cfg(feature = "alloc")]

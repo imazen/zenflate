@@ -3,6 +3,13 @@
 //! Provides [`StreamDecompressor`], a pull-based streaming decompressor that
 //! works with any input source via the [`InputSource`] trait. Supports
 //! `no_std + alloc` environments.
+//!
+//! # Cancellation
+//!
+//! Unlike the whole-buffer [`Decompressor`](super::Decompressor), the streaming
+//! API doesn't take a `Stop` parameter — the caller controls the loop and can
+//! check cancellation between `fill()` calls. Each `fill()` call is bounded by
+//! the output capacity, so it completes quickly.
 
 use alloc::vec;
 use alloc::vec::Vec;
@@ -130,6 +137,12 @@ const INPUT_BUF_SIZE: usize = 512;
 /// Minimum lookback required for match references (32KB window).
 const LOOKBACK_SIZE: usize = 32 * 1024;
 
+/// Default output buffer capacity for [`StreamDecompressor`]: 64 KiB.
+///
+/// Good for general-purpose streaming. For scanline-at-a-time workloads
+/// (e.g. PNG), use `2 * row_stride` instead.
+pub const DEFAULT_CAPACITY: usize = 64 * 1024;
+
 // ---------------------------------------------------------------------------
 // StreamDecompressor
 // ---------------------------------------------------------------------------
@@ -139,12 +152,22 @@ const LOOKBACK_SIZE: usize = 32 * 1024;
 /// Generic over any [`InputSource`]. For `&[u8]`, this has zero overhead
 /// from the source abstraction (the `Result<_, Infallible>` is eliminated).
 ///
-/// # Usage pattern
+/// # Capacity
+///
+/// The `capacity` parameter controls how many bytes of decompressed output
+/// can be buffered before the caller must drain via [`peek()`](Self::peek) /
+/// [`advance()`](Self::advance). Internally, the buffer is `32 KiB lookback + capacity`.
+///
+/// - For **scanline-at-a-time** (e.g. PNG): `2 * row_stride`
+/// - For **general streaming**: [`DEFAULT_CAPACITY`] (64 KiB)
+/// - Larger values mean fewer compaction cycles; smaller values use less memory.
+///
+/// # Usage
 ///
 /// ```no_run
-/// # use zenflate::decompress::streaming::{StreamDecompressor, InputSource};
+/// # use zenflate::decompress::streaming::{StreamDecompressor, InputSource, DEFAULT_CAPACITY};
 /// # let compressed_data: &[u8] = &[];
-/// let mut dec = StreamDecompressor::deflate(compressed_data, 64 * 1024);
+/// let mut dec = StreamDecompressor::deflate(compressed_data, DEFAULT_CAPACITY);
 /// while !dec.is_done() {
 ///     dec.fill().unwrap();
 ///     let data = dec.peek();
@@ -189,8 +212,16 @@ pub struct StreamDecompressor<S> {
     checksum_watermark: usize,
 }
 
+impl<S> StreamDecompressor<S> {
+    /// Consume the decompressor and return the underlying input source.
+    pub fn into_inner(self) -> S {
+        self.source
+    }
+}
+
 impl<S: InputSource> StreamDecompressor<S> {
     fn new(source: S, capacity: usize, wrapper: WrapperFormat) -> Self {
+        assert!(capacity > 0, "capacity must be at least 1");
         let buf_size = LOOKBACK_SIZE + capacity;
         let initial_state = if wrapper == WrapperFormat::Raw {
             StreamState::BlockHeader
@@ -226,16 +257,36 @@ impl<S: InputSource> StreamDecompressor<S> {
     }
 
     /// Create a streaming decompressor for raw DEFLATE data.
+    ///
+    /// `capacity` is the maximum bytes of decompressed output buffered
+    /// between [`peek()`](Self::peek)/[`advance()`](Self::advance) calls.
+    /// Use [`DEFAULT_CAPACITY`] if unsure.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `capacity` is 0.
     pub fn deflate(source: S, capacity: usize) -> Self {
         Self::new(source, capacity, WrapperFormat::Raw)
     }
 
     /// Create a streaming decompressor for zlib-wrapped data.
+    ///
+    /// See [`deflate()`](Self::deflate) for the meaning of `capacity`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `capacity` is 0.
     pub fn zlib(source: S, capacity: usize) -> Self {
         Self::new(source, capacity, WrapperFormat::Zlib)
     }
 
     /// Create a streaming decompressor for gzip-wrapped data.
+    ///
+    /// See [`deflate()`](Self::deflate) for the meaning of `capacity`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `capacity` is 0.
     pub fn gzip(source: S, capacity: usize) -> Self {
         Self::new(source, capacity, WrapperFormat::Gzip)
     }
@@ -267,7 +318,11 @@ impl<S: InputSource> StreamDecompressor<S> {
         self.state == StreamState::Done
     }
 
-    /// Reset the decompressor for a new stream, keeping buffer allocations.
+    /// Reset the decompressor for a new stream of the same format,
+    /// keeping buffer allocations.
+    ///
+    /// The wrapper format (DEFLATE/zlib/gzip) is preserved from construction.
+    /// To switch formats, construct a new `StreamDecompressor` instead.
     pub fn reset(&mut self, source: S) {
         let wrapper = self.wrapper;
         let checksum_init = match wrapper {
@@ -1387,24 +1442,6 @@ impl<S: InputSource> StreamDecompressor<S> {
 // ---------------------------------------------------------------------------
 
 #[cfg(feature = "std")]
-impl<R: std::io::BufRead> StreamDecompressor<BufReadSource<R>> {
-    /// Create a streaming decompressor that reads raw DEFLATE from a `BufRead`.
-    pub fn from_reader_deflate(reader: R, capacity: usize) -> Self {
-        Self::deflate(BufReadSource(reader), capacity)
-    }
-
-    /// Create a streaming decompressor that reads zlib from a `BufRead`.
-    pub fn from_reader_zlib(reader: R, capacity: usize) -> Self {
-        Self::zlib(BufReadSource(reader), capacity)
-    }
-
-    /// Create a streaming decompressor that reads gzip from a `BufRead`.
-    pub fn from_reader_gzip(reader: R, capacity: usize) -> Self {
-        Self::gzip(BufReadSource(reader), capacity)
-    }
-}
-
-#[cfg(feature = "std")]
 impl<R: std::io::BufRead> std::io::BufRead for StreamDecompressor<BufReadSource<R>> {
     fn fill_buf(&mut self) -> std::io::Result<&[u8]> {
         if self.peek().is_empty() && !self.is_done() {
@@ -1787,7 +1824,7 @@ mod tests {
 
         let cursor = std::io::Cursor::new(&compressed[..csize]);
         let reader = std::io::BufReader::new(cursor);
-        let mut dec = StreamDecompressor::from_reader_gzip(reader, 64 * 1024);
+        let mut dec = StreamDecompressor::gzip(BufReadSource(reader), 64 * 1024);
 
         let mut output = Vec::new();
         std::io::Read::read_to_end(&mut dec, &mut output).unwrap();
