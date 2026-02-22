@@ -367,7 +367,11 @@ impl Decompressor {
             while pos < input.len() && input[pos] != 0 {
                 pos += 1;
             }
-            pos += 1;
+            // Must have found a null terminator, not run off the end
+            if pos >= input.len() {
+                return Err(hdr_err);
+            }
+            pos += 1; // skip the null terminator
             if input.len() - pos < GZIP_FOOTER_SIZE {
                 return Err(hdr_err);
             }
@@ -377,6 +381,9 @@ impl Decompressor {
         if flg & GZIP_FCOMMENT != 0 {
             while pos < input.len() && input[pos] != 0 {
                 pos += 1;
+            }
+            if pos >= input.len() {
+                return Err(hdr_err);
             }
             pos += 1;
             if input.len() - pos < GZIP_FOOTER_SIZE {
@@ -1486,6 +1493,282 @@ mod tests {
                 .output_written;
             assert_eq!(out_size, data.len(), "gzip level {level}");
             assert_eq!(output, data, "gzip level {level}");
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Edge case / robustness tests (inspired by flate2 issues #258, #474, #499)
+    // -----------------------------------------------------------------------
+
+    /// flate2 #499: short garbage input silently accepted.
+    /// Verify we reject invalid inputs of all short lengths.
+    #[test]
+    fn reject_short_garbage_deflate() {
+        let mut d = Decompressor::new();
+        let mut output = vec![0u8; 1024];
+        for len in 0..=16 {
+            let garbage: Vec<u8> = (0..len).collect();
+            // Most short inputs are not valid DEFLATE streams
+            // (some 1-2 byte inputs might be valid empty blocks, but random bytes shouldn't be)
+            let _ = d.deflate_decompress(&garbage, &mut output, enough::Unstoppable);
+            // No panic = success. We don't assert error because a few short
+            // byte sequences are technically valid DEFLATE (e.g., 0x03 0x00 is
+            // a valid empty static Huffman block).
+        }
+    }
+
+    /// flate2 #258/#499: invalid zlib data silently accepted.
+    /// Single-byte and short garbage must return InvalidHeader.
+    #[test]
+    fn reject_short_garbage_zlib() {
+        let mut d = Decompressor::new();
+        let mut output = vec![0u8; 1024];
+        // Anything shorter than ZLIB_MIN_OVERHEAD (6) must be rejected
+        for len in 0..6 {
+            let garbage: Vec<u8> = (0..len).map(|i| i as u8 + 77).collect();
+            let err = d
+                .zlib_decompress(&garbage, &mut output, enough::Unstoppable)
+                .unwrap_err();
+            assert_eq!(
+                err,
+                DecompressionError::InvalidHeader,
+                "zlib should reject {len}-byte garbage"
+            );
+        }
+        // Specific flate2 #258 reproduction: single byte [77]
+        let err = d
+            .zlib_decompress(&[77], &mut output, enough::Unstoppable)
+            .unwrap_err();
+        assert_eq!(err, DecompressionError::InvalidHeader);
+    }
+
+    /// flate2 #499: short garbage gzip input.
+    /// Anything shorter than GZIP_MIN_OVERHEAD (18) must be rejected.
+    #[test]
+    fn reject_short_garbage_gzip() {
+        let mut d = Decompressor::new();
+        let mut output = vec![0u8; 1024];
+        for len in 0..18 {
+            let garbage: Vec<u8> = (0..len).map(|i| i as u8).collect();
+            let err = d
+                .gzip_decompress(&garbage, &mut output, enough::Unstoppable)
+                .unwrap_err();
+            assert_eq!(
+                err,
+                DecompressionError::InvalidHeader,
+                "gzip should reject {len}-byte garbage"
+            );
+        }
+    }
+
+    /// Verify that zlib correctly rejects various invalid headers.
+    #[test]
+    fn reject_invalid_zlib_headers() {
+        let mut d = Decompressor::new();
+        let mut output = vec![0u8; 1024];
+
+        // Bad compression method (not 8)
+        let err = d
+            .zlib_decompress(&[0x19, 0x01, 0, 0, 0, 0], &mut output, enough::Unstoppable)
+            .unwrap_err();
+        assert_eq!(err, DecompressionError::InvalidHeader);
+
+        // Bad CINFO (window > 32K)
+        let err = d
+            .zlib_decompress(&[0x88, 0x01, 0, 0, 0, 0], &mut output, enough::Unstoppable)
+            .unwrap_err();
+        assert_eq!(err, DecompressionError::InvalidHeader);
+
+        // Bad checksum (CMF*256 + FLG not multiple of 31)
+        let err = d
+            .zlib_decompress(&[0x78, 0x00, 0, 0, 0, 0], &mut output, enough::Unstoppable)
+            .unwrap_err();
+        assert_eq!(err, DecompressionError::InvalidHeader);
+
+        // FDICT set (not supported)
+        // 0x78 0xBB: CM=8, CINFO=7, FDICT=1, but checksum must be valid
+        // Let's find a valid FDICT header: CMF=0x78, FLG must have bit5=1
+        // and (0x78 << 8 | FLG) % 31 == 0. 0x78 << 8 = 0x7800.
+        // 0x7800 + FLG ≡ 0 (mod 31). 0x7800 % 31 = 30720 % 31 = 30720 - 991*31 = 30720-30721 = need to recalc
+        // Just set FDICT bit and fix checksum: 0x78 0xBB = 0x78BB, 0x78BB % 31 = 30907 % 31 = 30907 - 997*31 = 30907-30907 = 0. Valid!
+        let err = d
+            .zlib_decompress(&[0x78, 0xBB, 0, 0, 0, 0], &mut output, enough::Unstoppable)
+            .unwrap_err();
+        assert_eq!(err, DecompressionError::InvalidHeader);
+    }
+
+    /// Verify gzip rejects invalid magic bytes, bad CM, and reserved flags.
+    #[test]
+    fn reject_invalid_gzip_headers() {
+        let mut d = Decompressor::new();
+        let mut output = vec![0u8; 1024];
+
+        // Wrong magic bytes
+        let mut bad_magic = vec![0u8; 20];
+        bad_magic[0] = 0x1F;
+        bad_magic[1] = 0x00; // wrong ID2
+        let err = d
+            .gzip_decompress(&bad_magic, &mut output, enough::Unstoppable)
+            .unwrap_err();
+        assert_eq!(err, DecompressionError::InvalidHeader);
+
+        // Wrong compression method
+        let mut bad_cm = vec![0u8; 20];
+        bad_cm[0] = GZIP_ID1;
+        bad_cm[1] = GZIP_ID2;
+        bad_cm[2] = 9; // not DEFLATE
+        let err = d
+            .gzip_decompress(&bad_cm, &mut output, enough::Unstoppable)
+            .unwrap_err();
+        assert_eq!(err, DecompressionError::InvalidHeader);
+
+        // Reserved flag bits set
+        let mut reserved = vec![0u8; 20];
+        reserved[0] = GZIP_ID1;
+        reserved[1] = GZIP_ID2;
+        reserved[2] = GZIP_CM_DEFLATE;
+        reserved[3] = 0xE0; // reserved bits
+        let err = d
+            .gzip_decompress(&reserved, &mut output, enough::Unstoppable)
+            .unwrap_err();
+        assert_eq!(err, DecompressionError::InvalidHeader);
+    }
+
+    /// Regression test for FNAME without null terminator.
+    /// Before the fix, this caused a usize underflow (debug panic, release UB).
+    #[test]
+    fn reject_gzip_fname_no_null_terminator() {
+        let mut d = Decompressor::new();
+        let mut output = vec![0u8; 1024];
+
+        // Valid gzip header with FNAME flag, but the name field has no null terminator
+        let mut input = vec![0u8; 30];
+        input[0] = GZIP_ID1;
+        input[1] = GZIP_ID2;
+        input[2] = GZIP_CM_DEFLATE;
+        input[3] = GZIP_FNAME; // FNAME flag
+        // bytes 4-9: MTIME + XFL + OS (zeros)
+        // bytes 10+: "filename" with no null terminator
+        for i in 10..30 {
+            input[i] = b'A';
+        }
+
+        let err = d
+            .gzip_decompress(&input, &mut output, enough::Unstoppable)
+            .unwrap_err();
+        assert_eq!(err, DecompressionError::InvalidHeader);
+    }
+
+    /// Regression test for FCOMMENT without null terminator.
+    #[test]
+    fn reject_gzip_fcomment_no_null_terminator() {
+        let mut d = Decompressor::new();
+        let mut output = vec![0u8; 1024];
+
+        let mut input = vec![0u8; 30];
+        input[0] = GZIP_ID1;
+        input[1] = GZIP_ID2;
+        input[2] = GZIP_CM_DEFLATE;
+        input[3] = GZIP_FCOMMENT;
+        for i in 10..30 {
+            input[i] = b'C';
+        }
+
+        let err = d
+            .gzip_decompress(&input, &mut output, enough::Unstoppable)
+            .unwrap_err();
+        assert_eq!(err, DecompressionError::InvalidHeader);
+    }
+
+    /// Regression test for FNAME + FCOMMENT both without null terminators.
+    #[test]
+    fn reject_gzip_fname_and_fcomment_no_null() {
+        let mut d = Decompressor::new();
+        let mut output = vec![0u8; 1024];
+
+        let mut input = vec![0u8; 30];
+        input[0] = GZIP_ID1;
+        input[1] = GZIP_ID2;
+        input[2] = GZIP_CM_DEFLATE;
+        input[3] = GZIP_FNAME | GZIP_FCOMMENT;
+        for i in 10..30 {
+            input[i] = b'X';
+        }
+
+        let err = d
+            .gzip_decompress(&input, &mut output, enough::Unstoppable)
+            .unwrap_err();
+        assert_eq!(err, DecompressionError::InvalidHeader);
+    }
+
+    /// flate2 #474: empty input with L0 compression.
+    /// Verify compress + decompress round-trip works for empty data at level 0.
+    #[test]
+    fn empty_input_level0_roundtrip() {
+        use crate::{CompressionLevel, Compressor};
+
+        let mut compressor = Compressor::new(CompressionLevel::none());
+
+        // deflate
+        let bound = Compressor::deflate_compress_bound(0);
+        let mut compressed = vec![0u8; bound];
+        let csize = compressor
+            .deflate_compress(&[], &mut compressed, enough::Unstoppable)
+            .unwrap();
+        assert!(csize > 0, "deflate L0 should produce non-empty output");
+
+        let mut d = Decompressor::new();
+        let mut output = vec![0u8; 0];
+        let result = d
+            .deflate_decompress(&compressed[..csize], &mut output, enough::Unstoppable)
+            .unwrap();
+        assert_eq!(result.output_written, 0);
+
+        // zlib
+        let bound = Compressor::zlib_compress_bound(0);
+        let mut compressed = vec![0u8; bound];
+        let csize = compressor
+            .zlib_compress(&[], &mut compressed, enough::Unstoppable)
+            .unwrap();
+        let mut output = vec![0u8; 0];
+        let result = d
+            .zlib_decompress(&compressed[..csize], &mut output, enough::Unstoppable)
+            .unwrap();
+        assert_eq!(result.output_written, 0);
+
+        // gzip
+        let bound = Compressor::gzip_compress_bound(0);
+        let mut compressed = vec![0u8; bound];
+        let csize = compressor
+            .gzip_compress(&[], &mut compressed, enough::Unstoppable)
+            .unwrap();
+        let mut output = vec![0u8; 0];
+        let result = d
+            .gzip_decompress(&compressed[..csize], &mut output, enough::Unstoppable)
+            .unwrap();
+        assert_eq!(result.output_written, 0);
+    }
+
+    /// Broad garbage rejection: 256 different single-byte inputs to all formats.
+    #[test]
+    fn reject_single_byte_all_formats() {
+        let mut d = Decompressor::new();
+        let mut output = vec![0u8; 1024];
+        for b in 0..=255u8 {
+            // zlib: always InvalidHeader (min 6 bytes)
+            let err = d
+                .zlib_decompress(&[b], &mut output, enough::Unstoppable)
+                .unwrap_err();
+            assert_eq!(err, DecompressionError::InvalidHeader);
+
+            // gzip: always InvalidHeader (min 18 bytes)
+            let err = d
+                .gzip_decompress(&[b], &mut output, enough::Unstoppable)
+                .unwrap_err();
+            assert_eq!(err, DecompressionError::InvalidHeader);
+
+            // deflate: should not panic (some bytes may decode as valid tiny blocks)
+            let _ = d.deflate_decompress(&[b], &mut output, enough::Unstoppable);
         }
     }
 }
