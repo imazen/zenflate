@@ -440,8 +440,7 @@ fn bench_stream_decompress(c: &mut Criterion) {
         // zenflate streaming (large capacity — measure overhead vs whole-buffer)
         group.bench_function("zenflate_stream", |b| {
             b.iter(|| {
-                let mut dec =
-                    zenflate::StreamDecompressor::deflate(&compressed_deflate[..], 64 * 1024);
+                let mut dec = zenflate::StreamDecompressor::deflate(compressed_deflate, 64 * 1024);
                 let mut total = 0;
                 while !dec.is_done() {
                     dec.fill().unwrap();
@@ -456,7 +455,7 @@ fn bench_stream_decompress(c: &mut Criterion) {
         // zenflate streaming (small capacity — exercise compaction)
         group.bench_function("zenflate_stream_4k", |b| {
             b.iter(|| {
-                let mut dec = zenflate::StreamDecompressor::deflate(&compressed_deflate[..], 4096);
+                let mut dec = zenflate::StreamDecompressor::deflate(compressed_deflate, 4096);
                 let mut total = 0;
                 while !dec.is_done() {
                     dec.fill().unwrap();

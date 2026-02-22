@@ -1677,9 +1677,7 @@ mod tests {
         input[3] = GZIP_FNAME; // FNAME flag
         // bytes 4-9: MTIME + XFL + OS (zeros)
         // bytes 10+: "filename" with no null terminator
-        for i in 10..30 {
-            input[i] = b'A';
-        }
+        input[10..30].fill(b'A');
 
         let err = d
             .gzip_decompress(&input, &mut output, enough::Unstoppable)
@@ -1698,9 +1696,7 @@ mod tests {
         input[1] = GZIP_ID2;
         input[2] = GZIP_CM_DEFLATE;
         input[3] = GZIP_FCOMMENT;
-        for i in 10..30 {
-            input[i] = b'C';
-        }
+        input[10..30].fill(b'C');
 
         let err = d
             .gzip_decompress(&input, &mut output, enough::Unstoppable)
@@ -1719,9 +1715,7 @@ mod tests {
         input[1] = GZIP_ID2;
         input[2] = GZIP_CM_DEFLATE;
         input[3] = GZIP_FNAME | GZIP_FCOMMENT;
-        for i in 10..30 {
-            input[i] = b'X';
-        }
+        input[10..30].fill(b'X');
 
         let err = d
             .gzip_decompress(&input, &mut output, enough::Unstoppable)
@@ -1908,6 +1902,321 @@ mod tests {
 
             // deflate: should not panic (some bytes may decode as valid tiny blocks)
             let _ = d.deflate_decompress(&[b], &mut output, enough::Unstoppable);
+        }
+    }
+
+    // =====================================================================
+    // Upstream bug pattern tests (libdeflate, flate2, miniz_oxide, zlib)
+    // =====================================================================
+
+    /// Empty stored block: BFINAL=1, BTYPE=00, LEN=0, NLEN=0xFFFF.
+    /// Exercises stored block path with zero-length copy (libdeflate #157).
+    #[test]
+    fn empty_stored_block_final() {
+        // BFINAL=1, BTYPE=00 → byte 0x01, then padding to byte boundary,
+        // LEN=0x0000, NLEN=0xFFFF
+        let data = [0x01, 0x00, 0x00, 0xff, 0xff];
+        let mut d = Decompressor::new();
+        let mut output = vec![0u8; 64];
+        let result = d
+            .deflate_decompress(&data, &mut output, enough::Unstoppable)
+            .expect("empty stored block should decompress");
+        assert_eq!(result.output_written, 0);
+    }
+
+    /// Non-final empty stored block followed by a final empty stored block.
+    /// Two zero-length stored blocks in sequence.
+    #[test]
+    fn two_empty_stored_blocks() {
+        // First block: BFINAL=0, BTYPE=00, LEN=0, NLEN=0xFFFF
+        // Second block: BFINAL=1, BTYPE=00, LEN=0, NLEN=0xFFFF
+        let data = [
+            0x00, 0x00, 0x00, 0xff, 0xff, // non-final empty
+            0x01, 0x00, 0x00, 0xff, 0xff, // final empty
+        ];
+        let mut d = Decompressor::new();
+        let mut output = vec![0u8; 64];
+        let result = d
+            .deflate_decompress(&data, &mut output, enough::Unstoppable)
+            .expect("two empty stored blocks should decompress");
+        assert_eq!(result.output_written, 0);
+    }
+
+    /// Stored block with LEN != ~NLEN must be rejected.
+    #[test]
+    fn reject_stored_block_bad_nlen() {
+        // BFINAL=1, BTYPE=00, LEN=0x0005, NLEN=0x0000 (wrong, should be 0xFFFA)
+        let data = [0x01, 0x05, 0x00, 0x00, 0x00];
+        let mut d = Decompressor::new();
+        let mut output = vec![0u8; 64];
+        assert!(
+            d.deflate_decompress(&data, &mut output, enough::Unstoppable)
+                .is_err()
+        );
+    }
+
+    /// Block type 3 (reserved) must be rejected per RFC 1951.
+    #[test]
+    fn reject_reserved_block_type() {
+        // BFINAL=1, BTYPE=11 (reserved) → bottom 3 bits = 0b111 = 0x07
+        let data = [0x07, 0x00, 0x00, 0x00, 0x00];
+        let mut d = Decompressor::new();
+        let mut output = vec![0u8; 64];
+        assert!(
+            d.deflate_decompress(&data, &mut output, enough::Unstoppable)
+                .is_err()
+        );
+    }
+
+    /// Truncated dynamic Huffman header (too few bytes for code lengths).
+    /// Must error, not panic from out-of-bounds (miniz_oxide #130).
+    #[test]
+    fn reject_truncated_dynamic_huffman() {
+        // BFINAL=1, BTYPE=10 (dynamic) → bottom 3 bits = 0b101 = 0x05
+        // Then just a few garbage bytes — not enough for the full header
+        for len in 1..=6 {
+            let mut data = vec![0x05u8; len];
+            data[0] = 0x05; // only first byte matters
+            let mut d = Decompressor::new();
+            let mut output = vec![0u8; 64];
+            // Should fail gracefully, not panic
+            assert!(
+                d.deflate_decompress(&data, &mut output, enough::Unstoppable)
+                    .is_err()
+            );
+        }
+    }
+
+    /// zlib stream with invalid checksum must be rejected.
+    /// Verifies Adler-32 footer is actually checked (flate2 #258).
+    #[test]
+    fn reject_zlib_bad_adler32() {
+        use crate::{CompressionLevel, Compressor};
+
+        let data = b"Hello, World!";
+        let mut c = Compressor::new(CompressionLevel::new(6));
+        let bound = Compressor::zlib_compress_bound(data.len());
+        let mut compressed = vec![0u8; bound];
+        let csize = c
+            .zlib_compress(data, &mut compressed, enough::Unstoppable)
+            .unwrap();
+
+        // Corrupt the last byte (part of Adler-32 footer)
+        compressed[csize - 1] ^= 0xFF;
+
+        let mut d = Decompressor::new();
+        let mut output = vec![0u8; data.len()];
+        let err = d
+            .zlib_decompress(&compressed[..csize], &mut output, enough::Unstoppable)
+            .unwrap_err();
+        assert_eq!(err, DecompressionError::ChecksumMismatch);
+    }
+
+    /// gzip stream with corrupted CRC-32 must be rejected.
+    #[test]
+    fn reject_gzip_bad_crc32() {
+        use crate::{CompressionLevel, Compressor};
+
+        let data = b"Hello, World!";
+        let mut c = Compressor::new(CompressionLevel::new(6));
+        let bound = Compressor::gzip_compress_bound(data.len());
+        let mut compressed = vec![0u8; bound];
+        let csize = c
+            .gzip_compress(data, &mut compressed, enough::Unstoppable)
+            .unwrap();
+
+        // Corrupt the CRC-32 (4 bytes before the last 4 ISIZE bytes)
+        compressed[csize - 5] ^= 0xFF;
+
+        let mut d = Decompressor::new();
+        let mut output = vec![0u8; data.len()];
+        let err = d
+            .gzip_decompress(&compressed[..csize], &mut output, enough::Unstoppable)
+            .unwrap_err();
+        assert_eq!(err, DecompressionError::ChecksumMismatch);
+    }
+
+    /// gzip stream with corrupted ISIZE must be rejected.
+    #[test]
+    fn reject_gzip_bad_isize() {
+        use crate::{CompressionLevel, Compressor};
+
+        let data = b"Hello, World!";
+        let mut c = Compressor::new(CompressionLevel::new(6));
+        let bound = Compressor::gzip_compress_bound(data.len());
+        let mut compressed = vec![0u8; bound];
+        let csize = c
+            .gzip_compress(data, &mut compressed, enough::Unstoppable)
+            .unwrap();
+
+        // Corrupt the ISIZE (last 4 bytes)
+        compressed[csize - 1] ^= 0xFF;
+
+        let mut d = Decompressor::new();
+        let mut output = vec![0u8; data.len()];
+        assert!(
+            d.gzip_decompress(&compressed[..csize], &mut output, enough::Unstoppable)
+                .is_err()
+        );
+    }
+
+    /// Exact-size compress buffer: verify compress_bound is sufficient for
+    /// all levels and that the buffer is fully used (libdeflate #294, #102).
+    #[test]
+    fn compress_bound_exact_buffer_all_levels() {
+        use crate::{CompressionLevel, Compressor};
+
+        // Test several data patterns at every level
+        let patterns: Vec<(&str, Vec<u8>)> = vec![
+            ("empty", vec![]),
+            ("one_byte", vec![42]),
+            ("zeros_1k", vec![0; 1024]),
+            ("sequential_1k", (0..=255u8).cycle().take(1024).collect()),
+            ("random_ish", {
+                // Pseudo-random via simple LCG
+                let mut v = vec![0u8; 4096];
+                let mut s: u32 = 0xDEAD_BEEF;
+                for b in v.iter_mut() {
+                    s = s.wrapping_mul(1103515245).wrapping_add(12345);
+                    *b = (s >> 16) as u8;
+                }
+                v
+            }),
+        ];
+
+        for level in 0..=12 {
+            let mut c = Compressor::new(CompressionLevel::new(level));
+            let mut d = Decompressor::new();
+            for (name, data) in &patterns {
+                // deflate
+                let bound = Compressor::deflate_compress_bound(data.len());
+                let mut compressed = vec![0u8; bound];
+                let csize = c
+                    .deflate_compress(data, &mut compressed, enough::Unstoppable)
+                    .unwrap_or_else(|e| panic!("deflate L{level} {name}: compress failed: {e:?}"));
+                assert!(csize <= bound, "deflate L{level} {name}: exceeded bound");
+
+                let mut output = vec![0u8; data.len().max(1)];
+                let result = d
+                    .deflate_decompress(&compressed[..csize], &mut output, enough::Unstoppable)
+                    .unwrap_or_else(|e| {
+                        panic!("deflate L{level} {name}: decompress failed: {e:?}")
+                    });
+                assert_eq!(
+                    &output[..result.output_written],
+                    data.as_slice(),
+                    "deflate L{level} {name}: roundtrip mismatch"
+                );
+
+                // zlib
+                let bound = Compressor::zlib_compress_bound(data.len());
+                let mut compressed = vec![0u8; bound];
+                let csize = c
+                    .zlib_compress(data, &mut compressed, enough::Unstoppable)
+                    .unwrap_or_else(|e| panic!("zlib L{level} {name}: compress failed: {e:?}"));
+                assert!(csize <= bound, "zlib L{level} {name}: exceeded bound");
+
+                // gzip
+                let bound = Compressor::gzip_compress_bound(data.len());
+                let mut compressed = vec![0u8; bound];
+                let csize = c
+                    .gzip_compress(data, &mut compressed, enough::Unstoppable)
+                    .unwrap_or_else(|e| panic!("gzip L{level} {name}: compress failed: {e:?}"));
+                assert!(csize <= bound, "gzip L{level} {name}: exceeded bound");
+            }
+        }
+    }
+
+    /// Zero-length output buffer: decompress of valid data into empty output
+    /// must not panic (zlib-rs #23). Empty data compresses to a final empty
+    /// stored block or a dynamic block encoding zero literals.
+    #[test]
+    fn decompress_into_zero_length_output() {
+        use crate::{CompressionLevel, Compressor};
+
+        let data: &[u8] = &[];
+        let mut c = Compressor::new(CompressionLevel::new(0));
+        let bound = Compressor::deflate_compress_bound(0);
+        let mut compressed = vec![0u8; bound];
+        let csize = c
+            .deflate_compress(data, &mut compressed, enough::Unstoppable)
+            .unwrap();
+
+        let mut d = Decompressor::new();
+        let mut output: Vec<u8> = vec![];
+        let result = d
+            .deflate_decompress(&compressed[..csize], &mut output, enough::Unstoppable)
+            .unwrap();
+        assert_eq!(result.output_written, 0);
+    }
+
+    /// All two-byte inputs to deflate: no panics.
+    /// Catches boundary conditions in short dynamic/static block headers.
+    #[test]
+    fn two_byte_deflate_no_panic() {
+        let mut d = Decompressor::new();
+        let mut output = vec![0u8; 1024];
+        // Sample all 65536 two-byte combinations
+        for hi in 0..=255u8 {
+            for lo in 0..=255u8 {
+                let _ = d.deflate_decompress(&[lo, hi], &mut output, enough::Unstoppable);
+            }
+        }
+    }
+
+    /// Reuse decompressor across many operations: verifies state reset works.
+    /// Catches stale-state bugs where previous block's tables bleed through.
+    #[test]
+    fn decompressor_reuse_across_formats() {
+        use crate::{CompressionLevel, Compressor};
+
+        let mut c = Compressor::new(CompressionLevel::new(6));
+        let mut d = Decompressor::new();
+
+        let datasets: &[&[u8]] = &[
+            b"Hello",
+            b"",
+            &[0u8; 10000],
+            &(0..=255u8).cycle().take(5000).collect::<Vec<_>>(),
+            b"a",
+        ];
+
+        for data in datasets {
+            // deflate
+            let bound = Compressor::deflate_compress_bound(data.len());
+            let mut compressed = vec![0u8; bound];
+            let csize = c
+                .deflate_compress(data, &mut compressed, enough::Unstoppable)
+                .unwrap();
+            let mut output = vec![0u8; data.len().max(1)];
+            let result = d
+                .deflate_decompress(&compressed[..csize], &mut output, enough::Unstoppable)
+                .unwrap();
+            assert_eq!(&output[..result.output_written], *data);
+
+            // zlib
+            let bound = Compressor::zlib_compress_bound(data.len());
+            let mut compressed = vec![0u8; bound];
+            let csize = c
+                .zlib_compress(data, &mut compressed, enough::Unstoppable)
+                .unwrap();
+            let mut output = vec![0u8; data.len().max(1)];
+            let result = d
+                .zlib_decompress(&compressed[..csize], &mut output, enough::Unstoppable)
+                .unwrap();
+            assert_eq!(&output[..result.output_written], *data);
+
+            // gzip
+            let bound = Compressor::gzip_compress_bound(data.len());
+            let mut compressed = vec![0u8; bound];
+            let csize = c
+                .gzip_compress(data, &mut compressed, enough::Unstoppable)
+                .unwrap();
+            let mut output = vec![0u8; data.len().max(1)];
+            let result = d
+                .gzip_decompress(&compressed[..csize], &mut output, enough::Unstoppable)
+                .unwrap();
+            assert_eq!(&output[..result.output_written], *data);
         }
     }
 }

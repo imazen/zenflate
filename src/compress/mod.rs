@@ -2528,7 +2528,7 @@ mod tests {
                 .map_err(|e| format!("decompression error: {e}"))?
                 .output_written;
 
-            if &decompressed[..dsize] != &data_owned[..] {
+            if decompressed[..dsize] != data_owned[..] {
                 return Err("roundtrip data mismatch".to_string());
             }
 
@@ -2538,7 +2538,7 @@ mod tests {
             let ld_size = ld
                 .deflate_decompress(&compressed[..csize], &mut ld_out)
                 .map_err(|e| format!("libdeflater decompression error: {e}"))?;
-            if &ld_out[..ld_size] != &data_owned[..] {
+            if ld_out[..ld_size] != data_owned[..] {
                 return Err("libdeflater roundtrip mismatch".to_string());
             }
 
