@@ -85,10 +85,10 @@ impl HcMatchfinder {
 
         let mut cur_pos = (in_next - *in_base_offset) as u32;
 
-        if cur_pos == MATCHFINDER_WINDOW_SIZE {
+        if cur_pos >= MATCHFINDER_WINDOW_SIZE {
             self.slide_window();
             *in_base_offset += MATCHFINDER_WINDOW_SIZE as usize;
-            cur_pos = 0;
+            cur_pos -= MATCHFINDER_WINDOW_SIZE;
         }
 
         let in_base = *in_base_offset;
@@ -240,10 +240,10 @@ impl HcMatchfinder {
         let mut remaining = count;
 
         loop {
-            if cur_pos == MATCHFINDER_WINDOW_SIZE {
+            if cur_pos >= MATCHFINDER_WINDOW_SIZE {
                 self.slide_window();
                 *in_base_offset += MATCHFINDER_WINDOW_SIZE as usize;
-                cur_pos = 0;
+                cur_pos -= MATCHFINDER_WINDOW_SIZE;
             }
 
             // Insert current position: update hash3, prepend to hash4 chain

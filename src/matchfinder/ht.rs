@@ -73,10 +73,10 @@ impl HtMatchfinder {
         let mut cur_pos = (in_next - *in_base_offset) as i32;
 
         // Slide window if we've reached the boundary
-        if cur_pos as u32 == MATCHFINDER_WINDOW_SIZE {
+        if cur_pos as u32 >= MATCHFINDER_WINDOW_SIZE {
             self.slide_window();
             *in_base_offset += MATCHFINDER_WINDOW_SIZE as usize;
-            cur_pos = 0;
+            cur_pos -= MATCHFINDER_WINDOW_SIZE as i32;
         }
 
         let in_base = *in_base_offset;
@@ -181,10 +181,10 @@ impl HtMatchfinder {
             let mut cur_pos = (in_next - *in_base_offset) as i32;
 
             // Slide window if we've reached the boundary
-            if cur_pos as u32 == MATCHFINDER_WINDOW_SIZE {
+            if cur_pos as u32 >= MATCHFINDER_WINDOW_SIZE {
                 self.slide_window();
                 *in_base_offset += MATCHFINDER_WINDOW_SIZE as usize;
-                cur_pos = 0;
+                cur_pos -= MATCHFINDER_WINDOW_SIZE as i32;
             }
 
             let in_base = *in_base_offset;

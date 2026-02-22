@@ -128,6 +128,106 @@ mod tests {
         }
     }
 
+    /// Regression: compressing data that crosses the 32K window boundary
+    /// with patterns that cause skip_bytes to bail early (not enough trailing
+    /// bytes) left in_base_offset stale. The next longest_match call computed
+    /// cur_pos > WINDOW_SIZE, bypassing the `== WINDOW_SIZE` slide check.
+    ///
+    /// Triggers index-out-of-bounds in hc.rs next_tab[cur_pos].
+    #[test]
+    fn hc_compress_across_window_boundary_no_panic() {
+        use crate::compress::{CompressionLevel, Compressor};
+
+        // Build data slightly larger than MATCHFINDER_WINDOW_SIZE (32768).
+        // Use repeating pattern to generate matches, with a unique suffix
+        // to force the compressor past the window boundary.
+        let window = MATCHFINDER_WINDOW_SIZE as usize;
+        let mut data = Vec::with_capacity(window + 300);
+        // Repeating 256-byte pattern fills most of the window
+        let pattern: Vec<u8> = (0..=255u8).collect();
+        while data.len() < window - 10 {
+            data.extend_from_slice(&pattern);
+        }
+        // Add unique bytes near the boundary to create skip_bytes edge cases
+        for i in 0..310u16 {
+            data.push((i & 0xFF) as u8);
+        }
+
+        // Try all HC compression levels (1-9 use HC matchfinder)
+        for level in 1..=9u32 {
+            let mut compressor = Compressor::new(CompressionLevel::new(level));
+            let bound = Compressor::zlib_compress_bound(data.len());
+            let mut output = vec![0u8; bound];
+
+            let result = compressor.zlib_compress(&data, &mut output, crate::Unstoppable);
+            assert!(
+                result.is_ok(),
+                "compression at level {level} should not panic or error"
+            );
+
+            // Verify roundtrip
+            let compressed_len = result.unwrap();
+            let mut decompressor = crate::Decompressor::new();
+            let mut decompressed = vec![0u8; data.len()];
+            let dec_result = decompressor.zlib_decompress(
+                &output[..compressed_len],
+                &mut decompressed,
+                crate::Unstoppable,
+            );
+            assert!(dec_result.is_ok(), "decompression roundtrip at level {level}");
+            assert_eq!(&decompressed, &data, "data roundtrip at level {level}");
+        }
+    }
+
+    /// Targeted regression: all-zeros input where matches of length 258 land
+    /// at position 32766 (= 127 * 258). When total input length is in
+    /// [33025, 33028], skip_bytes bails because count(257) + 5 > remaining,
+    /// leaving in_base_offset stale at 0. The next longest_match call has
+    /// cur_pos = 33024 > 32768, bypassing the `== 32768` slide check.
+    ///
+    /// Panics with index-out-of-bounds on hc.rs next_tab[33024].
+    #[test]
+    fn hc_skip_bytes_bail_leaves_stale_base_offset() {
+        use crate::compress::{CompressionLevel, Compressor};
+
+        // All-zeros: matches of max length (258) at positions 0, 258, ..., 32766.
+        // At position 32766 with total_len=33025: skip_bytes bails because
+        //   count(257) + 5 = 262 > in_end(33025) - in_next(32767) = 258
+        // Then in_next = 33024, cur_pos = 33024 > 32768 → OOB.
+        for total_len in [33025, 33026, 33027, 33028] {
+            let data = vec![0u8; total_len];
+            for level in 1..=9u32 {
+                let mut compressor = Compressor::new(CompressionLevel::new(level));
+                let bound = Compressor::zlib_compress_bound(data.len());
+                let mut output = vec![0u8; bound];
+
+                let result = compressor.zlib_compress(&data, &mut output, crate::Unstoppable);
+                assert!(
+                    result.is_ok(),
+                    "compression at level {level} with length {total_len} should not panic"
+                );
+
+                // Verify roundtrip
+                let compressed_len = result.unwrap();
+                let mut decompressor = crate::Decompressor::new();
+                let mut decompressed = vec![0u8; data.len()];
+                let dec_result = decompressor.zlib_decompress(
+                    &output[..compressed_len],
+                    &mut decompressed,
+                    crate::Unstoppable,
+                );
+                assert!(
+                    dec_result.is_ok(),
+                    "roundtrip at level {level} with length {total_len}"
+                );
+                assert_eq!(
+                    &decompressed, &data,
+                    "data mismatch at level {level} with length {total_len}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn test_matchfinder_rebase() {
         let mut data = [0i16, 100, -100, i16::MAX, i16::MIN, -32768];
