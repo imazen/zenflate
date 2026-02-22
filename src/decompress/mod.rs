@@ -2354,4 +2354,199 @@ mod tests {
             );
         }
     }
+
+    // =====================================================================
+    // input_consumed correctness tests (libdeflate #420, miniz_oxide #158)
+    // =====================================================================
+
+    /// deflate: input_consumed must equal the compressed size (no trailing bytes).
+    #[test]
+    fn input_consumed_deflate_exact() {
+        use crate::{CompressionLevel, Compressor};
+
+        let data = b"The quick brown fox jumps over the lazy dog.";
+        let mut c = Compressor::new(CompressionLevel::new(6));
+        let bound = Compressor::deflate_compress_bound(data.len());
+        let mut compressed = vec![0u8; bound];
+        let csize = c
+            .deflate_compress(data, &mut compressed, enough::Unstoppable)
+            .unwrap();
+
+        let mut d = Decompressor::new();
+        let mut output = vec![0u8; data.len()];
+        let result = d
+            .deflate_decompress(&compressed[..csize], &mut output, enough::Unstoppable)
+            .unwrap();
+        assert_eq!(result.input_consumed, csize);
+        assert_eq!(result.output_written, data.len());
+    }
+
+    /// deflate: input_consumed ignores trailing garbage after the final block.
+    #[test]
+    fn input_consumed_deflate_trailing_garbage() {
+        use crate::{CompressionLevel, Compressor};
+
+        let data = b"Hello, World!";
+        let mut c = Compressor::new(CompressionLevel::new(6));
+        let bound = Compressor::deflate_compress_bound(data.len());
+        let mut compressed = vec![0u8; bound + 100];
+        let csize = c
+            .deflate_compress(data, &mut compressed, enough::Unstoppable)
+            .unwrap();
+
+        // Append 100 bytes of garbage after the compressed data
+        for i in 0..100 {
+            compressed[csize + i] = 0xAB;
+        }
+
+        let mut d = Decompressor::new();
+        let mut output = vec![0u8; data.len()];
+        let result = d
+            .deflate_decompress(&compressed[..csize + 100], &mut output, enough::Unstoppable)
+            .unwrap();
+        // Must report only the DEFLATE bytes consumed, not the trailing garbage
+        assert_eq!(result.input_consumed, csize);
+        assert_eq!(result.output_written, data.len());
+        assert_eq!(&output[..result.output_written], &data[..]);
+    }
+
+    /// zlib: input_consumed must include header (2) + deflate + footer (4).
+    #[test]
+    fn input_consumed_zlib() {
+        use crate::{CompressionLevel, Compressor};
+
+        let data = b"The quick brown fox jumps over the lazy dog.";
+        let mut c = Compressor::new(CompressionLevel::new(6));
+        let bound = Compressor::zlib_compress_bound(data.len());
+        let mut compressed = vec![0u8; bound];
+        let csize = c
+            .zlib_compress(data, &mut compressed, enough::Unstoppable)
+            .unwrap();
+
+        let mut d = Decompressor::new();
+        let mut output = vec![0u8; data.len()];
+        let result = d
+            .zlib_decompress(&compressed[..csize], &mut output, enough::Unstoppable)
+            .unwrap();
+        assert_eq!(result.input_consumed, csize);
+        assert_eq!(result.output_written, data.len());
+    }
+
+    /// gzip: input_consumed must include header (10+) + deflate + footer (8).
+    #[test]
+    fn input_consumed_gzip() {
+        use crate::{CompressionLevel, Compressor};
+
+        let data = b"The quick brown fox jumps over the lazy dog.";
+        let mut c = Compressor::new(CompressionLevel::new(6));
+        let bound = Compressor::gzip_compress_bound(data.len());
+        let mut compressed = vec![0u8; bound];
+        let csize = c
+            .gzip_compress(data, &mut compressed, enough::Unstoppable)
+            .unwrap();
+
+        let mut d = Decompressor::new();
+        let mut output = vec![0u8; data.len()];
+        let result = d
+            .gzip_decompress(&compressed[..csize], &mut output, enough::Unstoppable)
+            .unwrap();
+        assert_eq!(result.input_consumed, csize);
+        assert_eq!(result.output_written, data.len());
+    }
+
+    /// input_consumed for empty data across all formats.
+    #[test]
+    fn input_consumed_empty_data() {
+        use crate::{CompressionLevel, Compressor};
+
+        let data: &[u8] = &[];
+        let mut c = Compressor::new(CompressionLevel::new(0));
+        let mut d = Decompressor::new();
+
+        // deflate
+        let bound = Compressor::deflate_compress_bound(0);
+        let mut compressed = vec![0u8; bound];
+        let csize = c
+            .deflate_compress(data, &mut compressed, enough::Unstoppable)
+            .unwrap();
+        let mut output = vec![0u8; 1];
+        let result = d
+            .deflate_decompress(&compressed[..csize], &mut output, enough::Unstoppable)
+            .unwrap();
+        assert_eq!(result.input_consumed, csize);
+        assert_eq!(result.output_written, 0);
+
+        // zlib
+        let bound = Compressor::zlib_compress_bound(0);
+        let mut compressed = vec![0u8; bound];
+        let csize = c
+            .zlib_compress(data, &mut compressed, enough::Unstoppable)
+            .unwrap();
+        let result = d
+            .zlib_decompress(&compressed[..csize], &mut output, enough::Unstoppable)
+            .unwrap();
+        assert_eq!(result.input_consumed, csize);
+        assert_eq!(result.output_written, 0);
+
+        // gzip
+        let bound = Compressor::gzip_compress_bound(0);
+        let mut compressed = vec![0u8; bound];
+        let csize = c
+            .gzip_compress(data, &mut compressed, enough::Unstoppable)
+            .unwrap();
+        let result = d
+            .gzip_decompress(&compressed[..csize], &mut output, enough::Unstoppable)
+            .unwrap();
+        assert_eq!(result.input_consumed, csize);
+        assert_eq!(result.output_written, 0);
+    }
+
+    /// input_consumed at all compression levels, all formats.
+    #[test]
+    fn input_consumed_all_levels() {
+        use crate::{CompressionLevel, Compressor};
+
+        let data: Vec<u8> = (0..=255u8).cycle().take(4096).collect();
+        for level in 0..=12 {
+            let mut c = Compressor::new(CompressionLevel::new(level));
+            let mut d = Decompressor::new();
+            let mut output = vec![0u8; data.len()];
+
+            // deflate
+            let bound = Compressor::deflate_compress_bound(data.len());
+            let mut compressed = vec![0u8; bound];
+            let csize = c
+                .deflate_compress(&data, &mut compressed, enough::Unstoppable)
+                .unwrap();
+            let result = d
+                .deflate_decompress(&compressed[..csize], &mut output, enough::Unstoppable)
+                .unwrap();
+            assert_eq!(result.input_consumed, csize, "L{level} deflate");
+            assert_eq!(result.output_written, data.len(), "L{level} deflate");
+
+            // zlib
+            let bound = Compressor::zlib_compress_bound(data.len());
+            let mut compressed = vec![0u8; bound];
+            let csize = c
+                .zlib_compress(&data, &mut compressed, enough::Unstoppable)
+                .unwrap();
+            let result = d
+                .zlib_decompress(&compressed[..csize], &mut output, enough::Unstoppable)
+                .unwrap();
+            assert_eq!(result.input_consumed, csize, "L{level} zlib");
+            assert_eq!(result.output_written, data.len(), "L{level} zlib");
+
+            // gzip
+            let bound = Compressor::gzip_compress_bound(data.len());
+            let mut compressed = vec![0u8; bound];
+            let csize = c
+                .gzip_compress(&data, &mut compressed, enough::Unstoppable)
+                .unwrap();
+            let result = d
+                .gzip_decompress(&compressed[..csize], &mut output, enough::Unstoppable)
+                .unwrap();
+            assert_eq!(result.input_consumed, csize, "L{level} gzip");
+            assert_eq!(result.output_written, data.len(), "L{level} gzip");
+        }
+    }
 }

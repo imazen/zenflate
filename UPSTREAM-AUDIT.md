@@ -5,10 +5,9 @@ issue trackers, checked against zenflate's codebase. Audit performed 2026-02-21.
 
 ## Action Items
 
-- [ ] Report bytes consumed when decoding (like libdeflate's `_ex` API). Currently our
-  `DecompressionResult` returns `output_written` but not `input_consumed`. This matters for
-  callers who need to know where the compressed stream ended (e.g. parsing concatenated
-  streams, or detecting trailing garbage). See miniz_oxide #158, libdeflate #420.
+- [x] Report bytes consumed when decoding (like libdeflate's `_ex` API). `DecompressOutcome`
+  already has both `input_consumed` and `output_written`. Tests now assert on `input_consumed`
+  for all three formats. See miniz_oxide #158, libdeflate #420.
 
 ## libdeflate
 
