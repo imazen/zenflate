@@ -222,6 +222,11 @@ impl<S> StreamDecompressor<S> {
         self.source
     }
 
+    /// Borrow the underlying input source.
+    pub fn source_ref(&self) -> &S {
+        &self.source
+    }
+
     /// When true, checksum mismatches in zlib/gzip wrappers are recorded
     /// instead of returning an error. The decompressed data is still returned.
     ///
