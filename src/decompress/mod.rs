@@ -215,6 +215,8 @@ pub struct Decompressor {
     pub(crate) sorted_syms: [u16; DEFLATE_MAX_NUM_SYMS],
     pub(crate) static_codes_loaded: bool,
     pub(crate) litlen_tablebits: u32,
+    skip_checksum: bool,
+    checksum_matched: Option<bool>,
 }
 
 impl Default for Decompressor {
@@ -235,7 +237,29 @@ impl Decompressor {
             sorted_syms: [0; DEFLATE_MAX_NUM_SYMS],
             static_codes_loaded: false,
             litlen_tablebits: 0,
+            skip_checksum: false,
+            checksum_matched: None,
         }
+    }
+
+    /// When true, checksum mismatches in zlib/gzip wrappers are recorded
+    /// instead of returning an error. The decompressed data is still returned.
+    ///
+    /// After decompression, call [`checksum_matched()`](Self::checksum_matched)
+    /// to see if the checksum was correct.
+    #[must_use]
+    pub fn with_skip_checksum(mut self, skip: bool) -> Self {
+        self.skip_checksum = skip;
+        self
+    }
+
+    /// Whether the wrapper checksum matched after decompression.
+    ///
+    /// - `None` — footer not yet processed (raw DEFLATE or not yet decompressed)
+    /// - `Some(true)` — checksum matched
+    /// - `Some(false)` — checksum mismatch (only possible when `skip_checksum` is set)
+    pub fn checksum_matched(&self) -> Option<bool> {
+        self.checksum_matched
     }
 
     /// Decompress raw DEFLATE data.
@@ -306,7 +330,9 @@ impl Decompressor {
             input[footer_start + 3],
         ]);
         let actual = checksum::adler32(1, &output[..output_written]);
-        if actual != expected {
+        let matched = actual == expected;
+        self.checksum_matched = Some(matched);
+        if !matched && !self.skip_checksum {
             return Err(DecompressionError::ChecksumMismatch);
         }
 
@@ -416,9 +442,7 @@ impl Decompressor {
             input[footer_start + 2],
             input[footer_start + 3],
         ]);
-        if checksum::crc32(0, &output[..output_written]) != expected_crc {
-            return Err(DecompressionError::ChecksumMismatch);
-        }
+        let crc_ok = checksum::crc32(0, &output[..output_written]) == expected_crc;
 
         // ISIZE (little-endian, mod 2^32)
         let expected_size = u32::from_le_bytes([
@@ -427,7 +451,11 @@ impl Decompressor {
             input[footer_start + 6],
             input[footer_start + 7],
         ]);
-        if (output_written as u32) != expected_size {
+        let size_ok = (output_written as u32) == expected_size;
+
+        let matched = crc_ok && size_ok;
+        self.checksum_matched = Some(matched);
+        if !matched && !self.skip_checksum {
             return Err(DecompressionError::ChecksumMismatch);
         }
 
@@ -1747,6 +1775,117 @@ mod tests {
             .gzip_decompress(&compressed[..csize], &mut output, enough::Unstoppable)
             .unwrap();
         assert_eq!(result.output_written, 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // skip_checksum tests
+    // -----------------------------------------------------------------------
+
+    /// Corrupt Adler-32 in valid zlib: strict mode fails, skip mode succeeds
+    /// and reports checksum_matched() == Some(false).
+    #[test]
+    fn zlib_skip_checksum_corrupt_adler() {
+        let data: Vec<u8> = (0..=255).cycle().take(5000).collect();
+        let mut c = libdeflater::Compressor::new(libdeflater::CompressionLvl::new(6).unwrap());
+        let bound = c.zlib_compress_bound(data.len());
+        let mut compressed = vec![0u8; bound];
+        let csize = c.zlib_compress(&data, &mut compressed).unwrap();
+
+        // Corrupt the last byte of the Adler-32 footer
+        compressed[csize - 1] ^= 0xFF;
+
+        // Strict mode: should fail
+        let mut d = Decompressor::new();
+        let mut output = vec![0u8; data.len()];
+        let err = d
+            .zlib_decompress(&compressed[..csize], &mut output, enough::Unstoppable)
+            .unwrap_err();
+        assert_eq!(err, DecompressionError::ChecksumMismatch);
+
+        // Skip mode: should succeed with checksum_matched = Some(false)
+        let mut d = Decompressor::new().with_skip_checksum(true);
+        let mut output = vec![0u8; data.len()];
+        let result = d
+            .zlib_decompress(&compressed[..csize], &mut output, enough::Unstoppable)
+            .unwrap();
+        assert_eq!(result.output_written, data.len());
+        assert_eq!(&output[..result.output_written], &data[..]);
+        assert_eq!(d.checksum_matched(), Some(false));
+    }
+
+    /// Corrupt CRC32 in valid gzip: strict mode fails, skip mode succeeds.
+    #[test]
+    fn gzip_skip_checksum_corrupt_crc() {
+        let data: Vec<u8> = (0..=255).cycle().take(5000).collect();
+        let mut c = libdeflater::Compressor::new(libdeflater::CompressionLvl::new(6).unwrap());
+        let bound = c.gzip_compress_bound(data.len());
+        let mut compressed = vec![0u8; bound];
+        let csize = c.gzip_compress(&data, &mut compressed).unwrap();
+
+        // Corrupt CRC32 (4 bytes before ISIZE, which is 4 bytes before end)
+        compressed[csize - 8] ^= 0xFF;
+
+        // Strict mode: should fail
+        let mut d = Decompressor::new();
+        let mut output = vec![0u8; data.len()];
+        let err = d
+            .gzip_decompress(&compressed[..csize], &mut output, enough::Unstoppable)
+            .unwrap_err();
+        assert_eq!(err, DecompressionError::ChecksumMismatch);
+
+        // Skip mode: should succeed
+        let mut d = Decompressor::new().with_skip_checksum(true);
+        let mut output = vec![0u8; data.len()];
+        let result = d
+            .gzip_decompress(&compressed[..csize], &mut output, enough::Unstoppable)
+            .unwrap();
+        assert_eq!(result.output_written, data.len());
+        assert_eq!(&output[..result.output_written], &data[..]);
+        assert_eq!(d.checksum_matched(), Some(false));
+    }
+
+    /// Valid zlib with skip_checksum: checksum_matched() == Some(true).
+    #[test]
+    fn zlib_skip_checksum_valid_reports_true() {
+        let data = b"hello, skip_checksum test";
+        let mut c = libdeflater::Compressor::new(libdeflater::CompressionLvl::new(6).unwrap());
+        let bound = c.zlib_compress_bound(data.len());
+        let mut compressed = vec![0u8; bound];
+        let csize = c.zlib_compress(data, &mut compressed).unwrap();
+
+        let mut d = Decompressor::new().with_skip_checksum(true);
+        let mut output = vec![0u8; data.len()];
+        d.zlib_decompress(&compressed[..csize], &mut output, enough::Unstoppable)
+            .unwrap();
+        assert_eq!(d.checksum_matched(), Some(true));
+    }
+
+    /// Structural errors still fail even with skip_checksum.
+    #[test]
+    fn skip_checksum_does_not_skip_structural_errors() {
+        // Invalid zlib header
+        let mut d = Decompressor::new().with_skip_checksum(true);
+        let mut output = vec![0u8; 1024];
+        let err = d
+            .zlib_decompress(&[0x00, 0x00, 0, 0, 0, 0], &mut output, enough::Unstoppable)
+            .unwrap_err();
+        assert_eq!(err, DecompressionError::InvalidHeader);
+    }
+
+    /// checksum_matched is None for raw DEFLATE (no wrapper checksum).
+    #[test]
+    fn deflate_checksum_matched_is_none() {
+        let data = b"raw deflate test";
+        let mut c = libdeflater::Compressor::new(libdeflater::CompressionLvl::new(6).unwrap());
+        let bound = c.deflate_compress_bound(data.len());
+        let mut compressed = vec![0u8; bound];
+        let csize = c.deflate_compress(data, &mut compressed).unwrap();
+
+        let mut d = Decompressor::new().with_skip_checksum(true);
+        let mut output = vec![0u8; data.len()];
+        d.deflate_decompress(&compressed[..csize], &mut output, enough::Unstoppable)
+            .unwrap();
+        assert_eq!(d.checksum_matched(), None);
     }
 
     /// Broad garbage rejection: 256 different single-byte inputs to all formats.
