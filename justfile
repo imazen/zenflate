@@ -54,3 +54,15 @@ bench-check:
 # Run a specific benchmark group
 bench-group group:
     cargo bench --features unchecked -- "{{group}}"
+
+# Fuzz decompression with arbitrary input (default 60s)
+fuzz-decompress seconds="60":
+    cargo +nightly fuzz run fuzz_decompress -- -max_total_time={{seconds}} -max_len=65536
+
+# Fuzz compress+decompress round-trip (default 60s)
+fuzz-roundtrip seconds="60":
+    cargo +nightly fuzz run fuzz_roundtrip -- -max_total_time={{seconds}} -max_len=65536
+
+# Build fuzz targets without running
+fuzz-check:
+    cargo +nightly fuzz build
