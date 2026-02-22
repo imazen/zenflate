@@ -2219,4 +2219,139 @@ mod tests {
             assert_eq!(&output[..result.output_written], *data);
         }
     }
+
+    /// miniz_oxide #137: zlib stream with incomplete Huffman tree must be rejected.
+    /// This is a valid zlib header wrapping a dynamic Huffman block whose
+    /// literal/length code is not a complete prefix code.
+    #[test]
+    fn reject_incomplete_huffman_tree_miniz137() {
+        let data: &[u8] = &[
+            120, 1, 237, 224, 144, 1, 36, 73, 146, 36, 73, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 122, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
+        ];
+        let mut d = Decompressor::new();
+        let mut output = vec![0u8; 4096];
+        // Must return an error (bad Huffman table), not panic or return garbage
+        assert!(
+            d.zlib_decompress(data, &mut output, enough::Unstoppable)
+                .is_err()
+        );
+    }
+
+    /// miniz_oxide #161: garbage input that triggered a panic in match copy.
+    /// Must return Err, not panic from out-of-bounds.
+    #[test]
+    fn garbage_input_no_panic_miniz161() {
+        let data: &[u8] = &[
+            0xfa, 0x99, 0xff, 0xf4, 0xf3, 0x7f, 0xef, 0x5b, 0xbf, 0xf9, 0xbb, 0x6c, 0xcb, 0x9a,
+            0xb4, 0xe4, 0x7f, 0x66, 0xd9, 0x87, 0x5c, 0xeb, 0xf9, 0xff, 0xe6, 0xeb, 0x6f, 0xbd,
+            0xf6, 0xe2, 0x4b, 0x77, 0x3f, 0x72, 0xeb, 0xe5, 0x17, 0x5f, 0x62, 0xff, 0x26, 0xbf,
+            0x78, 0xee, 0xc5, 0x7b, 0xaf, 0xdd, 0x78, 0xee, 0x6b, 0x5f, 0x7e, 0xfe, 0xee, 0x2b,
+            0x2f, 0x5b, 0x1d, 0x2b, 0xfe, 0x51, 0x00,
+        ];
+        let mut d = Decompressor::new();
+        let mut output = vec![0u8; 4096];
+        // Should not panic — error or success, either is fine
+        let _ = d.deflate_decompress(data, &mut output, enough::Unstoppable);
+    }
+
+    /// miniz_oxide #143: sync flush marker in raw deflate (WebSocket per-message
+    /// compression). The block is non-final, so whole-buffer decompressor rejects it.
+    #[test]
+    fn sync_flush_nonfinal_block_rejected() {
+        // "Hello" compressed with sync flush: non-final dynamic block + sync marker
+        let data: &[u8] = &[
+            0xf2, 0x48, 0xcd, 0xc9, 0xc9, 0x07, 0x00, 0x00, 0x00, 0xff, 0xff,
+        ];
+        let mut d = Decompressor::new();
+        let mut output = vec![0u8; 256];
+        // Whole-buffer decompressor requires a final block — this has none
+        assert!(
+            d.deflate_decompress(data, &mut output, enough::Unstoppable)
+                .is_err()
+        );
+    }
+
+    /// zlib-rs #172: gzip stream that failed at certain chunk sizes.
+    /// Whole-buffer decompressor should handle this correctly.
+    #[test]
+    fn gzip_test_vector_zlibrs172() {
+        let data: &[u8] = &[
+            31, 139, 8, 0, 0, 0, 0, 0, 0, 3, 75, 173, 40, 72, 77, 46, 73, 77, 81, 200, 47, 45, 41,
+            40, 45, 1, 0, 176, 1, 57, 179, 15, 0, 0, 0,
+        ];
+        let mut d = Decompressor::new();
+        let mut output = vec![0u8; 256];
+        let result = d
+            .gzip_decompress(data, &mut output, enough::Unstoppable)
+            .expect("valid gzip stream should decompress");
+        assert_eq!(
+            &output[..result.output_written],
+            b"expected output",
+            "gzip test vector should decode to 'expected output'"
+        );
+    }
+
+    /// Exact compressed size buffer: compression must succeed when output buffer
+    /// is exactly the compressed size (not just compress_bound).
+    /// Catches libdeflate #102 where exact-fit buffers failed.
+    #[test]
+    fn compress_exact_output_size() {
+        use crate::{CompressionLevel, Compressor};
+
+        let data = b"1234567890";
+        for level in 0..=12 {
+            let mut c = Compressor::new(CompressionLevel::new(level));
+            // First compress with generous buffer to learn the exact size
+            let bound = Compressor::deflate_compress_bound(data.len());
+            let mut big_buf = vec![0u8; bound];
+            let exact_size = c
+                .deflate_compress(data, &mut big_buf, enough::Unstoppable)
+                .unwrap();
+
+            // Now compress into a buffer of exactly that size
+            let mut exact_buf = vec![0u8; exact_size];
+            let result_size = c
+                .deflate_compress(data, &mut exact_buf, enough::Unstoppable)
+                .unwrap_or_else(|e| {
+                    panic!("L{level}: compress into exact-size buffer failed: {e:?}")
+                });
+            assert_eq!(result_size, exact_size, "L{level}: size mismatch");
+            assert_eq!(
+                &exact_buf[..result_size],
+                &big_buf[..exact_size],
+                "L{level}: output differs"
+            );
+        }
+    }
+
+    /// Deterministic compression: reusing a Compressor must produce identical
+    /// output for identical input (zlib-rs #459 pattern).
+    #[test]
+    fn compression_deterministic_across_reuse() {
+        use crate::{CompressionLevel, Compressor};
+
+        let data: Vec<u8> = (0..=255u8).cycle().take(8192).collect();
+        for level in 0..=12 {
+            let mut c = Compressor::new(CompressionLevel::new(level));
+            let bound = Compressor::deflate_compress_bound(data.len());
+
+            let mut out1 = vec![0u8; bound];
+            let size1 = c
+                .deflate_compress(&data, &mut out1, enough::Unstoppable)
+                .unwrap();
+
+            let mut out2 = vec![0u8; bound];
+            let size2 = c
+                .deflate_compress(&data, &mut out2, enough::Unstoppable)
+                .unwrap();
+
+            assert_eq!(size1, size2, "L{level}: sizes differ on reuse");
+            assert_eq!(
+                &out1[..size1],
+                &out2[..size2],
+                "L{level}: output differs on reuse"
+            );
+        }
+    }
 }
