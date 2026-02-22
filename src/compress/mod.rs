@@ -166,6 +166,34 @@ pub struct Compressor {
     chunk_start: usize,
     /// Force all blocks to BFINAL=0 (for parallel non-last chunks).
     force_nonfinal: bool,
+    /// Incremental compression: how far into the accumulated buffer we've compressed.
+    /// 0 means no prior incremental call (matchfinder needs init).
+    incremental_pos: usize,
+    /// Incremental compression: matchfinder base offset (for window sliding).
+    incremental_base_offset: usize,
+}
+
+impl Clone for Compressor {
+    fn clone(&self) -> Self {
+        Self {
+            level: self.level,
+            max_search_depth: self.max_search_depth,
+            nice_match_length: self.nice_match_length,
+            max_passthrough_size: self.max_passthrough_size,
+            freqs: self.freqs.clone(),
+            split_stats: self.split_stats.clone(),
+            codes: self.codes.clone(),
+            static_codes: self.static_codes.clone(),
+            sequences: self.sequences.clone(),
+            ht_mf: self.ht_mf.as_ref().map(|b| Box::new((**b).clone())),
+            hc_mf: self.hc_mf.as_ref().map(|b| Box::new((**b).clone())),
+            near_optimal: self.near_optimal.as_ref().map(|b| Box::new((**b).clone())),
+            chunk_start: self.chunk_start,
+            force_nonfinal: self.force_nonfinal,
+            incremental_pos: self.incremental_pos,
+            incremental_base_offset: self.incremental_base_offset,
+        }
+    }
 }
 
 impl Compressor {
@@ -247,6 +275,8 @@ impl Compressor {
             },
             chunk_start: 0,
             force_nonfinal: false,
+            incremental_pos: 0,
+            incremental_base_offset: 0,
         }
     }
 
@@ -397,6 +427,404 @@ impl Compressor {
     /// Compute the maximum compressed size for gzip output.
     pub fn gzip_compress_bound(input_len: usize) -> usize {
         Self::deflate_compress_bound(input_len) + 10 + 8 // header + crc32 + isize
+    }
+
+    /// Feed data incrementally and get compressed DEFLATE output.
+    ///
+    /// Each call passes the FULL accumulated input (all prior data plus new data).
+    /// The compressor remembers how far it has compressed (via `incremental_pos`)
+    /// and only compresses the new portion, using matchfinder state from prior calls.
+    ///
+    /// `is_final`: set true on the last chunk to emit the DEFLATE end marker.
+    ///
+    /// This is designed for the forking brute-force use case: feed one PNG row
+    /// at a time, fork (clone) before each row, try different filters, pick
+    /// the smallest output, continue from the winner.
+    ///
+    /// **Constraints:**
+    /// - `data` must be a superset of the data from the previous call (same prefix,
+    ///   with new bytes appended).
+    /// - Total data must fit in the matchfinder window (32 KB for L1-L9).
+    ///   For data exceeding the window, the matchfinder silently handles sliding.
+    /// - Levels 0 and 10-12 are not supported; returns `InsufficientSpace` error.
+    ///
+    /// Returns the number of bytes written to `output`.
+    pub fn deflate_compress_incremental(
+        &mut self,
+        data: &[u8],
+        output: &mut [u8],
+        is_final: bool,
+        stop: impl enough::Stop,
+    ) -> Result<usize, CompressionError> {
+        let new_start = self.incremental_pos;
+        if new_start >= data.len() && !is_final {
+            return Ok(0); // nothing new to compress
+        }
+
+        let mut os = OutputBitstream::new(output);
+
+        match self.level.level() {
+            1 => {
+                self.compress_incremental_ht(&mut os, data, new_start, is_final, &stop)?;
+            }
+            2..=9 => {
+                self.compress_incremental_hc(&mut os, data, new_start, is_final, &stop)?;
+            }
+            _ => {
+                return Err(CompressionError::InsufficientSpace);
+            }
+        }
+
+        if os.overflow {
+            return Err(CompressionError::InsufficientSpace);
+        }
+
+        // Write final partial byte
+        if os.bitcount > 0 {
+            if os.pos < os.buf.len() {
+                os.buf[os.pos] = os.bitbuf as u8;
+                os.pos += 1;
+            } else {
+                return Err(CompressionError::InsufficientSpace);
+            }
+        }
+
+        self.incremental_pos = data.len();
+        Ok(os.pos)
+    }
+
+    /// Reset incremental state so the next `deflate_compress_incremental` call
+    /// starts fresh (reinitializes the matchfinder).
+    pub fn incremental_reset(&mut self) {
+        self.incremental_pos = 0;
+        self.incremental_base_offset = 0;
+    }
+
+    /// Returns the current incremental cursor position.
+    pub fn incremental_pos(&self) -> usize {
+        self.incremental_pos
+    }
+
+    /// Incremental compression using the hash table matchfinder (L1).
+    ///
+    /// On first call (new_start == 0), initializes the matchfinder.
+    /// On subsequent calls, uses existing matchfinder state — hash entries
+    /// from prior rows provide context for matching.
+    fn compress_incremental_ht(
+        &mut self,
+        os: &mut OutputBitstream<'_>,
+        input: &[u8],
+        new_start: usize,
+        is_final: bool,
+        stop: &impl enough::Stop,
+    ) -> Result<(), CompressionError> {
+        let mut mf = self.ht_mf.take().unwrap();
+
+        if new_start == 0 {
+            mf.init();
+            self.incremental_base_offset = 0;
+        }
+
+        let in_end = input.len();
+        let mut in_next = new_start;
+        let mut in_base_offset = self.incremental_base_offset;
+
+        // Feed new bytes to the matchfinder and produce one DEFLATE block.
+        if in_next < in_end {
+            stop.check()?;
+            let in_block_begin = in_next;
+            let mut seq_idx = 0;
+
+            self.freqs.reset();
+            self.sequences[0].litrunlen_and_length = 0;
+
+            let mut next_hash = if in_next + 4 <= in_end {
+                lz_hash(
+                    crate::fast_bytes::load_u32_le(input, in_next),
+                    HT_MATCHFINDER_HASH_ORDER,
+                )
+            } else {
+                0
+            };
+
+            while in_next < in_end && seq_idx < FAST_SEQ_STORE_LENGTH {
+                let remaining = in_end - in_next;
+                let max_len = remaining.min(DEFLATE_MAX_MATCH_LEN as usize) as u32;
+                let nice_len = max_len.min(self.nice_match_length);
+
+                if max_len >= HT_MATCHFINDER_REQUIRED_NBYTES {
+                    let (length, offset) = mf.longest_match(
+                        input,
+                        &mut in_base_offset,
+                        in_next,
+                        max_len,
+                        nice_len,
+                        &mut next_hash,
+                    );
+
+                    if length > 0 {
+                        seq_idx = choose_match(
+                            &mut self.freqs,
+                            length,
+                            offset,
+                            &mut self.sequences,
+                            seq_idx,
+                        );
+                        if length > 1 {
+                            mf.skip_bytes(
+                                input,
+                                &mut in_base_offset,
+                                in_next + 1,
+                                length - 1,
+                                &mut next_hash,
+                            );
+                        }
+                        in_next += length as usize;
+                        continue;
+                    }
+                }
+
+                choose_literal(
+                    &mut self.freqs,
+                    input[in_next],
+                    &mut self.sequences[seq_idx],
+                );
+                in_next += 1;
+            }
+
+            let block_length = in_next - in_block_begin;
+            finish_block(
+                os,
+                &input[in_block_begin..],
+                block_length,
+                &self.sequences[..=seq_idx],
+                &mut self.freqs,
+                &mut self.codes,
+                &self.static_codes,
+                is_final && in_next >= in_end,
+            );
+        }
+
+        self.incremental_base_offset = in_base_offset;
+        self.ht_mf = Some(mf);
+        Ok(())
+    }
+
+    /// Incremental compression using the hash chains matchfinder (L2-L9).
+    ///
+    /// On first call (new_start == 0), initializes the matchfinder.
+    /// On subsequent calls, uses existing matchfinder state.
+    fn compress_incremental_hc(
+        &mut self,
+        os: &mut OutputBitstream<'_>,
+        input: &[u8],
+        new_start: usize,
+        is_final: bool,
+        stop: &impl enough::Stop,
+    ) -> Result<(), CompressionError> {
+        let mut mf = self.hc_mf.take().unwrap();
+
+        if new_start == 0 {
+            mf.init();
+            self.incremental_base_offset = 0;
+        }
+
+        let in_end = input.len();
+        let mut in_next = new_start;
+        let mut in_base_offset = self.incremental_base_offset;
+        let mut max_len = DEFLATE_MAX_MATCH_LEN;
+        let mut nice_len = max_len.min(self.nice_match_length);
+        let max_search_depth = self.max_search_depth;
+        let lazy2 = self.level.level() >= 8;
+
+        let mut next_hashes = [0u32; 2];
+
+        // Feed new bytes and produce one DEFLATE block.
+        if in_next < in_end {
+            stop.check()?;
+            let in_block_begin = in_next;
+            let mut seq_idx = 0;
+
+            self.split_stats = BlockSplitStats::new();
+            self.freqs.reset();
+            self.sequences[0].litrunlen_and_length = 0;
+
+            let min_len =
+                calculate_min_match_len(&input[in_next..in_end.min(in_next + SOFT_MAX_BLOCK_LENGTH)], max_search_depth);
+
+            if lazy2 || self.level.level() >= 5 {
+                // Lazy/lazy2 path
+                loop {
+                    adjust_max_and_nice_len(&mut max_len, &mut nice_len, in_end - in_next);
+                    let (mut cur_len, mut cur_offset) = mf.longest_match(
+                        input,
+                        &mut in_base_offset,
+                        in_next,
+                        min_len - 1,
+                        max_len,
+                        nice_len,
+                        max_search_depth,
+                        &mut next_hashes,
+                    );
+
+                    if cur_len < min_len || (cur_len == DEFLATE_MIN_MATCH_LEN && cur_offset > 8192) {
+                        choose_literal(
+                            &mut self.freqs,
+                            input[in_next],
+                            &mut self.sequences[seq_idx],
+                        );
+                        self.split_stats.observe_literal(input[in_next]);
+                        in_next += 1;
+                    } else {
+                        in_next += 1;
+                        loop {
+                            if cur_len >= nice_len {
+                                seq_idx = choose_match(
+                                    &mut self.freqs,
+                                    cur_len,
+                                    cur_offset,
+                                    &mut self.sequences,
+                                    seq_idx,
+                                );
+                                self.split_stats.observe_match(cur_len);
+                                mf.skip_bytes(
+                                    input,
+                                    &mut in_base_offset,
+                                    in_next,
+                                    in_end,
+                                    cur_len - 1,
+                                    &mut next_hashes,
+                                );
+                                in_next += (cur_len - 1) as usize;
+                                break;
+                            }
+
+                            adjust_max_and_nice_len(&mut max_len, &mut nice_len, in_end - in_next);
+                            let (next_len, next_offset) = mf.longest_match(
+                                input,
+                                &mut in_base_offset,
+                                in_next,
+                                cur_len - 1,
+                                max_len,
+                                nice_len,
+                                max_search_depth >> 1,
+                                &mut next_hashes,
+                            );
+                            in_next += 1;
+
+                            if next_len >= cur_len
+                                && 4 * (next_len as i32 - cur_len as i32)
+                                    + (bsr32(cur_offset) as i32 - bsr32(next_offset) as i32)
+                                    > 2
+                            {
+                                choose_literal(
+                                    &mut self.freqs,
+                                    input[in_next - 2],
+                                    &mut self.sequences[seq_idx],
+                                );
+                                self.split_stats.observe_literal(input[in_next - 2]);
+                                cur_len = next_len;
+                                cur_offset = next_offset;
+                                continue;
+                            }
+
+                            seq_idx = choose_match(
+                                &mut self.freqs,
+                                cur_len,
+                                cur_offset,
+                                &mut self.sequences,
+                                seq_idx,
+                            );
+                            self.split_stats.observe_match(cur_len);
+                            let skip = if lazy2 {
+                                cur_len.saturating_sub(3)
+                            } else {
+                                cur_len - 2
+                            };
+                            if skip > 0 {
+                                mf.skip_bytes(
+                                    input,
+                                    &mut in_base_offset,
+                                    in_next,
+                                    in_end,
+                                    skip,
+                                    &mut next_hashes,
+                                );
+                                in_next += skip as usize;
+                            }
+                            break;
+                        }
+                    }
+
+                    if in_next >= in_end || seq_idx >= SEQ_STORE_LENGTH {
+                        break;
+                    }
+                }
+            } else {
+                // Greedy path (L2-L4)
+                loop {
+                    adjust_max_and_nice_len(&mut max_len, &mut nice_len, in_end - in_next);
+                    let (length, offset) = mf.longest_match(
+                        input,
+                        &mut in_base_offset,
+                        in_next,
+                        min_len - 1,
+                        max_len,
+                        nice_len,
+                        max_search_depth,
+                        &mut next_hashes,
+                    );
+
+                    if length >= min_len && (length > DEFLATE_MIN_MATCH_LEN || offset <= 4096) {
+                        seq_idx = choose_match(
+                            &mut self.freqs,
+                            length,
+                            offset,
+                            &mut self.sequences,
+                            seq_idx,
+                        );
+                        self.split_stats.observe_match(length);
+                        mf.skip_bytes(
+                            input,
+                            &mut in_base_offset,
+                            in_next + 1,
+                            in_end,
+                            length - 1,
+                            &mut next_hashes,
+                        );
+                        in_next += length as usize;
+                    } else {
+                        choose_literal(
+                            &mut self.freqs,
+                            input[in_next],
+                            &mut self.sequences[seq_idx],
+                        );
+                        self.split_stats.observe_literal(input[in_next]);
+                        in_next += 1;
+                    }
+
+                    if in_next >= in_end || seq_idx >= SEQ_STORE_LENGTH {
+                        break;
+                    }
+                }
+            }
+
+            let block_length = in_next - in_block_begin;
+            finish_block(
+                os,
+                &input[in_block_begin..],
+                block_length,
+                &self.sequences[..=seq_idx],
+                &mut self.freqs,
+                &mut self.codes,
+                &self.static_codes,
+                is_final && in_next >= in_end,
+            );
+        }
+
+        self.incremental_base_offset = in_base_offset;
+        self.hc_mf = Some(mf);
+        Ok(())
     }
 
     /// Level 1: fastest compression using hash table matchfinder.

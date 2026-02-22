@@ -133,6 +133,11 @@ impl Default for DeflateCosts {
 /// With `unchecked`, all large fields are fixed arrays so `Box<NearOptimalState>`
 /// is a single heap allocation (~9MB), matching libdeflate C's single malloc.
 /// Without `unchecked`, fields use Vec (separate allocations per field).
+///
+/// Clone is available for the forking compressor use case (fork-per-row BF).
+/// For L10-12 with `unchecked`, cloning puts ~9MB on the stack temporarily;
+/// this is acceptable for the forking BF prototype which primarily targets L1-L4.
+#[derive(Clone)]
 pub(crate) struct NearOptimalState {
     /// Binary tree matchfinder.
     pub bt_mf: BtMatchfinder,

@@ -24,6 +24,7 @@ const HC_HASH4_SIZE: usize = 1 << HC_MATCHFINDER_HASH4_ORDER;
 const WINDOW_MASK: usize = MATCHFINDER_WINDOW_SIZE as usize - 1;
 
 /// Hash Chains matchfinder for levels 2-9.
+#[derive(Clone)]
 pub(crate) struct HcMatchfinder {
     /// Hash table for length 3 matches (singleton entries).
     hash3_tab: [i16; HC_HASH3_SIZE],

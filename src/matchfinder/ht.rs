@@ -24,6 +24,7 @@ pub(crate) const HT_MATCHFINDER_REQUIRED_NBYTES: u32 = 5;
 const HT_NUM_BUCKETS: usize = 1 << HT_MATCHFINDER_HASH_ORDER;
 
 /// Hash Table matchfinder: 32K buckets × 2 entries (i16 positions).
+#[derive(Clone)]
 pub(crate) struct HtMatchfinder {
     hash_tab: [[i16; HT_MATCHFINDER_BUCKET_SIZE]; HT_NUM_BUCKETS],
 }

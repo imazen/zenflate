@@ -69,6 +69,7 @@ pub(crate) struct LzMatch {
 /// With `unchecked`, uses fixed arrays so the whole NearOptimalState
 /// becomes a single allocation via `Box::new_uninit()`.
 /// Without `unchecked`, uses Vec (separate heap allocations per field).
+#[derive(Clone)]
 pub(crate) struct BtMatchfinder {
     /// Hash table for length 3 matches (2-way). Flat: [BT_HASH3_SIZE * 2].
     hash3_tab: BtHash3Tab,
