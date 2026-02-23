@@ -94,7 +94,7 @@ use zenflate::CompressionLevel;
 // Named presets
 CompressionLevel::none()      // effort 0  — store (no compression)
 CompressionLevel::fastest()   // effort 1  — turbo hash table
-CompressionLevel::fast()      // effort 8  — greedy hash chains
+CompressionLevel::fast()      // effort 10 — greedy hash chains
 CompressionLevel::balanced()  // effort 15 — lazy matching (default)
 CompressionLevel::high()      // effort 22 — double-lazy matching
 CompressionLevel::best()      // effort 30 — near-optimal parsing
@@ -107,19 +107,53 @@ CompressionLevel::new(25)     // near-optimal, fast end
 CompressionLevel::libdeflate(6)
 ```
 
-| Preset | Effort | Strategy | When to use |
+| Preset | Effort | Strategy | Description |
 |--------|--------|----------|-------------|
 | `none()` | 0 | Store | Framing only, no compression |
-| `fastest()` | 1 | Turbo | Maximum throughput, ~500 MiB/s |
-| `fast()` | 8 | Greedy | Good speed, ~300 MiB/s |
-| `balanced()` | 15 | Lazy | Good ratio at reasonable speed (default) |
-| `high()` | 22 | Lazy2 | Better ratio, slower |
-| `best()` | 30 | Near-optimal | Best ratio, ~5x slower than `balanced()` |
+| `fastest()` | 1 | Turbo | Maximum throughput |
+| `fast()` | 10 | Greedy | Hash chains — big ratio jump over turbo |
+| `balanced()` | 15 | Lazy | Lazy matching — good default |
+| `high()` | 22 | Lazy2 | Double-lazy — best before near-optimal |
+| `best()` | 30 | Near-optimal | Best compression ratio |
 
-Efforts between presets give intermediate speed/ratio tradeoffs. Higher effort
-within the same strategy increases search depth and match quality.
+Effort levels 0-30 map to six strategies:
+
+| Effort | Strategy | Notes |
+|--------|----------|-------|
+| 0 | Store | No compression |
+| 1-4 | Turbo | Single-entry hash table, fastest |
+| 5-9 | FastHt | 2-entry hash table, increasing match length |
+| 10 | Greedy | Hash chains with greedy matching |
+| 11-17 | Lazy | Hash chains with lazy matching |
+| 18-22 | Lazy2 | Double-lazy matching |
+| 23-30 | Near-optimal | Near-optimal parsing via binary trees |
+
+Higher effort within a strategy increases search depth and match quality.
+Strategy transitions (e.g. e9→e10, e10→e11) can occasionally produce
+slightly larger output on specific inputs due to algorithmic differences.
+Use `CompressionLevel::monotonicity_fallback()` to detect and handle these
+transitions — it returns the previous strategy's max effort so you can
+compare both and pick the smaller result.
 
 Reuse `Compressor` and `Decompressor` across calls to avoid re-initialization.
+
+#### Recommended effort levels
+
+Benchmarked on real images (10 screenshots, 10 photos) from the
+[codec-corpus](https://crates.io/crates/codec-corpus). Ratio = compressed / raw
+size (lower is better). Speed = compression throughput.
+
+| Effort | Preset | Strategy | Screenshots | Photos | Note |
+|--------|--------|----------|-------------|--------|------|
+| 1 | `fastest()` | Turbo | 6.2%, 2360 MiB/s | 73.4%, 225 MiB/s | Max throughput |
+| 9 | — | FastHt | 5.9%, 2175 MiB/s | 73.0%, 164 MiB/s | Best cheap compression |
+| 10 | `fast()` | Greedy | 5.3%, 630 MiB/s | 70.7%, 118 MiB/s | Hash chains — big ratio jump |
+| 15 | `balanced()` | Lazy | 5.1%, 466 MiB/s | 69.7%, 90 MiB/s | Good default |
+| 22 | `high()` | Lazy2 | 4.9%, 197 MiB/s | 69.8%, 72 MiB/s | Best before near-optimal |
+| 30 | `best()` | NearOptimal | 4.4%, 11 MiB/s | 67.4%, 19 MiB/s | Maximum compression |
+
+For most uses, `balanced()` (effort 15) is a good default. Use `fast()` (effort 10)
+when speed matters more than the last few percent of compression.
 
 ### Parallel gzip compression
 

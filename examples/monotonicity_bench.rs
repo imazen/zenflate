@@ -7,8 +7,12 @@
 /// Usage:
 ///   cargo run --release --features unchecked --example monotonicity_bench
 ///   cargo run --release --features unchecked --example monotonicity_bench -- --quick
+///   cargo run --release --features unchecked --example monotonicity_bench -- --tsv > data.tsv
 ///
 /// The `--quick` flag tests only efforts 0,1,3,5,7,8,9,10,12,15,20,24,30 (preset boundaries).
+/// The `--tsv` flag outputs machine-readable TSV with timing data for charting.
+
+use std::time::Instant;
 
 fn main() {
     // NearOptimal strategy uses deep recursion; spawn worker with large stack.
@@ -22,8 +26,12 @@ fn main() {
 
 fn run() -> i32 {
     let quick = std::env::args().any(|a| a == "--quick");
+    let tsv = std::env::args().any(|a| a == "--tsv");
 
-    let efforts: Vec<u32> = if quick {
+    // TSV mode always tests all 31 efforts (skip e0 Store since it's not compression)
+    let efforts: Vec<u32> = if tsv {
+        (1..=30).collect()
+    } else if quick {
         vec![0, 1, 3, 5, 7, 8, 9, 10, 12, 15, 20, 24, 30]
     } else {
         (0..=30).collect()
@@ -65,6 +73,10 @@ fn run() -> i32 {
     datasets.push(("synth/photo-2000x2000".to_string(), make_photo(2000, 2000)));
     datasets.push(("synth/noise-1M".to_string(), make_noise(1024 * 1024)));
     datasets.push(("synth/zeros-1M".to_string(), vec![0u8; 1024 * 1024]));
+
+    if tsv {
+        return run_tsv(&datasets, &efforts);
+    }
 
     println!(
         "Monotonicity benchmark: {} datasets, {} effort levels\n",
@@ -215,6 +227,75 @@ fn run() -> i32 {
 
     if use_fallback { if total_fb_violations > 0 { 1 } else { 0 } }
     else { if total_raw_violations > 0 { 1 } else { 0 } }
+}
+
+/// TSV mode: output machine-readable data with timing for charting.
+/// Columns: dataset, category, effort, strategy, raw_bytes, compressed_bytes, ratio, speed_mibps
+fn run_tsv(datasets: &[(String, Vec<u8>)], efforts: &[u32]) -> i32 {
+    const WARMUP: usize = 1;
+    const ITERS: usize = 5;
+
+    eprintln!(
+        "TSV benchmark: {} datasets, {} effort levels, {ITERS} iterations each",
+        datasets.len(),
+        efforts.len()
+    );
+
+    println!("dataset\tcategory\teffort\tstrategy\traw_bytes\tcompressed_bytes\tratio\tspeed_mibps");
+
+    for (name, data) in datasets {
+        let category = if name.starts_with("sc/") {
+            "screenshot"
+        } else if name.starts_with("cid/") {
+            "photo"
+        } else if name.contains("noise") {
+            "noise"
+        } else if name.contains("zeros") {
+            "zeros"
+        } else if name.contains("screenshot") {
+            "screenshot"
+        } else {
+            "photo"
+        };
+
+        eprintln!("  {name} ({:.1} KiB)...", data.len() as f64 / 1024.0);
+
+        for &effort in efforts {
+            let level = zenflate::CompressionLevel::new(effort);
+            let mut c = zenflate::Compressor::new(level);
+            let bound = zenflate::Compressor::deflate_compress_bound(data.len());
+            let mut out = vec![0u8; bound];
+
+            // Warmup
+            for _ in 0..WARMUP {
+                let _ = c.deflate_compress(data, &mut out, zenflate::Unstoppable);
+            }
+
+            // Timed runs — take best
+            let mut best_secs = f64::MAX;
+            let mut size = 0;
+            for _ in 0..ITERS {
+                let start = Instant::now();
+                size = c
+                    .deflate_compress(data, &mut out, zenflate::Unstoppable)
+                    .unwrap();
+                let elapsed = start.elapsed().as_secs_f64();
+                best_secs = best_secs.min(elapsed);
+            }
+
+            let ratio = size as f64 / data.len() as f64;
+            let speed_mibps = (data.len() as f64 / 1_048_576.0) / best_secs;
+            let strategy = effort_to_strategy_name(effort);
+
+            println!(
+                "{name}\t{category}\t{effort}\t{strategy}\t{}\t{size}\t{ratio:.6}\t{speed_mibps:.1}",
+                data.len()
+            );
+        }
+    }
+
+    eprintln!("Done.");
+    0
 }
 
 fn effort_to_strategy_name(effort: u32) -> &'static str {
