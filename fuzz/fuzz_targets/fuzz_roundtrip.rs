@@ -9,15 +9,15 @@ use zenflate::{CompressionLevel, Compressor, Decompressor, Unstoppable};
 
 #[derive(arbitrary::Arbitrary, Debug)]
 struct Input {
-    /// Compression level 0-12
-    level: u8,
+    /// Compression effort 0-30
+    effort: u8,
     /// Data to compress
     data: Vec<u8>,
 }
 
 fuzz_target!(|input: Input| {
-    // Clamp level to valid range
-    let level = (input.level % 13) as u32;
+    // Clamp effort to valid range (0-30)
+    let level = (input.effort % 31) as u32;
     let data = &input.data;
 
     // Skip very large inputs to avoid timeout
