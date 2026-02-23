@@ -59,6 +59,7 @@ pub(crate) enum InternalStrategy {
     /// No compression — store blocks only.
     Store,
     /// Static Huffman codes + turbo matchfinder (single-entry hash, limited updates).
+    #[allow(dead_code)]
     StaticTurbo,
     /// Dynamic Huffman codes + turbo matchfinder (single-entry hash, limited updates).
     Turbo,
@@ -1424,7 +1425,7 @@ impl Compressor {
             // the output and emit an uncompressed block instead.
             let static_bytes = os.pos.saturating_sub(saved_pos);
             // Uncompressed cost: data + 5 bytes per 64K sub-block + 1 alignment byte
-            let uncomp_bytes = block_length + 5 * ((block_length + 0xFFFE) / 0xFFFF) + 1;
+            let uncomp_bytes = block_length + 5 * block_length.div_ceil(0xFFFF) + 1;
             if os.overflow || static_bytes > uncomp_bytes {
                 os.pos = saved_pos;
                 os.bitbuf = saved_bitbuf;

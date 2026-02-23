@@ -42,9 +42,9 @@ fn make_screenshot(width: usize, height: usize) -> Vec<u8> {
                 (next() % 6) as i32 - 3
             };
 
-            data.push((r as i32 + noise).clamp(0, 255) as u8);
-            data.push((g as i32 + noise).clamp(0, 255) as u8);
-            data.push((b as i32 + noise).clamp(0, 255) as u8);
+            data.push((r + noise).clamp(0, 255) as u8);
+            data.push((g + noise).clamp(0, 255) as u8);
+            data.push((b + noise).clamp(0, 255) as u8);
             data.push(255);
         }
     }

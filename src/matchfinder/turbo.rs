@@ -13,6 +13,7 @@ use super::{MATCHFINDER_WINDOW_SIZE, lz_extend, lz_hash, matchfinder_init, match
 const TURBO_HASH_ORDER: u32 = 15;
 
 /// Minimum match length for the turbo matchfinder.
+#[allow(dead_code)]
 pub(crate) const TURBO_MIN_MATCH_LEN: u32 = 4;
 
 /// Minimum value of max_len for longest_match().

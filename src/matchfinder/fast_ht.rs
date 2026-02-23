@@ -19,6 +19,7 @@ const FAST_HT_HASH_ORDER: u32 = 14;
 const BUCKET_SIZE: usize = 2;
 
 /// Minimum match length.
+#[allow(dead_code)]
 pub(crate) const FAST_HT_MIN_MATCH_LEN: u32 = 4;
 
 /// Minimum value of max_len for longest_match().
