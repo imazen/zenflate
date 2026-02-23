@@ -1,8 +1,15 @@
-/// Strategy benchmark: compare all effort levels across 4 data types.
+/// Multi-library compression benchmark across 4 data types.
+///
+/// Compares zenflate (effort 0-30), libdeflate C (1-12), flate2 (1-9), miniz_oxide (1-10).
 ///
 /// Usage:
 ///   cargo run --release --features unchecked --example strategy_bench
+///   cargo run --release --example strategy_bench              # safe mode
 use std::time::Instant;
+
+// ---------------------------------------------------------------------------
+// Data generators
+// ---------------------------------------------------------------------------
 
 /// 2560x1440 screenshot-like bitmap (RGBA): large flat areas, text edges, UI borders.
 fn make_screenshot(width: usize, height: usize) -> Vec<u8> {
@@ -15,23 +22,20 @@ fn make_screenshot(width: usize, height: usize) -> Vec<u8> {
 
     for y in 0..height {
         for x in 0..width {
-            // Background: mostly flat white/light gray with some variation
             let region = (y / (height / 6), x / (width / 4));
             let (r, g, b) = match region {
-                (0, _) => (245, 245, 245),     // top toolbar - light gray
-                (1, 0) => (40, 44, 52),        // sidebar - dark
-                (1, 1..=2) => (255, 255, 255), // main content - white
-                (1, _) => (248, 249, 250),     // right panel - very light
-                (2, 0) => (40, 44, 52),        // sidebar continues
-                (2, _) => (255, 255, 255),     // content
-                (3, _) => (255, 255, 255),     // content
-                (4, _) => (250, 250, 250),     // near bottom
-                _ => (240, 240, 240),          // status bar
+                (0, _) => (245, 245, 245),
+                (1, 0) => (40, 44, 52),
+                (1, 1..=2) => (255, 255, 255),
+                (1, _) => (248, 249, 250),
+                (2, 0) => (40, 44, 52),
+                (2, _) => (255, 255, 255),
+                (3, _) => (255, 255, 255),
+                (4, _) => (250, 250, 250),
+                _ => (240, 240, 240),
             };
 
-            // Add slight noise for anti-aliasing / subpixel rendering
             let noise = if (y % 20 < 2) || (x % 150 < 2) {
-                // "Text" and "border" pixels: more variation
                 (next() % 60) as i32 - 30
             } else {
                 (next() % 6) as i32 - 3
@@ -40,7 +44,7 @@ fn make_screenshot(width: usize, height: usize) -> Vec<u8> {
             data.push((r as i32 + noise).clamp(0, 255) as u8);
             data.push((g as i32 + noise).clamp(0, 255) as u8);
             data.push((b as i32 + noise).clamp(0, 255) as u8);
-            data.push(255); // alpha
+            data.push(255);
         }
     }
     data
@@ -86,21 +90,135 @@ fn make_noise(size: usize) -> Vec<u8> {
     data
 }
 
-fn bench(data: &[u8], effort: u32) -> (usize, f64) {
+// ---------------------------------------------------------------------------
+// Bench helpers
+// ---------------------------------------------------------------------------
+
+const WARMUP: usize = 1;
+const ITERS: usize = 5;
+
+struct BenchResult {
+    library: &'static str,
+    level: String,
+    strategy: &'static str,
+    size: usize,
+    secs: f64,
+}
+
+fn bench_zenflate(data: &[u8], effort: u32) -> BenchResult {
+    let strategy = match effort {
+        0 => "Store",
+        1..=2 => "StaticTurbo",
+        3..=4 => "Turbo",
+        5..=7 => "FastHt",
+        8..=10 => "Greedy",
+        11..=17 => "Lazy",
+        18..=22 => "Lazy2",
+        _ => "NearOptimal",
+    };
     let mut c = zenflate::Compressor::new(zenflate::CompressionLevel::new(effort));
     let bound = zenflate::Compressor::deflate_compress_bound(data.len());
     let mut out = vec![0u8; bound];
-    // Warmup
-    let _ = c.deflate_compress(data, &mut out, zenflate::Unstoppable).unwrap();
+    for _ in 0..WARMUP {
+        let _ = c.deflate_compress(data, &mut out, zenflate::Unstoppable).unwrap();
+    }
     let mut best = f64::MAX;
-    for _ in 0..7 {
+    for _ in 0..ITERS {
         let start = Instant::now();
         let _ = c.deflate_compress(data, &mut out, zenflate::Unstoppable).unwrap();
         best = best.min(start.elapsed().as_secs_f64());
     }
-    let len = c.deflate_compress(data, &mut out, zenflate::Unstoppable).unwrap();
-    (len, best)
+    let size = c.deflate_compress(data, &mut out, zenflate::Unstoppable).unwrap();
+    BenchResult {
+        library: "zenflate",
+        level: format!("e{effort}"),
+        strategy,
+        size,
+        secs: best,
+    }
 }
+
+fn bench_libdeflate(data: &[u8], level: i32) -> BenchResult {
+    let strategy = match level {
+        0 => "Store",
+        1 => "HtGreedy",
+        2..=4 => "Greedy",
+        5..=7 => "Lazy",
+        8..=9 => "Lazy2",
+        _ => "NearOptimal",
+    };
+    let mut c = libdeflater::Compressor::new(libdeflater::CompressionLvl::new(level).unwrap());
+    let bound = c.deflate_compress_bound(data.len());
+    let mut out = vec![0u8; bound];
+    for _ in 0..WARMUP {
+        let _ = c.deflate_compress(data, &mut out).unwrap();
+    }
+    let mut best = f64::MAX;
+    for _ in 0..ITERS {
+        let start = Instant::now();
+        let _ = c.deflate_compress(data, &mut out).unwrap();
+        best = best.min(start.elapsed().as_secs_f64());
+    }
+    let size = c.deflate_compress(data, &mut out).unwrap();
+    BenchResult {
+        library: "libdeflate-C",
+        level: format!("L{level}"),
+        strategy,
+        size,
+        secs: best,
+    }
+}
+
+fn bench_flate2(data: &[u8], level: u32) -> BenchResult {
+    let fl = flate2::Compression::new(level);
+    let mut comp = flate2::Compress::new(fl, false);
+    let mut out = vec![0u8; data.len() * 2 + 512];
+    for _ in 0..WARMUP {
+        comp.reset();
+        comp.compress(data, &mut out, flate2::FlushCompress::Finish).unwrap();
+    }
+    let mut best = f64::MAX;
+    for _ in 0..ITERS {
+        comp.reset();
+        let start = Instant::now();
+        comp.compress(data, &mut out, flate2::FlushCompress::Finish).unwrap();
+        best = best.min(start.elapsed().as_secs_f64());
+    }
+    comp.reset();
+    comp.compress(data, &mut out, flate2::FlushCompress::Finish).unwrap();
+    let size = comp.total_out() as usize;
+    BenchResult {
+        library: "flate2",
+        level: format!("L{level}"),
+        strategy: "",
+        size,
+        secs: best,
+    }
+}
+
+fn bench_miniz_oxide(data: &[u8], level: u8) -> BenchResult {
+    for _ in 0..WARMUP {
+        let _ = miniz_oxide::deflate::compress_to_vec(data, level);
+    }
+    let mut best = f64::MAX;
+    for _ in 0..ITERS {
+        let start = Instant::now();
+        let _ = miniz_oxide::deflate::compress_to_vec(data, level);
+        best = best.min(start.elapsed().as_secs_f64());
+    }
+    let out = miniz_oxide::deflate::compress_to_vec(data, level);
+    BenchResult {
+        library: "miniz_oxide",
+        level: format!("L{level}"),
+        strategy: "",
+        size: out.len(),
+        secs: best,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Output
+// ---------------------------------------------------------------------------
 
 fn format_speed(bytes: usize, secs: f64) -> String {
     let mib = bytes as f64 / 1_048_576.0;
@@ -112,58 +230,76 @@ fn format_speed(bytes: usize, secs: f64) -> String {
     }
 }
 
-fn strategy_name(effort: u32) -> &'static str {
-    match effort {
-        0 => "Store",
-        1..=2 => "StaticTurbo",
-        3..=4 => "Turbo",
-        5..=7 => "FastHt",
-        8..=10 => "Greedy",
-        11..=17 => "Lazy",
-        18..=22 => "Lazy2",
-        _ => "NearOptimal",
+fn print_table(name: &str, data: &[u8], results: &[BenchResult]) {
+    let size_mib = data.len() as f64 / 1_048_576.0;
+    println!("\n=== {name} ({size_mib:.2} MiB) ===\n");
+    println!(
+        "{:<14} {:>7}  {:<14}  {:>10}  {:>8}  {:>12}",
+        "Library", "Level", "Strategy", "Size", "Ratio", "Speed"
+    );
+    println!("{}", "-".repeat(72));
+
+    let mut prev_lib = "";
+    for r in results {
+        if !prev_lib.is_empty() && r.library != prev_lib {
+            println!("{}", "-".repeat(72));
+        }
+        prev_lib = r.library;
+        let ratio = r.size as f64 / data.len() as f64 * 100.0;
+        println!(
+            "{:<14} {:>7}  {:<14}  {:>10}  {:>7.2}%  {:>12}",
+            r.library,
+            r.level,
+            r.strategy,
+            r.size,
+            ratio,
+            format_speed(data.len(), r.secs)
+        );
     }
 }
 
 fn run_suite(name: &str, data: &[u8]) {
-    let size_mib = data.len() as f64 / 1_048_576.0;
-    println!("\n=== {name} ({size_mib:.2} MiB) ===\n");
-    println!(
-        "{:>7}  {:<14}  {:>10}  {:>8}  {:>12}",
-        "Effort", "Strategy", "Size", "Ratio", "Speed"
-    );
-    println!("{}", "-".repeat(58));
+    let mut results = Vec::new();
 
+    // zenflate: key effort levels
     let efforts = [1, 2, 3, 4, 5, 6, 7, 8, 10, 12, 15, 18, 22, 25, 28, 30];
     for &e in &efforts {
-        let (len, secs) = bench(data, e);
-        let ratio = len as f64 / data.len() as f64 * 100.0;
-        println!(
-            "{:>7}  {:<14}  {:>10}  {:>7.2}%  {:>12}",
-            e, strategy_name(e), len, ratio,
-            format_speed(data.len(), secs)
-        );
+        results.push(bench_zenflate(data, e));
     }
+
+    // libdeflate C: levels 1-12
+    for level in 1..=12i32 {
+        results.push(bench_libdeflate(data, level));
+    }
+
+    // flate2 (miniz_oxide backend): levels 1-9
+    for level in 1..=9u32 {
+        results.push(bench_flate2(data, level));
+    }
+
+    // miniz_oxide direct: levels 1-9
+    for level in 1..=9u8 {
+        results.push(bench_miniz_oxide(data, level));
+    }
+
+    print_table(name, data, &results);
 }
 
 fn main() {
     let unchecked = cfg!(feature = "unchecked");
     let mode = if unchecked { "unchecked" } else { "safe" };
+    println!("zenflate strategy benchmark");
     println!("Mode: {mode}\n");
 
-    // 1. Screenshot >2K: 2560x1440 RGBA
     let screenshot = make_screenshot(2560, 1440);
     run_suite("Screenshot 2560x1440 RGBA", &screenshot);
 
-    // 2. 4MP photo: 2000x2000 RGB = 12M
     let photo = make_photo(2000, 2000);
     run_suite("Photo 2000x2000 RGB (4MP)", &photo);
 
-    // 3. Random noise: 4 MiB
     let noise = make_noise(4 * 1024 * 1024);
     run_suite("Random noise (4 MiB)", &noise);
 
-    // 4. Zeros: 4 MiB
     let zeros = vec![0u8; 4 * 1024 * 1024];
     run_suite("All zeros (4 MiB)", &zeros);
 }
