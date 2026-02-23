@@ -36,8 +36,7 @@ Pure Rust port of libdeflate. DEFLATE/zlib/gzip compression and decompression.
 - [x] Phase 9: Effort-based compression (0-30) with new strategies
   - CompressionLevel::new(effort) with effort 0-30, Pareto-ranked
   - CompressionLevel::libdeflate(level) for byte-identical C parity (0-12)
-  - StaticTurbo (effort 1-2): inline static Huffman + turbo matchfinder, ~10 GiB/s on compressible data
-  - Turbo (effort 3-4): dynamic Huffman + single-entry hash, limited skip updates
+  - Turbo (effort 1-4): dynamic Huffman + single-entry hash, limited skip updates
   - FastHt (effort 5-7): dynamic Huffman + 2-entry hash, limited skip updates
   - Named presets: none(), fastest(), fast(), balanced(), high(), best()
   - 195 tests + 10 doctests pass

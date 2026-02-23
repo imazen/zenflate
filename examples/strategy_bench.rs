@@ -109,8 +109,7 @@ struct BenchResult {
 fn bench_zenflate(data: &[u8], effort: u32) -> BenchResult {
     let strategy = match effort {
         0 => "Store",
-        1..=2 => "StaticTurbo",
-        3..=4 => "Turbo",
+        1..=4 => "Turbo",
         5..=7 => "FastHt",
         8..=10 => "Greedy",
         11..=17 => "Lazy",

@@ -80,8 +80,7 @@ pub(crate) enum InternalStrategy {
 fn effort_to_strategy(effort: u32) -> InternalStrategy {
     match effort {
         0 => InternalStrategy::Store,
-        1..=2 => InternalStrategy::StaticTurbo,
-        3..=4 => InternalStrategy::Turbo,
+        1..=4 => InternalStrategy::Turbo,
         5..=7 => InternalStrategy::FastHt,
         8..=10 => InternalStrategy::Greedy,
         11..=17 => InternalStrategy::Lazy,
@@ -209,7 +208,7 @@ impl CompressionLevel {
         Self::new(0)
     }
 
-    /// Effort 1: fastest compression. Static Huffman + turbo matchfinder.
+    /// Effort 1: fastest compression. Turbo matchfinder with dynamic Huffman.
     pub fn fastest() -> Self {
         Self::new(1)
     }
