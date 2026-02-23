@@ -133,7 +133,7 @@ fn main() {
     // zenflate: effort 1-30 (key points on the Pareto frontier)
     let effort_levels = [1, 2, 3, 4, 5, 6, 7, 8, 10, 12, 15, 18, 22, 25, 28, 30];
     for &effort in &effort_levels {
-        let level = zenflate::CompressionLevel::new(effort);
+        let _level = zenflate::CompressionLevel::new(effort);
         let strategy = match effort {
             0 => "Store",
             1..=2 => "StaticTurbo",

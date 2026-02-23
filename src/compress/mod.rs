@@ -3173,10 +3173,43 @@ mod tests {
 
     #[test]
     fn test_all_levels_roundtrip() {
-        // Test all levels 0-12 with the same data
+        // Test all effort levels 0-30 with the same data
+        let data: Vec<u8> = (0..=255u8).cycle().take(50_000).collect();
+        for effort in 0..=30 {
+            roundtrip_verify(&data, effort);
+        }
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn test_libdeflate_compat_roundtrip() {
+        // Test all libdeflate() levels 0-12 roundtrip correctly
         let data: Vec<u8> = (0..=255u8).cycle().take(50_000).collect();
         for level in 0..=12 {
-            roundtrip_verify(&data, level);
+            let mut c = Compressor::new(CompressionLevel::libdeflate(level));
+            let bound = Compressor::deflate_compress_bound(data.len());
+            let mut compressed = vec![0u8; bound];
+            let csize = c
+                .deflate_compress(&data, &mut compressed, enough::Unstoppable)
+                .unwrap_or_else(|e| panic!("libdeflate({level}): compress failed: {e}"));
+
+            let mut d = crate::Decompressor::new();
+            let mut decompressed = vec![0u8; data.len()];
+            let dsize = d
+                .deflate_decompress(
+                    &compressed[..csize],
+                    &mut decompressed,
+                    enough::Unstoppable,
+                )
+                .unwrap_or_else(|e| {
+                    panic!("libdeflate({level}): decompress failed: {e}")
+                })
+                .output_written;
+            assert_eq!(
+                &decompressed[..dsize],
+                &data[..],
+                "libdeflate({level}): roundtrip mismatch"
+            );
         }
     }
 
