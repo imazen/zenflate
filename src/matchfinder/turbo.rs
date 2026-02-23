@@ -172,16 +172,14 @@ impl TurboMatchfinder {
             let mid = count / 2;
             let mid_pos = in_next + mid as usize;
             if mid_pos + 4 <= in_end {
-                let mid_hash =
-                    lz_hash(load_u32_le(input, mid_pos), TURBO_HASH_ORDER) as usize;
+                let mid_hash = lz_hash(load_u32_le(input, mid_pos), TURBO_HASH_ORDER) as usize;
                 self.hash_tab[mid_hash] = (cur_pos + mid as i32) as i16;
             }
 
             // Position at end (last skipped byte)
             let end_pos = in_next + count as usize - 1;
             if end_pos + 4 <= in_end {
-                let end_hash =
-                    lz_hash(load_u32_le(input, end_pos), TURBO_HASH_ORDER) as usize;
+                let end_hash = lz_hash(load_u32_le(input, end_pos), TURBO_HASH_ORDER) as usize;
                 self.hash_tab[end_hash] = (cur_pos + count as i32 - 1) as i16;
             }
 

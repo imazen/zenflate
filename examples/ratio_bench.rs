@@ -148,7 +148,11 @@ fn main() {
         let ratio = len as f64 / data.len() as f64 * 100.0;
         println!(
             "{:<14} {:>7}  {:>14}  {:>10}  {:>7.2}%  {:>10}",
-            "zenflate", effort, strategy, len, ratio,
+            "zenflate",
+            effort,
+            strategy,
+            len,
+            ratio,
             format_speed(data.len(), secs)
         );
     }
@@ -160,7 +164,11 @@ fn main() {
         let ratio = len as f64 / data.len() as f64 * 100.0;
         println!(
             "{:<14} {:>7}  {:>14}  {:>10}  {:>7.2}%  {:>10}",
-            "libdeflate-C", level, "", len, ratio,
+            "libdeflate-C",
+            level,
+            "",
+            len,
+            ratio,
             format_speed(data.len(), secs)
         );
     }
@@ -172,7 +180,11 @@ fn main() {
         let ratio = len as f64 / data.len() as f64 * 100.0;
         println!(
             "{:<14} {:>7}  {:>14}  {:>10}  {:>7.2}%  {:>10}",
-            "flate2", level, "", len, ratio,
+            "flate2",
+            level,
+            "",
+            len,
+            ratio,
             format_speed(data.len(), secs)
         );
     }
@@ -184,7 +196,11 @@ fn main() {
         let ratio = len as f64 / data.len() as f64 * 100.0;
         println!(
             "{:<14} {:>7}  {:>14}  {:>10}  {:>7.2}%  {:>10}",
-            "miniz_oxide", level, "", len, ratio,
+            "miniz_oxide",
+            level,
+            "",
+            len,
+            ratio,
             format_speed(data.len(), secs)
         );
     }

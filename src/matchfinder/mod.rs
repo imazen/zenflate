@@ -176,7 +176,10 @@ mod tests {
                 &mut decompressed,
                 crate::Unstoppable,
             );
-            assert!(dec_result.is_ok(), "decompression roundtrip at level {level}");
+            assert!(
+                dec_result.is_ok(),
+                "decompression roundtrip at level {level}"
+            );
             assert_eq!(&decompressed, &data, "data roundtrip at level {level}");
         }
     }

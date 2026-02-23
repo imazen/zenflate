@@ -257,16 +257,16 @@ impl CompressionLevel {
         match self.strategy {
             InternalStrategy::Store => (0, 0),
             // Hash-table matchfinders: search_depth unused, only nice_len matters
-            InternalStrategy::StaticTurbo | InternalStrategy::Turbo
-            | InternalStrategy::FastHt | InternalStrategy::HtGreedy => {
-                match self.effort {
-                    0..=1 => (0, 16),
-                    2..=4 => (0, 32),
-                    5 => (0, 16),
-                    6 => (0, 32),
-                    _ => (0, 64),
-                }
-            }
+            InternalStrategy::StaticTurbo
+            | InternalStrategy::Turbo
+            | InternalStrategy::FastHt
+            | InternalStrategy::HtGreedy => match self.effort {
+                0..=1 => (0, 16),
+                2..=4 => (0, 32),
+                5 => (0, 16),
+                6 => (0, 32),
+                _ => (0, 64),
+            },
             InternalStrategy::Greedy => match self.effort {
                 0..=8 => (6, 10),
                 9 => (12, 14),
@@ -421,12 +421,15 @@ impl Compressor {
         };
 
         let seq_capacity = match strategy {
-            InternalStrategy::Store | InternalStrategy::StaticTurbo
+            InternalStrategy::Store
+            | InternalStrategy::StaticTurbo
             | InternalStrategy::NearOptimal => 0,
-            InternalStrategy::Turbo | InternalStrategy::FastHt
-            | InternalStrategy::HtGreedy => FAST_SEQ_STORE_LENGTH + 1,
-            InternalStrategy::Greedy | InternalStrategy::Lazy
-            | InternalStrategy::Lazy2 => SEQ_STORE_LENGTH + 1,
+            InternalStrategy::Turbo | InternalStrategy::FastHt | InternalStrategy::HtGreedy => {
+                FAST_SEQ_STORE_LENGTH + 1
+            }
+            InternalStrategy::Greedy | InternalStrategy::Lazy | InternalStrategy::Lazy2 => {
+                SEQ_STORE_LENGTH + 1
+            }
         };
 
         let mut freqs = DeflateFreqs::default();
@@ -461,13 +464,13 @@ impl Compressor {
                 None
             },
             hc_mf: match strategy {
-                InternalStrategy::Greedy | InternalStrategy::Lazy
-                | InternalStrategy::Lazy2 => Some(Box::new(HcMatchfinder::new())),
+                InternalStrategy::Greedy | InternalStrategy::Lazy | InternalStrategy::Lazy2 => {
+                    Some(Box::new(HcMatchfinder::new()))
+                }
                 _ => None,
             },
             near_optimal: if strategy == InternalStrategy::NearOptimal {
-                let (passes, improvement, nonfinal, static_opt) =
-                    level.near_optimal_params();
+                let (passes, improvement, nonfinal, static_opt) = level.near_optimal_params();
                 Some(NearOptimalState::new(
                     passes,
                     improvement,
@@ -679,8 +682,7 @@ impl Compressor {
             InternalStrategy::HtGreedy => {
                 self.compress_incremental_ht(&mut os, data, new_start, is_final, &stop)?;
             }
-            InternalStrategy::Greedy | InternalStrategy::Lazy
-            | InternalStrategy::Lazy2 => {
+            InternalStrategy::Greedy | InternalStrategy::Lazy | InternalStrategy::Lazy2 => {
                 self.compress_incremental_hc(&mut os, data, new_start, is_final, &stop)?;
             }
             _ => {
@@ -863,10 +865,15 @@ impl Compressor {
             self.freqs.reset();
             self.sequences[0].litrunlen_and_length = 0;
 
-            let min_len =
-                calculate_min_match_len(&input[in_next..in_end.min(in_next + SOFT_MAX_BLOCK_LENGTH)], max_search_depth);
+            let min_len = calculate_min_match_len(
+                &input[in_next..in_end.min(in_next + SOFT_MAX_BLOCK_LENGTH)],
+                max_search_depth,
+            );
 
-            if matches!(self.level.strategy(), InternalStrategy::Lazy | InternalStrategy::Lazy2) {
+            if matches!(
+                self.level.strategy(),
+                InternalStrategy::Lazy | InternalStrategy::Lazy2
+            ) {
                 // Lazy/lazy2 path
                 loop {
                     adjust_max_and_nice_len(&mut max_len, &mut nice_len, in_end - in_next);
@@ -881,7 +888,8 @@ impl Compressor {
                         &mut next_hashes,
                     );
 
-                    if cur_len < min_len || (cur_len == DEFLATE_MIN_MATCH_LEN && cur_offset > 8192) {
+                    if cur_len < min_len || (cur_len == DEFLATE_MIN_MATCH_LEN && cur_offset > 8192)
+                    {
                         choose_literal(
                             &mut self.freqs,
                             input[in_next],
@@ -1199,10 +1207,8 @@ impl Compressor {
             let slot = LENGTH_SLOT[mlen as usize] as usize;
             let sym = DEFLATE_FIRST_LEN_SYM as usize + slot;
             let extra = mlen - DEFLATE_LENGTH_BASE[slot] as u32;
-            full_len_cw[mlen as usize] =
-                sc.codewords_litlen[sym] | (extra << sc.lens_litlen[sym]);
-            full_len_bits[mlen as usize] =
-                sc.lens_litlen[sym] + DEFLATE_LENGTH_EXTRA_BITS[slot];
+            full_len_cw[mlen as usize] = sc.codewords_litlen[sym] | (extra << sc.lens_litlen[sym]);
+            full_len_bits[mlen as usize] = sc.lens_litlen[sym] + DEFLATE_LENGTH_EXTRA_BITS[slot];
         }
 
         let nice_len = self.nice_match_length;
@@ -1315,10 +1321,7 @@ impl Compressor {
 
                 // Emit literal inline
                 let lit = input[in_next] as usize;
-                add_bits!(
-                    sc.codewords_litlen[lit],
-                    sc.lens_litlen[lit] as u32
-                );
+                add_bits!(sc.codewords_litlen[lit], sc.lens_litlen[lit] as u32);
                 flush_bits!();
                 in_next += 1;
             }
@@ -1362,11 +1365,7 @@ impl Compressor {
     }
 
     /// Write uncompressed DEFLATE block(s), splitting at 64KB boundaries.
-    fn write_uncompressed(
-        os: &mut OutputBitstream<'_>,
-        data: &[u8],
-        is_final_block: bool,
-    ) {
+    fn write_uncompressed(os: &mut OutputBitstream<'_>, data: &[u8], is_final_block: bool) {
         let mut remaining = data;
         while !remaining.is_empty() {
             let is_last = remaining.len() <= 0xFFFF;
@@ -3259,14 +3258,8 @@ mod tests {
             let mut d = crate::Decompressor::new();
             let mut decompressed = vec![0u8; data.len()];
             let dsize = d
-                .deflate_decompress(
-                    &compressed[..csize],
-                    &mut decompressed,
-                    enough::Unstoppable,
-                )
-                .unwrap_or_else(|e| {
-                    panic!("libdeflate({level}): decompress failed: {e}")
-                })
+                .deflate_decompress(&compressed[..csize], &mut decompressed, enough::Unstoppable)
+                .unwrap_or_else(|e| panic!("libdeflate({level}): decompress failed: {e}"))
                 .output_written;
             assert_eq!(
                 &decompressed[..dsize],

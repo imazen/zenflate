@@ -82,7 +82,9 @@ fn make_noise(size: usize) -> Vec<u8> {
     let mut data = vec![0u8; size];
     let mut rng: u64 = 0xDEADBEEF_CAFEBABE;
     for chunk in data.chunks_mut(8) {
-        rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        rng = rng
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         let bytes = rng.to_le_bytes();
         for (dst, &src) in chunk.iter_mut().zip(bytes.iter()) {
             *dst = src;
@@ -120,15 +122,21 @@ fn bench_zenflate(data: &[u8], effort: u32) -> BenchResult {
     let bound = zenflate::Compressor::deflate_compress_bound(data.len());
     let mut out = vec![0u8; bound];
     for _ in 0..WARMUP {
-        let _ = c.deflate_compress(data, &mut out, zenflate::Unstoppable).unwrap();
+        let _ = c
+            .deflate_compress(data, &mut out, zenflate::Unstoppable)
+            .unwrap();
     }
     let mut best = f64::MAX;
     for _ in 0..ITERS {
         let start = Instant::now();
-        let _ = c.deflate_compress(data, &mut out, zenflate::Unstoppable).unwrap();
+        let _ = c
+            .deflate_compress(data, &mut out, zenflate::Unstoppable)
+            .unwrap();
         best = best.min(start.elapsed().as_secs_f64());
     }
-    let size = c.deflate_compress(data, &mut out, zenflate::Unstoppable).unwrap();
+    let size = c
+        .deflate_compress(data, &mut out, zenflate::Unstoppable)
+        .unwrap();
     BenchResult {
         library: "zenflate",
         level: format!("e{effort}"),
@@ -175,17 +183,20 @@ fn bench_zlib_rs(data: &[u8], level: u32) -> BenchResult {
     let mut out = vec![0u8; data.len() * 2 + 512];
     for _ in 0..WARMUP {
         comp.reset();
-        comp.compress(data, &mut out, flate2::FlushCompress::Finish).unwrap();
+        comp.compress(data, &mut out, flate2::FlushCompress::Finish)
+            .unwrap();
     }
     let mut best = f64::MAX;
     for _ in 0..ITERS {
         comp.reset();
         let start = Instant::now();
-        comp.compress(data, &mut out, flate2::FlushCompress::Finish).unwrap();
+        comp.compress(data, &mut out, flate2::FlushCompress::Finish)
+            .unwrap();
         best = best.min(start.elapsed().as_secs_f64());
     }
     comp.reset();
-    comp.compress(data, &mut out, flate2::FlushCompress::Finish).unwrap();
+    comp.compress(data, &mut out, flate2::FlushCompress::Finish)
+        .unwrap();
     let size = comp.total_out() as usize;
     BenchResult {
         library: "zlib-rs",
