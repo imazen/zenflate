@@ -89,33 +89,62 @@ fn effort_to_strategy(effort: u32) -> InternalStrategy {
     }
 }
 
+/// Parameters controlling matchfinding behavior.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct CompressionParams {
+    pub max_search_depth: u32,
+    pub nice_match_length: u32,
+    /// Reduce chain search depth 4x when best match >= this length.
+    /// Set to DEFLATE_MAX_MATCH_LEN + 1 to disable.
+    pub good_match: u32,
+    /// Skip lazy evaluation when current match >= this length.
+    /// Set to DEFLATE_MAX_MATCH_LEN + 1 to disable.
+    pub max_lazy: u32,
+}
+
 /// Compression level controlling the speed/ratio tradeoff.
 ///
-/// Use `CompressionLevel::new(effort)` with effort 0-30 for the effort-based API,
-/// or `CompressionLevel::libdeflate(level)` with level 0-12 for byte-identical
-/// compatibility with C libdeflate.
+/// # Named presets
 ///
-/// | Effort | Strategy | Constructor |
-/// |--------|----------|-------------|
-/// | 0 | Store | [`none()`](Self::none) |
-/// | 1-2 | Static turbo | [`fastest()`](Self::fastest) |
-/// | 3-4 | Dynamic turbo | |
-/// | 5-7 | Fast HT | |
-/// | 8-10 | Greedy | [`fast()`](Self::fast) |
-/// | 11-17 | Lazy | [`balanced()`](Self::balanced) |
-/// | 18-22 | Lazy (double) | [`high()`](Self::high) |
-/// | 23-30 | Near-optimal | [`best()`](Self::best) |
+/// | Preset | Effort | Strategy |
+/// |--------|--------|----------|
+/// | [`none()`](Self::none) | 0 | Store (no compression) |
+/// | [`fastest()`](Self::fastest) | 1 | Turbo hash table |
+/// | [`fast()`](Self::fast) | 8 | Greedy hash chains |
+/// | [`balanced()`](Self::balanced) | 15 | Lazy matching (default) |
+/// | [`high()`](Self::high) | 22 | Double-lazy matching |
+/// | [`best()`](Self::best) | 30 | Near-optimal parsing |
+///
+/// # Fine-grained control
+///
+/// [`new(effort)`](Self::new) accepts 0-30 for intermediate tradeoffs.
+/// Higher effort within a strategy increases search depth and match quality.
+///
+/// | Effort range | Strategy |
+/// |--------------|----------|
+/// | 0 | Store |
+/// | 1-4 | Turbo |
+/// | 5-7 | Fast HT |
+/// | 8-10 | Greedy |
+/// | 11-17 | Lazy |
+/// | 18-22 | Double-lazy |
+/// | 23-30 | Near-optimal |
+///
+/// # C libdeflate compatibility
+///
+/// [`libdeflate(level)`](Self::libdeflate) (0-12) produces byte-identical
+/// output with C libdeflate at the given level.
 ///
 /// ```
 /// use zenflate::CompressionLevel;
 ///
-/// let level = CompressionLevel::balanced(); // effort 15
+/// // Named presets
+/// let level = CompressionLevel::balanced(); // effort 15, lazy matching
 /// assert_eq!(level.effort(), 15);
-/// assert_eq!(level.level(), 6); // approximate backward-compat level
 ///
-/// // Effort levels via new(), clamped to 0-30
-/// assert_eq!(CompressionLevel::new(99).effort(), 30);
-/// assert_eq!(CompressionLevel::new(99).level(), 12);
+/// // Fine-grained effort (clamped to 0-30)
+/// let level = CompressionLevel::new(12); // lazy matching, mid-range depth
+/// assert_eq!(level.effort(), 12);
 ///
 /// // Byte-identical C libdeflate compatibility
 /// let compat = CompressionLevel::libdeflate(6);
@@ -235,10 +264,13 @@ impl CompressionLevel {
         Self::new(30)
     }
 
-    /// Returns (max_search_depth, nice_match_length) for Compressor initialization.
-    pub(crate) fn compression_params(self) -> (u32, u32) {
+    /// Returns compression parameters for Compressor initialization.
+    pub(crate) fn compression_params(self) -> CompressionParams {
+        // Value that effectively disables the feature (max match len + 1).
+        const DISABLED: u32 = DEFLATE_MAX_MATCH_LEN + 1;
+
         if let Some(ld) = self.libdeflate_level {
-            return match ld {
+            let (depth, nice) = match ld {
                 0 => (0, 0),
                 1 => (0, 32),
                 2 => (6, 10),
@@ -253,10 +285,16 @@ impl CompressionLevel {
                 11 => (100, 150),
                 _ => (300, DEFLATE_MAX_MATCH_LEN),
             };
+            return CompressionParams {
+                max_search_depth: depth,
+                nice_match_length: nice,
+                good_match: DISABLED,
+                max_lazy: DISABLED,
+            };
         }
-        match self.strategy {
+
+        let (depth, nice) = match self.strategy {
             InternalStrategy::Store => (0, 0),
-            // Hash-table matchfinders: search_depth unused, only nice_len matters
             InternalStrategy::StaticTurbo
             | InternalStrategy::Turbo
             | InternalStrategy::FastHt
@@ -298,6 +336,38 @@ impl CompressionLevel {
                 29 => (200, DEFLATE_MAX_MATCH_LEN),
                 _ => (300, DEFLATE_MAX_MATCH_LEN),
             },
+        };
+
+        let (good_match, max_lazy) = match self.strategy {
+            InternalStrategy::Greedy => match self.effort {
+                0..=8 => (4, DISABLED),
+                9 => (5, DISABLED),
+                _ => (6, DISABLED),
+            },
+            InternalStrategy::Lazy => match self.effort {
+                0..=11 => (5, 5),
+                12 => (6, 8),
+                13 => (8, 16),
+                14 => (12, 32),
+                15 => (32, 64),
+                16 => (64, 128),
+                _ => (128, DEFLATE_MAX_MATCH_LEN),
+            },
+            InternalStrategy::Lazy2 => match self.effort {
+                0..=18 => (32, 32),
+                19 => (64, 64),
+                20 => (128, 128),
+                _ => (DISABLED, DISABLED),
+            },
+            // Not used by other strategies
+            _ => (DISABLED, DISABLED),
+        };
+
+        CompressionParams {
+            max_search_depth: depth,
+            nice_match_length: nice,
+            good_match,
+            max_lazy,
         }
     }
 
@@ -347,6 +417,10 @@ pub struct Compressor {
     max_search_depth: u32,
     /// "Nice" match length: stop searching if we find a match this long.
     nice_match_length: u32,
+    /// Reduce chain search 4x when best match >= this length.
+    good_match: u32,
+    /// Skip lazy evaluation when current match >= this length.
+    max_lazy: u32,
     /// Inputs shorter than this are passed through as uncompressed blocks.
     max_passthrough_size: usize,
     /// Current block's frequency counters.
@@ -387,6 +461,8 @@ impl Clone for Compressor {
             level: self.level,
             max_search_depth: self.max_search_depth,
             nice_match_length: self.nice_match_length,
+            good_match: self.good_match,
+            max_lazy: self.max_lazy,
             max_passthrough_size: self.max_passthrough_size,
             freqs: self.freqs.clone(),
             split_stats: self.split_stats.clone(),
@@ -411,7 +487,7 @@ impl Compressor {
     #[cfg(feature = "alloc")]
     pub fn new(level: CompressionLevel) -> Self {
         let strategy = level.strategy();
-        let (max_search_depth, nice_match_length) = level.compression_params();
+        let params = level.compression_params();
         let approx_level = level.level();
 
         let max_passthrough_size = if strategy == InternalStrategy::Store {
@@ -439,8 +515,10 @@ impl Compressor {
 
         Self {
             level,
-            max_search_depth,
-            nice_match_length,
+            max_search_depth: params.max_search_depth,
+            nice_match_length: params.nice_match_length,
+            good_match: params.good_match,
+            max_lazy: params.max_lazy,
             max_passthrough_size,
             freqs,
             split_stats: BlockSplitStats::new(),
@@ -851,6 +929,8 @@ impl Compressor {
         let mut max_len = DEFLATE_MAX_MATCH_LEN;
         let mut nice_len = max_len.min(self.nice_match_length);
         let max_search_depth = self.max_search_depth;
+        let good_match = self.good_match;
+        let max_lazy = self.max_lazy;
         let lazy2 = self.level.strategy() == InternalStrategy::Lazy2;
 
         let mut next_hashes = [0u32; 2];
@@ -885,6 +965,7 @@ impl Compressor {
                         max_len,
                         nice_len,
                         max_search_depth,
+                        good_match,
                         &mut next_hashes,
                     );
 
@@ -900,7 +981,7 @@ impl Compressor {
                     } else {
                         in_next += 1;
                         loop {
-                            if cur_len >= nice_len {
+                            if cur_len >= nice_len || cur_len >= max_lazy {
                                 seq_idx = choose_match(
                                     &mut self.freqs,
                                     cur_len,
@@ -930,6 +1011,7 @@ impl Compressor {
                                 max_len,
                                 nice_len,
                                 max_search_depth >> 1,
+                                good_match,
                                 &mut next_hashes,
                             );
                             in_next += 1;
@@ -994,6 +1076,7 @@ impl Compressor {
                         max_len,
                         nice_len,
                         max_search_depth,
+                        good_match,
                         &mut next_hashes,
                     );
 
@@ -1642,6 +1725,7 @@ impl Compressor {
         let mut nice_len = max_len.min(self.nice_match_length);
         let mut next_hashes = [0u32; 2];
         let max_search_depth = self.max_search_depth;
+        let good_match = self.good_match;
 
         // Dictionary warm-up: seed hash chains with positions before chunk_start
         if self.chunk_start > 0 && self.chunk_start + 5 <= in_end {
@@ -1679,6 +1763,7 @@ impl Compressor {
                     max_len,
                     nice_len,
                     max_search_depth,
+                    good_match,
                     &mut next_hashes,
                 );
 
@@ -1760,6 +1845,8 @@ impl Compressor {
         let mut nice_len = max_len.min(self.nice_match_length);
         let mut next_hashes = [0u32; 2];
         let max_search_depth = self.max_search_depth;
+        let good_match = self.good_match;
+        let max_lazy = self.max_lazy;
 
         // Dictionary warm-up: seed hash chains with positions before chunk_start
         if self.chunk_start > 0 && self.chunk_start + 5 <= in_end {
@@ -1805,6 +1892,7 @@ impl Compressor {
                     max_len,
                     nice_len,
                     max_search_depth,
+                    good_match,
                     &mut next_hashes,
                 );
 
@@ -1824,8 +1912,8 @@ impl Compressor {
                     // Lazy evaluation loop (simulates C goto have_cur_match)
                     // Invariant: match at (in_next - 1), length cur_len, offset cur_offset
                     loop {
-                        if cur_len >= nice_len {
-                            // Very long match — take it immediately
+                        if cur_len >= nice_len || cur_len >= max_lazy {
+                            // Very long match — take it immediately, no lookahead
                             seq_idx = choose_match(
                                 &mut self.freqs,
                                 cur_len,
@@ -1857,6 +1945,7 @@ impl Compressor {
                             max_len,
                             nice_len,
                             max_search_depth >> 1,
+                            good_match,
                             &mut next_hashes,
                         );
                         in_next += 1;
@@ -1889,6 +1978,7 @@ impl Compressor {
                                 max_len,
                                 nice_len,
                                 max_search_depth >> 2,
+                                good_match,
                                 &mut next_hashes,
                             );
                             in_next += 1;

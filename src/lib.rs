@@ -2,14 +2,16 @@
 //!
 //! A port of [libdeflate](https://github.com/ebiggers/libdeflate) to safe Rust.
 //!
-//! Two decompression modes:
+//! - **Compression** ([`Compressor`]) — buffer-to-buffer. Effort 0-30 with named
+//!   presets ([`CompressionLevel::balanced()`], etc.). Parallel gzip via
+//!   [`Compressor::gzip_compress_parallel()`].
+//! - **Decompression** ([`Decompressor`]) — buffer-to-buffer, fastest mode.
+//! - **Streaming decompression** ([`StreamDecompressor`]) — pull-based, works
+//!   with any [`InputSource`] including `&[u8]` (zero-cost) and
+//!   [`BufReadSource`] for `std::io::BufRead`.
 //!
-//! - **Whole-buffer** ([`Decompressor`]) — fastest, requires input and output in memory.
-//! - **Streaming** ([`StreamDecompressor`]) — pull-based, works with any [`InputSource`]
-//!   including `&[u8]` (zero-cost) and [`BufReadSource`] for `std::io::BufRead`.
-//!   Implements `Read` + `BufRead` when wrapping a `BufRead` source.
-//!
-//! Compression is buffer-to-buffer only ([`Compressor`]).
+//! All three DEFLATE-based formats (raw DEFLATE, zlib, gzip) are supported for
+//! both compression and decompression.
 //!
 //! # Quick start
 //!
@@ -18,7 +20,7 @@
 //!
 //! let data = b"Hello, World! Hello, World! Hello, World!";
 //!
-//! // Compress
+//! // Compress (effort 15 = lazy matching, a good default)
 //! let mut compressor = Compressor::new(CompressionLevel::balanced());
 //! let bound = Compressor::deflate_compress_bound(data.len());
 //! let mut compressed = vec![0u8; bound];
@@ -32,6 +34,26 @@
 //!     .unwrap();
 //! assert_eq!(&output[..result.output_written], &data[..]);
 //! ```
+//!
+//! # Compression levels
+//!
+//! Use named presets or dial in a specific effort from 0 to 30:
+//!
+//! | Preset | Effort | Strategy |
+//! |--------|--------|----------|
+//! | [`CompressionLevel::none()`] | 0 | Store (no compression) |
+//! | [`CompressionLevel::fastest()`] | 1 | Turbo hash table |
+//! | [`CompressionLevel::fast()`] | 8 | Greedy hash chains |
+//! | [`CompressionLevel::balanced()`] | 15 | Lazy matching (default) |
+//! | [`CompressionLevel::high()`] | 22 | Double-lazy matching |
+//! | [`CompressionLevel::best()`] | 30 | Near-optimal parsing |
+//!
+//! [`CompressionLevel::new(n)`](CompressionLevel::new) accepts any effort 0-30
+//! for fine-grained control between presets. Higher effort within a strategy
+//! increases search depth and match quality.
+//!
+//! [`CompressionLevel::libdeflate(n)`](CompressionLevel::libdeflate) (0-12)
+//! produces byte-identical output with C libdeflate.
 
 #![cfg_attr(not(feature = "unchecked"), forbid(unsafe_code))]
 #![cfg_attr(not(feature = "std"), no_std)]

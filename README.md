@@ -2,7 +2,7 @@
 
 Pure Rust DEFLATE/zlib/gzip compression and decompression, ported from [libdeflate](https://github.com/ebiggers/libdeflate).
 
-Buffer-to-buffer only (no streaming). Supports compression levels 0-12. `no_std` compatible with `alloc`.
+`no_std` compatible (`alloc` required for compression and streaming decompression; decompression is fully stack-allocated).
 
 ## Usage
 
@@ -41,6 +41,31 @@ let result = decompressor
 // result.output_written — bytes of decompressed data produced
 ```
 
+### Streaming decompression
+
+For inputs that don't fit in memory or arrive incrementally. Works with
+`&[u8]` (zero overhead) or any `std::io::BufRead` via `BufReadSource`.
+
+```rust
+use zenflate::{StreamDecompressor, InputSource};
+
+// From a slice (no_std compatible):
+let mut stream = StreamDecompressor::new_deflate(compressed_data);
+loop {
+    let chunk = stream.fill()?;
+    if chunk.is_empty() { break; }
+    // process chunk...
+    let n = chunk.len();
+    stream.advance(n);
+}
+
+// From a BufRead (std only):
+use zenflate::BufReadSource;
+let file = std::io::BufReader::new(std::fs::File::open("data.gz").unwrap());
+let mut stream = StreamDecompressor::new_gzip(BufReadSource::new(file));
+// stream also implements Read + BufRead
+```
+
 ### Formats
 
 All three DEFLATE-based formats are supported:
@@ -61,60 +86,116 @@ decompressor.gzip_decompress(compressed, &mut out, Unstoppable)?;
 
 ### Compression levels
 
-| Level | Strategy | Speed vs ratio |
-|-------|----------|---------------|
-| 0 | Uncompressed | No compression, just framing |
-| 1 | Fastest (hash table) | Best throughput | `fastest()` |
-| 2-4 | Greedy | | `fast()` (L4) |
-| 5-7 | Lazy | Good balance | `balanced()` (L6, default) |
-| 8-9 | Lazy2 (double lazy eval) | Better ratio | `high()` (L9) |
-| 10-12 | Near-optimal parsing | Best ratio, ~3x slower | `best()` (L12) |
+Pick a preset or dial in a specific effort from 0 to 30:
 
 ```rust
 use zenflate::CompressionLevel;
 
-CompressionLevel::none()      // 0 — store
-CompressionLevel::fastest()   // 1 — hash table
-CompressionLevel::fast()      // 4 — greedy
-CompressionLevel::balanced()  // 6 — lazy (default)
-CompressionLevel::high()      // 9 — lazy2
-CompressionLevel::best()      // 12 — near-optimal
-CompressionLevel::new(3)      // specific level
+// Named presets
+CompressionLevel::none()      // effort 0  — store (no compression)
+CompressionLevel::fastest()   // effort 1  — turbo hash table
+CompressionLevel::fast()      // effort 8  — greedy hash chains
+CompressionLevel::balanced()  // effort 15 — lazy matching (default)
+CompressionLevel::high()      // effort 22 — double-lazy matching
+CompressionLevel::best()      // effort 30 — near-optimal parsing
+
+// Fine-grained control (0-30, clamped)
+CompressionLevel::new(12)     // lazy matching, mid-range
+CompressionLevel::new(25)     // near-optimal, fast end
+
+// Byte-identical C libdeflate compatibility (0-12)
+CompressionLevel::libdeflate(6)
 ```
+
+| Preset | Effort | Strategy | When to use |
+|--------|--------|----------|-------------|
+| `none()` | 0 | Store | Framing only, no compression |
+| `fastest()` | 1 | Turbo | Maximum throughput, ~500 MiB/s |
+| `fast()` | 8 | Greedy | Good speed, ~300 MiB/s |
+| `balanced()` | 15 | Lazy | Good ratio at reasonable speed (default) |
+| `high()` | 22 | Lazy2 | Better ratio, slower |
+| `best()` | 30 | Near-optimal | Best ratio, ~5x slower than `balanced()` |
+
+Efforts between presets give intermediate speed/ratio tradeoffs. Higher effort
+within the same strategy increases search depth and match quality.
 
 Reuse `Compressor` and `Decompressor` across calls to avoid re-initialization.
 
+### Parallel gzip compression
+
+```rust
+use zenflate::{Compressor, CompressionLevel, Unstoppable};
+
+let mut compressor = Compressor::new(CompressionLevel::balanced());
+let bound = Compressor::gzip_compress_bound(data.len()) + num_threads * 5;
+let mut compressed = vec![0u8; bound];
+let size = compressor
+    .gzip_compress_parallel(data, &mut compressed, 4, Unstoppable)
+    .unwrap();
+```
+
+Splits input into chunks with 32KB dictionary overlap, compresses in parallel,
+concatenates into a valid gzip stream. Near-linear scaling (3.3x with 4 threads).
+
+### Cancellation
+
+All compression and whole-buffer decompression methods accept a `stop` parameter
+implementing the `Stop` trait. Pass `Unstoppable` to disable cancellation, or
+implement `Stop` to check a flag periodically:
+
+```rust
+use zenflate::{Stop, StopReason, Unstoppable};
+
+// Unstoppable — never cancels
+compressor.deflate_compress(data, &mut out, Unstoppable)?;
+
+// Custom cancellation
+struct MyStop { cancelled: std::sync::Arc<std::sync::atomic::AtomicBool> }
+impl Stop for MyStop {
+    fn check(&self) -> Result<(), StopReason> {
+        if self.cancelled.load(std::sync::atomic::Ordering::Relaxed) {
+            Err(StopReason)
+        } else {
+            Ok(())
+        }
+    }
+}
+```
+
+Streaming decompression doesn't take a `Stop` parameter — the caller controls
+the loop and can stop between `fill()` calls.
+
 ## Features
 
-- `std` (default) — enables `std::error::Error` impls
-- `alloc` (included by `std`) — enables compression (requires heap allocation for matchfinder tables)
+| Feature | Default | Effect |
+|---------|---------|--------|
+| `std` | yes | `std::error::Error` impls, `BufReadSource`, parallel gzip |
+| `alloc` | yes (via `std`) | Compression, streaming decompression |
+| `avx512` | yes | AVX-512 SIMD for checksums on supported CPUs |
+| `unchecked` | no | Elide bounds checks in hot paths (+10-25% compression speed) |
 
 Decompression works in `no_std` without `alloc`; all state is stack-allocated.
 
 ## Performance
 
 Benchmarked on x86_64 with AVX-512 (Intel), `--features unchecked`.
-Run `cargo bench --features unchecked` to reproduce.
 
 **Compression** (3 MiB photo bitmap, reproducible via `examples/ratio_bench.rs`):
 
-| Library | Level | Ratio | Safe | Unchecked | vs C |
-|---------|-------|-------|------|-----------|------|
-| **zenflate** | 1 (fastest) | 91.69% | 134 MiB/s | 149 MiB/s | 0.81x |
-| **zenflate** | 6 (lazy) | 92.31% | 102 MiB/s | 105 MiB/s | 0.88x |
-| **zenflate** | 9 (lazy2) | 92.31% | 102 MiB/s | 104 MiB/s | 0.87x |
-| **zenflate** | 10 (near-opt) | 91.97% | 38 MiB/s | 47 MiB/s | 0.87x |
-| **zenflate** | 12 (best) | 91.80% | 33 MiB/s | 39 MiB/s | 0.89x |
-| libdeflate (C) | 1 | 91.69% | — | 185 MiB/s | — |
-| libdeflate (C) | 9 | 92.31% | — | 119 MiB/s | — |
-| libdeflate (C) | 12 | 91.80% | — | 44 MiB/s | — |
-| flate2 | 1 | 91.70% | — | 291 MiB/s | — |
-| flate2 | 9 (best) | 91.58% | — | 55 MiB/s | — |
-| miniz_oxide | 9 (best) | 91.58% | — | 55 MiB/s | — |
+| Library | Level | Ratio | Speed | vs C |
+|---------|-------|-------|-------|------|
+| **zenflate** | effort 1 (fastest) | 91.69% | 149 MiB/s | 0.81x |
+| **zenflate** | effort 15 (balanced) | 92.31% | 105 MiB/s | 0.88x |
+| **zenflate** | effort 22 (high) | 92.31% | 104 MiB/s | 0.87x |
+| **zenflate** | effort 30 (best) | 91.80% | 39 MiB/s | 0.89x |
+| libdeflate (C) | L1 | 91.69% | 185 MiB/s | — |
+| libdeflate (C) | L9 | 92.31% | 119 MiB/s | — |
+| libdeflate (C) | L12 | 91.80% | 44 MiB/s | — |
+| flate2 | L1 | 91.70% | 291 MiB/s | — |
+| flate2 | L9 (best) | 91.58% | 55 MiB/s | — |
 
-zenflate and libdeflate produce **byte-identical output** at every level.
-zenflate L6-9 runs **~2x faster** than flate2/miniz_oxide at comparable ratios.
-The `unchecked` feature helps most at L10-12 (+18-24%), less at L1-9 (+2-11%).
+zenflate and libdeflate produce **byte-identical output** at every level
+(via `CompressionLevel::libdeflate(n)`).
 
 **Decompression** (compressed at L6):
 
@@ -124,9 +205,6 @@ The `unchecked` feature helps most at L10-12 (+18-24%), less at L1-9 (+2-11%).
 | Zeros | 34.6 GiB/s | 14.5 GiB/s | 26.6 GiB/s | 17.2 GiB/s |
 | Mixed | 717 MiB/s | 795 MiB/s | 585 MiB/s | 571 MiB/s |
 
-zenflate decompression is **4x faster** than flate2/miniz_oxide on typical data.
-Zeros decompression is 2.4x faster than C (Rust's `fill()` auto-vectorizes).
-
 **Checksums:**
 
 | Algorithm | zenflate | libdeflate (C) | Implementation |
@@ -134,23 +212,26 @@ Zeros decompression is 2.4x faster than C (Rust's `fill()` auto-vectorizes).
 | Adler-32 | 114 GiB/s | 121 GiB/s | AVX-512 VNNI (x86), dotprod (aarch64), WASM simd128 |
 | CRC-32 | 78 GiB/s | 77 GiB/s | PCLMULQDQ (x86), PMULL (aarch64) |
 
-**Parallel compression** (4 MB mixed data, gzip):
+**Parallel gzip** (4 MB mixed data):
 
 | Level | 1 thread | 4 threads | Speedup |
 |-------|----------|-----------|---------|
-| L1 | 161 MiB/s | 534 MiB/s | 3.3x |
-| L6 | 133 MiB/s | 440 MiB/s | 3.3x |
-| L12 | 46 MiB/s | 135 MiB/s | 2.9x |
+| effort 1 | 161 MiB/s | 534 MiB/s | 3.3x |
+| effort 15 | 133 MiB/s | 440 MiB/s | 3.3x |
+| effort 30 | 46 MiB/s | 135 MiB/s | 2.9x |
 
 ## How it works
 
-This is a line-by-line port of Eric Biggers' [libdeflate](https://github.com/ebiggers/libdeflate) to safe Rust (`#![forbid(unsafe_code)]` by default). The algorithms are identical: same matchfinders (hash table, hash chains, binary trees), same Huffman construction, same block splitting heuristics, same near-optimal parser. zenflate produces byte-identical output to libdeflate at every compression level.
+A line-by-line port of Eric Biggers' [libdeflate](https://github.com/ebiggers/libdeflate) to safe Rust (`#![forbid(unsafe_code)]` by default). Same matchfinders (hash table, hash chains, binary trees), same Huffman construction, same block splitting heuristics, same near-optimal parser.
 
-The C original is faster — zenflate runs at roughly 0.8-0.9x the speed of libdeflate depending on compression level and data (see benchmarks above). The gap comes from Rust's fat pointers, bounds checking, and register pressure differences. The `unchecked` feature closes some of this gap by eliding bounds checks in hot paths.
+zenflate extends libdeflate with:
+- **Effort-based compression (0-30)** with additional strategies (turbo, fast HT) and finer-grained parameter tuning between libdeflate's 13 fixed levels.
+- **Parallel gzip compression** using pigz-style chunking with 32KB dictionary overlap and combined CRC-32.
+- **Streaming decompression** via a pull-based API that works in `no_std + alloc`.
 
-Parallel gzip compression is a zenflate addition — libdeflate is single-threaded. zenflate uses pigz-style chunking with dictionary overlap and combined CRC-32 for near-linear scaling.
+The C original is faster — zenflate runs at roughly 0.8-0.9x the speed of libdeflate depending on level and data. The gap comes from register pressure differences and bounds checking. The `unchecked` feature closes some of this gap.
 
-SIMD acceleration for checksums (AVX2/PCLMULQDQ on x86, NEON/PMULL on aarch64) and decompression. Runtime feature detection via [archmage](https://crates.io/crates/archmage) with zero `unsafe`.
+SIMD acceleration for checksums (AVX2/AVX-512/PCLMULQDQ on x86, NEON/dotprod/PMULL on aarch64, simd128 on WASM). Runtime feature detection via [archmage](https://crates.io/crates/archmage) with zero `unsafe`.
 
 ## License
 

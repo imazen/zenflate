@@ -76,6 +76,7 @@ impl HcMatchfinder {
         max_len: u32,
         nice_len: u32,
         max_search_depth: u32,
+        good_match: u32,
         next_hashes: &mut [u32; 2],
     ) -> (u32, u32) {
         use crate::fast_bytes::load_u32_le;
@@ -157,6 +158,9 @@ impl HcMatchfinder {
                     if best_len >= nice_len {
                         return (best_len, best_offset);
                     }
+                    if best_len >= good_match {
+                        depth_remaining = (depth_remaining >> 2).max(1);
+                    }
                     cur_node4 = self.next_tab[cur_node4 as usize & WINDOW_MASK] as i32;
                     if cur_node4 <= cutoff || {
                         depth_remaining -= 1;
@@ -202,6 +206,9 @@ impl HcMatchfinder {
                         best_offset = (in_next - match_pos) as u32;
                         if best_len >= nice_len {
                             return (best_len, best_offset);
+                        }
+                        if best_len >= good_match {
+                            depth_remaining = (depth_remaining >> 2).max(1);
                         }
                     }
                 }
