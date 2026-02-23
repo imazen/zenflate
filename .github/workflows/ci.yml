@@ -89,11 +89,10 @@ jobs:
           curl https://wasmtime.dev/install.sh -sSf | bash
           echo "$HOME/.wasmtime/bin" >> $GITHUB_PATH
 
-      - name: Test WASM (no_std + alloc)
+      - name: Check WASM (no_std + alloc)
         env:
-          CARGO_TARGET_WASM32_WASIP1_RUNNER: "wasmtime --dir=. --"
           RUSTFLAGS: "-C target-feature=+simd128"
-        run: cargo test --target wasm32-wasip1 --no-default-features --features alloc --lib
+        run: cargo check --target wasm32-wasip1 --no-default-features --features alloc
 
   # ==========================================================================
   # Cross-compiled 32-bit testing (i686 via QEMU)

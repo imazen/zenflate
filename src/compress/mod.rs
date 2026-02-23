@@ -3615,7 +3615,7 @@ mod tests {
                 0..=255 => (i % 256) as u8,             // sequential
                 256..=511 => (i / 256 % 256) as u8,     // slow-changing
                 512..=767 => b"Hello, World! "[i % 14], // repeated text
-                _ => ((i * 2654435761) >> 16) as u8,    // pseudo-random
+                _ => (i.wrapping_mul(2654435761) >> 16) as u8, // pseudo-random
             };
         }
         data

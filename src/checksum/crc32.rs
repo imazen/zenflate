@@ -1129,13 +1129,14 @@ mod parity {
 
     #[test]
     #[cfg(all(target_arch = "x86_64", feature = "avx512"))]
-    fn avx512_modern_token_available() {
+    fn avx512_modern_crc32_if_available() {
         use archmage::prelude::*;
-        let token = X64V4xToken::summon();
-        assert!(
-            token.is_some(),
-            "X64V4xToken should be available on this CPU"
-        );
+        // Only test if the CPU actually supports AVX-512 VPCLMULQDQ
+        if let Some(_token) = X64V4xToken::summon() {
+            let data: Vec<u8> = (0..=255).cycle().take(8192).collect();
+            let expected = super::crc32(0, &data);
+            assert_eq!(expected, libdeflater::crc32(&data));
+        }
     }
 
     #[test]
