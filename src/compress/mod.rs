@@ -627,10 +627,9 @@ impl Compressor {
             .checked_div(MIN_BLOCK_LENGTH)
             .unwrap_or(0)
             .max(1);
-        // Worst case is static Huffman with all 9-bit symbols: 9/8 * input_len.
-        // Uncompressed blocks need input_len + 5 per block.
-        // This formula covers both cases.
-        input_len + (input_len + 7) / 8 + 5 * max_blocks
+        // Worst case: uncompressed blocks (5 bytes overhead each).
+        // Static Huffman blocks roll back to uncompressed if they expand.
+        5 * max_blocks + input_len
     }
 
     /// Compute the maximum compressed size for zlib output.
@@ -1163,6 +1162,9 @@ impl Compressor {
     /// Emits RFC 1951 fixed Huffman codes inline during matching — no sequence
     /// buffer, no histogram, no tree construction or serialization.
     /// Uses the turbo matchfinder (single-entry hash, limited skip updates).
+    ///
+    /// If a static Huffman block would expand the data, rolls back the output
+    /// and emits an uncompressed block instead (never expands).
     fn compress_static_turbo(
         &mut self,
         os: &mut OutputBitstream<'_>,
@@ -1191,7 +1193,6 @@ impl Compressor {
         }
 
         // Precompute combined length codewords for static Huffman.
-        // Each entry = litlen_codeword | (extra_bits << litlen_len), total len = litlen_len + extra_len
         let sc = &self.static_codes;
         let mut full_len_cw = [0u32; DEFLATE_MAX_MATCH_LEN as usize + 1];
         let mut full_len_bits = [0u8; DEFLATE_MAX_MATCH_LEN as usize + 1];
@@ -1210,11 +1211,20 @@ impl Compressor {
         while in_next < in_end && !os.overflow {
             stop.check()?;
 
+            let in_block_begin = in_next;
             let in_max_block_end =
                 choose_max_block_end(in_next, in_end, FAST_SOFT_MAX_BLOCK_LENGTH);
-            let is_final = !self.force_nonfinal && in_max_block_end >= in_end;
+            let block_length = in_max_block_end - in_block_begin;
+
+            // Save output state for rollback if static Huffman expands.
+            // We do NOT save/restore in_base_offset — matchfinder entries
+            // from a rolled-back block are naturally rejected by the cutoff check.
+            let saved_pos = os.pos;
+            let saved_bitbuf = os.bitbuf;
+            let saved_bitcount = os.bitcount;
 
             // Emit block header: BFINAL + BTYPE=01 (static Huffman)
+            let is_final = !self.force_nonfinal && in_max_block_end >= in_end;
             os.add_bits(is_final as u32, 1);
             os.add_bits(DEFLATE_BLOCKTYPE_STATIC_HUFFMAN, 2);
             os.flush_bits();
@@ -1275,7 +1285,6 @@ impl Compressor {
                     );
 
                     if length > 0 {
-                        // Emit match inline: length code + offset code
                         let offset_slot = get_offset_slot(offset) as usize;
                         add_bits!(
                             full_len_cw[length as usize],
@@ -1325,10 +1334,65 @@ impl Compressor {
             // Sync locals back
             os.bitbuf = bitbuf;
             os.bitcount = bitcount;
+
+            // Check if static Huffman expanded the block. If so, rollback
+            // the output and emit an uncompressed block instead.
+            let static_bytes = os.pos.saturating_sub(saved_pos);
+            // Uncompressed cost: data + 5 bytes per 64K sub-block + 1 alignment byte
+            let uncomp_bytes = block_length + 5 * ((block_length + 0xFFFE) / 0xFFFF) + 1;
+            if os.overflow || static_bytes > uncomp_bytes {
+                os.pos = saved_pos;
+                os.bitbuf = saved_bitbuf;
+                os.bitcount = saved_bitcount;
+                os.overflow = false;
+                // Advance in_next to block end. The matchfinder only saw
+                // positions up to in_next; those entries get naturally cut off
+                // by the distance check on future blocks.
+                in_next = in_max_block_end;
+                let is_final_actual = !self.force_nonfinal && in_next >= in_end;
+                Self::write_uncompressed(
+                    os,
+                    &input[in_block_begin..in_max_block_end],
+                    is_final_actual,
+                );
+            }
         }
 
         self.turbo_mf = Some(mf);
         Ok(())
+    }
+
+    /// Write uncompressed DEFLATE block(s), splitting at 64KB boundaries.
+    fn write_uncompressed(
+        os: &mut OutputBitstream<'_>,
+        data: &[u8],
+        is_final_block: bool,
+    ) {
+        let mut remaining = data;
+        while !remaining.is_empty() {
+            let is_last = remaining.len() <= 0xFFFF;
+            let len = remaining.len().min(0xFFFF);
+            let chunk = &remaining[..len];
+            remaining = &remaining[len..];
+
+            let bfinal = if is_last && is_final_block { 1u8 } else { 0 };
+
+            // BFINAL + BTYPE (uncompressed = 0), then align to byte boundary
+            let byte = (bfinal << os.bitcount) | os.bitbuf as u8;
+            os.write_byte(byte);
+            if os.bitcount > 5 {
+                os.write_byte(0);
+            }
+            os.bitbuf = 0;
+            os.bitcount = 0;
+
+            // LEN and NLEN
+            os.write_le16(len as u16);
+            os.write_le16(!len as u16);
+
+            // Data
+            os.write_bytes(chunk);
+        }
     }
 
     /// Turbo compression using single-entry hash table matchfinder.
@@ -2983,14 +3047,14 @@ mod tests {
     fn test_compress_bound() {
         // Empty input
         assert_eq!(Compressor::deflate_compress_bound(0), 5);
-        // Small input: 100 + ceil(100/8) + 5 = 118
-        assert_eq!(Compressor::deflate_compress_bound(100), 118);
-        // Exactly MIN_BLOCK_LENGTH: 5000 + 625 + 5 = 5630
-        assert_eq!(Compressor::deflate_compress_bound(5000), 5630);
-        // Large input: 1MB — bound accounts for static Huffman worst case (9 bits/byte)
+        // Small input
+        assert_eq!(Compressor::deflate_compress_bound(100), 105);
+        // Exactly MIN_BLOCK_LENGTH
+        assert_eq!(Compressor::deflate_compress_bound(5000), 5005);
+        // Large input: 1MB
         let bound = Compressor::deflate_compress_bound(1_000_000);
         assert!(bound >= 1_000_000);
-        assert!(bound < 1_130_000); // ~12.5% overhead for static Huffman
+        assert!(bound < 1_002_000); // shouldn't be too much larger
     }
 
     // ---- Greedy strategy tests (levels 2-4) ----
