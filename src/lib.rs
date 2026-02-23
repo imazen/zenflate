@@ -43,7 +43,7 @@
 //! |--------|--------|----------|
 //! | [`CompressionLevel::none()`] | 0 | Store (no compression) |
 //! | [`CompressionLevel::fastest()`] | 1 | Turbo hash table |
-//! | [`CompressionLevel::fast()`] | 8 | Greedy hash chains |
+//! | [`CompressionLevel::fast()`] | 10 | Greedy hash chains |
 //! | [`CompressionLevel::balanced()`] | 15 | Lazy matching (default) |
 //! | [`CompressionLevel::high()`] | 22 | Double-lazy matching |
 //! | [`CompressionLevel::best()`] | 30 | Near-optimal parsing |

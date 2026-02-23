@@ -85,8 +85,8 @@ fn effort_to_strategy(effort: u32) -> InternalStrategy {
     match effort {
         0 => InternalStrategy::Store,
         1..=4 => InternalStrategy::Turbo,
-        5..=7 => InternalStrategy::FastHt,
-        8..=10 => InternalStrategy::Greedy,
+        5..=9 => InternalStrategy::FastHt,
+        10 => InternalStrategy::Greedy,
         11..=17 => InternalStrategy::Lazy,
         18..=22 => InternalStrategy::Lazy2,
         _ => InternalStrategy::NearOptimal,
@@ -114,7 +114,7 @@ pub(crate) struct CompressionParams {
 /// |--------|--------|----------|
 /// | [`none()`](Self::none) | 0 | Store (no compression) |
 /// | [`fastest()`](Self::fastest) | 1 | Turbo hash table |
-/// | [`fast()`](Self::fast) | 8 | Greedy hash chains |
+/// | [`fast()`](Self::fast) | 10 | Greedy hash chains |
 /// | [`balanced()`](Self::balanced) | 15 | Lazy matching (default) |
 /// | [`high()`](Self::high) | 22 | Double-lazy matching |
 /// | [`best()`](Self::best) | 30 | Near-optimal parsing |
@@ -128,8 +128,8 @@ pub(crate) struct CompressionParams {
 /// |--------------|----------|
 /// | 0 | Store |
 /// | 1-4 | Turbo |
-/// | 5-7 | Fast HT |
-/// | 8-10 | Greedy |
+/// | 5-9 | Fast HT |
+/// | 10 | Greedy |
 /// | 11-17 | Lazy |
 /// | 18-22 | Double-lazy |
 /// | 23-30 | Near-optimal |
@@ -216,9 +216,7 @@ impl CompressionLevel {
         }
         match self.effort {
             0 => 0,
-            1..=7 => 1,
-            8 => 2,
-            9 => 3,
+            1..=9 => 1,
             10 => 4,
             11 => 5,
             12..=15 => 6,
@@ -246,9 +244,9 @@ impl CompressionLevel {
         Self::new(1)
     }
 
-    /// Effort 8: fast compression. Greedy hash-chain matchfinder.
+    /// Effort 10: fast compression. Greedy hash-chain matchfinder.
     pub fn fast() -> Self {
-        Self::new(8)
+        Self::new(10)
     }
 
     /// Effort 15: balanced compression. Lazy hash-chain matchfinder.
@@ -266,6 +264,50 @@ impl CompressionLevel {
     /// Effort 30: maximum compression. Near-optimal parser with multiple passes.
     pub fn best() -> Self {
         Self::new(30)
+    }
+
+    /// Returns a fallback level to test for monotonicity across strategies.
+    ///
+    /// Different compression strategies (FastHt, Greedy, Lazy, etc.) use
+    /// fundamentally different algorithms. A more sophisticated algorithm
+    /// can produce *larger* output than a simpler one on some data types,
+    /// even at higher effort.
+    ///
+    /// When this returns `Some(fallback)`, callers wanting monotonic output
+    /// should compress with both `self` and `fallback`, keeping the smaller
+    /// result.
+    ///
+    /// The fallback chain can be followed for deeper guarantees — each
+    /// link points to the previous strategy's maximum effort:
+    /// ```
+    /// # use zenflate::CompressionLevel;
+    /// let level = CompressionLevel::new(15); // Lazy
+    /// let mut chain = vec![level];
+    /// let mut cur = level;
+    /// while let Some(fb) = cur.monotonicity_fallback() {
+    ///     chain.push(fb);
+    ///     cur = fb;
+    /// }
+    /// // chain = [e15 (Lazy), e10 (Greedy), e9 (FastHt)]
+    /// assert_eq!(chain.len(), 3);
+    /// ```
+    ///
+    /// This does NOT cover within-strategy butterfly effects (small,
+    /// typically <0.01% of input size). For absolute monotonicity,
+    /// callers should track the running minimum across all effort levels.
+    pub fn monotonicity_fallback(&self) -> Option<CompressionLevel> {
+        if self.libdeflate_level.is_some() {
+            return None;
+        }
+        // Each strategy's levels fall back to the previous strategy's max.
+        // The chain terminates at FastHt (Turbo→FastHt always improves).
+        match self.effort {
+            10 => Some(Self::new(9)),       // Greedy → FastHt max
+            11..=17 => Some(Self::new(10)), // Lazy → Greedy max
+            18..=22 => Some(Self::new(17)), // Lazy2 → Lazy max
+            23..=30 => Some(Self::new(22)), // NearOptimal → Lazy2 max
+            _ => None,
+        }
     }
 
     /// Returns compression parameters for Compressor initialization.
@@ -306,8 +348,10 @@ impl CompressionLevel {
                 0..=1 => (0, 16),
                 2..=4 => (0, 32),
                 5 => (0, 16),
-                6 => (0, 32),
-                _ => (0, 64),
+                6 => (0, 24),
+                7 => (0, 32),
+                8 => (0, 64),
+                _ => (0, 128),
             },
             InternalStrategy::Greedy => match self.effort {
                 0..=8 => (6, 10),
@@ -349,17 +393,17 @@ impl CompressionLevel {
                 _ => (6, DISABLED),
             },
             InternalStrategy::Lazy => match self.effort {
-                0..=11 => (5, 5),
-                12 => (6, 8),
-                13 => (8, 16),
-                14 => (12, 32),
+                0..=11 => (6, 6),
+                12 => (8, 10),
+                13 => (10, 18),
+                14 => (14, 32),
                 15 => (32, 64),
                 16 => (64, 128),
                 _ => (128, DEFLATE_MAX_MATCH_LEN),
             },
             InternalStrategy::Lazy2 => match self.effort {
-                0..=18 => (32, 32),
-                19 => (64, 64),
+                0..=18 => (64, 64),
+                19 => (96, 96),
                 20 => (128, 128),
                 _ => (DISABLED, DISABLED),
             },

@@ -112,8 +112,8 @@ fn bench_zenflate(data: &[u8], effort: u32) -> BenchResult {
     let strategy = match effort {
         0 => "Store",
         1..=4 => "Turbo",
-        5..=7 => "FastHt",
-        8..=10 => "Greedy",
+        5..=9 => "FastHt",
+        10 => "Greedy",
         11..=17 => "Lazy",
         18..=22 => "Lazy2",
         _ => "NearOptimal",
