@@ -21,7 +21,10 @@ use crate::matchfinder::lz_hash;
 use crate::matchfinder::turbo::{TURBO_REQUIRED_NBYTES, TurboMatchfinder};
 
 use self::bitstream::OutputBitstream;
-use self::block::{DeflateCodes, DeflateFreqs, choose_literal, choose_match, finish_block};
+use self::block::{
+    DeflateCodes, DeflateFreqs, LENGTH_SLOT, choose_literal, choose_match, finish_block,
+    get_offset_slot,
+};
 use self::block_split::{BlockSplitStats, MIN_BLOCK_LENGTH};
 use self::near_optimal::{
     MATCH_CACHE_LENGTH, NearOptimalState, clear_old_stats, init_stats, merge_stats,
@@ -419,9 +422,10 @@ impl Compressor {
         };
 
         let seq_capacity = match strategy {
-            InternalStrategy::Store | InternalStrategy::NearOptimal => 0,
-            InternalStrategy::StaticTurbo | InternalStrategy::Turbo
-            | InternalStrategy::FastHt | InternalStrategy::HtGreedy => FAST_SEQ_STORE_LENGTH + 1,
+            InternalStrategy::Store | InternalStrategy::StaticTurbo
+            | InternalStrategy::NearOptimal => 0,
+            InternalStrategy::Turbo | InternalStrategy::FastHt
+            | InternalStrategy::HtGreedy => FAST_SEQ_STORE_LENGTH + 1,
             InternalStrategy::Greedy | InternalStrategy::Lazy
             | InternalStrategy::Lazy2 => SEQ_STORE_LENGTH + 1,
         };
@@ -498,7 +502,10 @@ impl Compressor {
             InternalStrategy::Store => {
                 return deflate_compress_none(input, output);
             }
-            InternalStrategy::StaticTurbo | InternalStrategy::Turbo => {
+            InternalStrategy::StaticTurbo => {
+                self.compress_static_turbo(&mut os, input, &stop)?;
+            }
+            InternalStrategy::Turbo => {
                 self.compress_turbo(&mut os, input, &stop)?;
             }
             InternalStrategy::FastHt => {
@@ -620,7 +627,10 @@ impl Compressor {
             .checked_div(MIN_BLOCK_LENGTH)
             .unwrap_or(0)
             .max(1);
-        5 * max_blocks + input_len
+        // Worst case is static Huffman with all 9-bit symbols: 9/8 * input_len.
+        // Uncompressed blocks need input_len + 5 per block.
+        // This formula covers both cases.
+        input_len + (input_len + 7) / 8 + 5 * max_blocks
     }
 
     /// Compute the maximum compressed size for zlib output.
@@ -1145,6 +1155,179 @@ impl Compressor {
         }
 
         self.ht_mf = Some(mf);
+        Ok(())
+    }
+
+    /// Static Huffman + turbo matchfinder: fastest compression.
+    ///
+    /// Emits RFC 1951 fixed Huffman codes inline during matching — no sequence
+    /// buffer, no histogram, no tree construction or serialization.
+    /// Uses the turbo matchfinder (single-entry hash, limited skip updates).
+    fn compress_static_turbo(
+        &mut self,
+        os: &mut OutputBitstream<'_>,
+        input: &[u8],
+        stop: &impl enough::Stop,
+    ) -> Result<(), CompressionError> {
+        use crate::fast_bytes::load_u32_le;
+
+        let mut mf = self.turbo_mf.take().unwrap();
+        mf.init();
+
+        let in_end = input.len();
+        let mut in_next = self.chunk_start;
+        let mut in_base_offset = 0usize;
+
+        // Dictionary warm-up
+        if self.chunk_start > 0 && in_next + 4 <= in_end {
+            let mut warmup_hash = lz_hash(load_u32_le(input, 0), TURBO_MF_HASH_ORDER);
+            mf.skip_bytes(
+                input,
+                &mut in_base_offset,
+                0,
+                self.chunk_start as u32,
+                &mut warmup_hash,
+            );
+        }
+
+        // Precompute combined length codewords for static Huffman.
+        // Each entry = litlen_codeword | (extra_bits << litlen_len), total len = litlen_len + extra_len
+        let sc = &self.static_codes;
+        let mut full_len_cw = [0u32; DEFLATE_MAX_MATCH_LEN as usize + 1];
+        let mut full_len_bits = [0u8; DEFLATE_MAX_MATCH_LEN as usize + 1];
+        for mlen in DEFLATE_MIN_MATCH_LEN..=DEFLATE_MAX_MATCH_LEN {
+            let slot = LENGTH_SLOT[mlen as usize] as usize;
+            let sym = DEFLATE_FIRST_LEN_SYM as usize + slot;
+            let extra = mlen - DEFLATE_LENGTH_BASE[slot] as u32;
+            full_len_cw[mlen as usize] =
+                sc.codewords_litlen[sym] | (extra << sc.lens_litlen[sym]);
+            full_len_bits[mlen as usize] =
+                sc.lens_litlen[sym] + DEFLATE_LENGTH_EXTRA_BITS[slot];
+        }
+
+        let nice_len = self.nice_match_length;
+
+        while in_next < in_end && !os.overflow {
+            stop.check()?;
+
+            let in_max_block_end =
+                choose_max_block_end(in_next, in_end, FAST_SOFT_MAX_BLOCK_LENGTH);
+            let is_final = !self.force_nonfinal && in_max_block_end >= in_end;
+
+            // Emit block header: BFINAL + BTYPE=01 (static Huffman)
+            os.add_bits(is_final as u32, 1);
+            os.add_bits(DEFLATE_BLOCKTYPE_STATIC_HUFFMAN, 2);
+            os.flush_bits();
+
+            // Pull bitbuf/bitcount into locals for the hot loop
+            let mut bitbuf = os.bitbuf;
+            let mut bitcount = os.bitcount;
+
+            macro_rules! add_bits {
+                ($bits:expr, $n:expr) => {{
+                    bitbuf |= ($bits as u64) << bitcount;
+                    bitcount += $n;
+                }};
+            }
+
+            macro_rules! flush_bits {
+                () => {{
+                    if os.pos + 8 <= os.buf.len() {
+                        crate::fast_bytes::store_u64_le(os.buf, os.pos, bitbuf);
+                        os.pos += (bitcount >> 3) as usize;
+                        bitbuf >>= bitcount & !7;
+                        bitcount &= 7;
+                    } else {
+                        while bitcount >= 8 {
+                            if os.pos < os.buf.len() {
+                                os.buf[os.pos] = bitbuf as u8;
+                                os.pos += 1;
+                                bitcount -= 8;
+                                bitbuf >>= 8;
+                            } else {
+                                os.overflow = true;
+                                break;
+                            }
+                        }
+                    }
+                }};
+            }
+
+            let mut next_hash = if in_next + 4 <= in_end {
+                lz_hash(load_u32_le(input, in_next), TURBO_MF_HASH_ORDER)
+            } else {
+                0
+            };
+
+            while in_next < in_max_block_end && !os.overflow {
+                let remaining = in_end - in_next;
+                let max_len = remaining.min(DEFLATE_MAX_MATCH_LEN as usize) as u32;
+                let nice = max_len.min(nice_len);
+
+                if max_len >= TURBO_REQUIRED_NBYTES {
+                    let (length, offset) = mf.longest_match(
+                        input,
+                        &mut in_base_offset,
+                        in_next,
+                        max_len,
+                        nice,
+                        &mut next_hash,
+                    );
+
+                    if length > 0 {
+                        // Emit match inline: length code + offset code
+                        let offset_slot = get_offset_slot(offset) as usize;
+                        add_bits!(
+                            full_len_cw[length as usize],
+                            full_len_bits[length as usize] as u32
+                        );
+                        add_bits!(
+                            sc.codewords_offset[offset_slot],
+                            sc.lens_offset[offset_slot] as u32
+                        );
+                        add_bits!(
+                            offset - DEFLATE_OFFSET_BASE[offset_slot],
+                            DEFLATE_OFFSET_EXTRA_BITS[offset_slot] as u32
+                        );
+                        flush_bits!();
+
+                        if length > 1 {
+                            mf.skip_bytes(
+                                input,
+                                &mut in_base_offset,
+                                in_next + 1,
+                                length - 1,
+                                &mut next_hash,
+                            );
+                        }
+                        in_next += length as usize;
+                        continue;
+                    }
+                }
+
+                // Emit literal inline
+                let lit = input[in_next] as usize;
+                add_bits!(
+                    sc.codewords_litlen[lit],
+                    sc.lens_litlen[lit] as u32
+                );
+                flush_bits!();
+                in_next += 1;
+            }
+
+            // Emit end-of-block symbol (static: 7 bits)
+            add_bits!(
+                sc.codewords_litlen[DEFLATE_END_OF_BLOCK as usize],
+                sc.lens_litlen[DEFLATE_END_OF_BLOCK as usize] as u32
+            );
+            flush_bits!();
+
+            // Sync locals back
+            os.bitbuf = bitbuf;
+            os.bitcount = bitcount;
+        }
+
+        self.turbo_mf = Some(mf);
         Ok(())
     }
 
@@ -2089,9 +2272,8 @@ impl Compressor {
         let mut os = OutputBitstream::new(output);
 
         let result = match self.level.strategy() {
-            InternalStrategy::StaticTurbo | InternalStrategy::Turbo => {
-                self.compress_turbo(&mut os, input, stop)
-            }
+            InternalStrategy::StaticTurbo => self.compress_static_turbo(&mut os, input, stop),
+            InternalStrategy::Turbo => self.compress_turbo(&mut os, input, stop),
             InternalStrategy::FastHt => self.compress_fast_ht(&mut os, input, stop),
             InternalStrategy::HtGreedy => self.compress_fastest(&mut os, input, stop),
             InternalStrategy::Greedy => self.compress_greedy(&mut os, input, stop),
@@ -2801,14 +2983,14 @@ mod tests {
     fn test_compress_bound() {
         // Empty input
         assert_eq!(Compressor::deflate_compress_bound(0), 5);
-        // Small input
-        assert_eq!(Compressor::deflate_compress_bound(100), 105);
-        // Exactly MIN_BLOCK_LENGTH
-        assert_eq!(Compressor::deflate_compress_bound(5000), 5005);
-        // Large input: 1MB
+        // Small input: 100 + ceil(100/8) + 5 = 118
+        assert_eq!(Compressor::deflate_compress_bound(100), 118);
+        // Exactly MIN_BLOCK_LENGTH: 5000 + 625 + 5 = 5630
+        assert_eq!(Compressor::deflate_compress_bound(5000), 5630);
+        // Large input: 1MB — bound accounts for static Huffman worst case (9 bits/byte)
         let bound = Compressor::deflate_compress_bound(1_000_000);
         assert!(bound >= 1_000_000);
-        assert!(bound < 1_002_000); // shouldn't be too much larger
+        assert!(bound < 1_130_000); // ~12.5% overhead for static Huffman
     }
 
     // ---- Greedy strategy tests (levels 2-4) ----
