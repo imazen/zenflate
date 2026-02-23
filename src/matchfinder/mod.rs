@@ -3,10 +3,12 @@
 //! Ported from libdeflate's `matchfinder_common.h`.
 
 pub(crate) mod bt;
+pub(crate) mod fast_ht;
 pub(crate) mod hc;
 pub(crate) mod ht;
 #[cfg(feature = "unchecked")]
 pub(crate) mod raw;
+pub(crate) mod turbo;
 
 /// Matchfinder window order (log2 of window size).
 pub(crate) const MATCHFINDER_WINDOW_ORDER: u32 = 15;

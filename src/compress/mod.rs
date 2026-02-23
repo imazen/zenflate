@@ -14,9 +14,11 @@ use crate::constants::*;
 use crate::error::CompressionError;
 use crate::matchfinder::MATCHFINDER_WINDOW_SIZE;
 use crate::matchfinder::bt::{BT_MATCHFINDER_REQUIRED_NBYTES, LzMatch};
+use crate::matchfinder::fast_ht::{FAST_HT_REQUIRED_NBYTES, FastHtMatchfinder};
 use crate::matchfinder::hc::HcMatchfinder;
 use crate::matchfinder::ht::{HT_MATCHFINDER_REQUIRED_NBYTES, HtMatchfinder};
 use crate::matchfinder::lz_hash;
+use crate::matchfinder::turbo::{TURBO_REQUIRED_NBYTES, TurboMatchfinder};
 
 use self::bitstream::OutputBitstream;
 use self::block::{DeflateCodes, DeflateFreqs, choose_literal, choose_match, finish_block};
@@ -29,6 +31,12 @@ use self::sequences::Sequence;
 
 /// Hash order for the ht_matchfinder (needed for initial hash computation).
 const HT_MATCHFINDER_HASH_ORDER: u32 = 15;
+
+/// Hash order for the turbo matchfinder.
+const TURBO_MF_HASH_ORDER: u32 = crate::matchfinder::turbo::TURBO_MATCHFINDER_HASH_ORDER;
+
+/// Hash order for the fast_ht matchfinder.
+const FAST_HT_MF_HASH_ORDER: u32 = crate::matchfinder::fast_ht::FAST_HT_MATCHFINDER_HASH_ORDER;
 
 /// Soft maximum block length (uncompressed bytes). Blocks are ended around here.
 const SOFT_MAX_BLOCK_LENGTH: usize = 300000;
@@ -349,11 +357,15 @@ pub struct Compressor {
     static_codes: DeflateCodes,
     /// Sequence store for greedy/lazy/lazy2/fastest strategies.
     sequences: Vec<Sequence>,
-    /// Hash table matchfinder for level 1.
+    /// Turbo matchfinder for StaticTurbo/Turbo strategies.
+    turbo_mf: Option<Box<TurboMatchfinder>>,
+    /// FastHt matchfinder for the FastHt strategy.
+    fast_ht_mf: Option<Box<FastHtMatchfinder>>,
+    /// Hash table matchfinder for HtGreedy strategy (libdeflate L1 compat).
     ht_mf: Option<Box<HtMatchfinder>>,
-    /// Hash chains matchfinder for levels 2-9.
+    /// Hash chains matchfinder for Greedy/Lazy/Lazy2 strategies.
     hc_mf: Option<Box<HcMatchfinder>>,
-    /// Near-optimal state for levels 10-12.
+    /// Near-optimal state for the NearOptimal strategy.
     near_optimal: Option<Box<NearOptimalState>>,
     /// Starting offset: skip dictionary bytes at the start of input.
     /// Set by `deflate_compress_chunk`; 0 for normal operation.
@@ -379,6 +391,8 @@ impl Clone for Compressor {
             codes: self.codes.clone(),
             static_codes: self.static_codes.clone(),
             sequences: self.sequences.clone(),
+            turbo_mf: self.turbo_mf.as_ref().map(|b| Box::new((**b).clone())),
+            fast_ht_mf: self.fast_ht_mf.as_ref().map(|b| Box::new((**b).clone())),
             ht_mf: self.ht_mf.as_ref().map(|b| Box::new((**b).clone())),
             hc_mf: self.hc_mf.as_ref().map(|b| Box::new((**b).clone())),
             near_optimal: self.near_optimal.as_ref().map(|b| Box::new((**b).clone())),
@@ -427,12 +441,21 @@ impl Compressor {
             codes: DeflateCodes::default(),
             static_codes,
             sequences: alloc::vec![Sequence::default(); seq_capacity],
-            ht_mf: match strategy {
-                InternalStrategy::StaticTurbo | InternalStrategy::Turbo
-                | InternalStrategy::FastHt | InternalStrategy::HtGreedy => {
-                    Some(Box::new(HtMatchfinder::new()))
+            turbo_mf: match strategy {
+                InternalStrategy::StaticTurbo | InternalStrategy::Turbo => {
+                    Some(Box::new(TurboMatchfinder::new()))
                 }
                 _ => None,
+            },
+            fast_ht_mf: if strategy == InternalStrategy::FastHt {
+                Some(Box::new(FastHtMatchfinder::new()))
+            } else {
+                None
+            },
+            ht_mf: if strategy == InternalStrategy::HtGreedy {
+                Some(Box::new(HtMatchfinder::new()))
+            } else {
+                None
             },
             hc_mf: match strategy {
                 InternalStrategy::Greedy | InternalStrategy::Lazy
@@ -475,9 +498,13 @@ impl Compressor {
             InternalStrategy::Store => {
                 return deflate_compress_none(input, output);
             }
-            // StaticTurbo/Turbo/FastHt temporarily use HtGreedy path
-            InternalStrategy::StaticTurbo | InternalStrategy::Turbo
-            | InternalStrategy::FastHt | InternalStrategy::HtGreedy => {
+            InternalStrategy::StaticTurbo | InternalStrategy::Turbo => {
+                self.compress_turbo(&mut os, input, &stop)?;
+            }
+            InternalStrategy::FastHt => {
+                self.compress_fast_ht(&mut os, input, &stop)?;
+            }
+            InternalStrategy::HtGreedy => {
                 self.compress_fastest(&mut os, input, &stop)?;
             }
             InternalStrategy::Greedy => {
@@ -641,8 +668,7 @@ impl Compressor {
         let mut os = OutputBitstream::new(output);
 
         match self.level.strategy() {
-            InternalStrategy::StaticTurbo | InternalStrategy::Turbo
-            | InternalStrategy::FastHt | InternalStrategy::HtGreedy => {
+            InternalStrategy::HtGreedy => {
                 self.compress_incremental_ht(&mut os, data, new_start, is_final, &stop)?;
             }
             InternalStrategy::Greedy | InternalStrategy::Lazy
@@ -650,6 +676,7 @@ impl Compressor {
                 self.compress_incremental_hc(&mut os, data, new_start, is_final, &stop)?;
             }
             _ => {
+                // StaticTurbo/Turbo/FastHt/Store/NearOptimal not supported incrementally
                 return Err(CompressionError::InsufficientSpace);
             }
         }
@@ -1121,7 +1148,236 @@ impl Compressor {
         Ok(())
     }
 
-    /// Levels 2-4: greedy compression using hash chains matchfinder.
+    /// Turbo compression using single-entry hash table matchfinder.
+    ///
+    /// Same greedy algorithm as compress_fastest, but uses the turbo matchfinder
+    /// with limited hash updates for higher throughput.
+    fn compress_turbo(
+        &mut self,
+        os: &mut OutputBitstream<'_>,
+        input: &[u8],
+        stop: &impl enough::Stop,
+    ) -> Result<(), CompressionError> {
+        let mut mf = self.turbo_mf.take().unwrap();
+        mf.init();
+
+        let in_end = input.len();
+        let mut in_next = self.chunk_start;
+        let mut in_base_offset = 0usize;
+
+        // Dictionary warm-up
+        if self.chunk_start > 0 && in_next + 4 <= in_end {
+            let mut warmup_hash = lz_hash(
+                crate::fast_bytes::load_u32_le(input, 0),
+                TURBO_MF_HASH_ORDER,
+            );
+            mf.skip_bytes(
+                input,
+                &mut in_base_offset,
+                0,
+                self.chunk_start as u32,
+                &mut warmup_hash,
+            );
+        }
+
+        while in_next < in_end && !os.overflow {
+            stop.check()?;
+            let in_block_begin = in_next;
+            let in_max_block_end =
+                choose_max_block_end(in_next, in_end, FAST_SOFT_MAX_BLOCK_LENGTH);
+            let mut seq_idx = 0;
+
+            self.freqs.reset();
+            self.sequences[0].litrunlen_and_length = 0;
+
+            let mut next_hash = if in_next + 4 <= in_end {
+                lz_hash(
+                    crate::fast_bytes::load_u32_le(input, in_next),
+                    TURBO_MF_HASH_ORDER,
+                )
+            } else {
+                0
+            };
+
+            while in_next < in_max_block_end && seq_idx < FAST_SEQ_STORE_LENGTH {
+                let remaining = in_end - in_next;
+                let max_len = remaining.min(DEFLATE_MAX_MATCH_LEN as usize) as u32;
+                let nice_len = max_len.min(self.nice_match_length);
+
+                if max_len >= TURBO_REQUIRED_NBYTES {
+                    let (length, offset) = mf.longest_match(
+                        input,
+                        &mut in_base_offset,
+                        in_next,
+                        max_len,
+                        nice_len,
+                        &mut next_hash,
+                    );
+
+                    if length > 0 {
+                        seq_idx = choose_match(
+                            &mut self.freqs,
+                            length,
+                            offset,
+                            &mut self.sequences,
+                            seq_idx,
+                        );
+                        if length > 1 {
+                            mf.skip_bytes(
+                                input,
+                                &mut in_base_offset,
+                                in_next + 1,
+                                length - 1,
+                                &mut next_hash,
+                            );
+                        }
+                        in_next += length as usize;
+                        continue;
+                    }
+                }
+
+                choose_literal(
+                    &mut self.freqs,
+                    input[in_next],
+                    &mut self.sequences[seq_idx],
+                );
+                in_next += 1;
+            }
+
+            let block_length = in_next - in_block_begin;
+            let is_final = !self.force_nonfinal && in_next >= in_end;
+            finish_block(
+                os,
+                &input[in_block_begin..],
+                block_length,
+                &self.sequences[..=seq_idx],
+                &mut self.freqs,
+                &mut self.codes,
+                &self.static_codes,
+                is_final,
+            );
+        }
+
+        self.turbo_mf = Some(mf);
+        Ok(())
+    }
+
+    /// FastHt compression using 2-entry hash table with limited updates.
+    ///
+    /// Same greedy algorithm as compress_fastest, but uses the fast_ht matchfinder
+    /// which has 2 entries per bucket (better match quality) and limited hash
+    /// updates on skips (faster than full hash chains).
+    fn compress_fast_ht(
+        &mut self,
+        os: &mut OutputBitstream<'_>,
+        input: &[u8],
+        stop: &impl enough::Stop,
+    ) -> Result<(), CompressionError> {
+        let mut mf = self.fast_ht_mf.take().unwrap();
+        mf.init();
+
+        let in_end = input.len();
+        let mut in_next = self.chunk_start;
+        let mut in_base_offset = 0usize;
+
+        // Dictionary warm-up
+        if self.chunk_start > 0 && in_next + 4 <= in_end {
+            let mut warmup_hash = lz_hash(
+                crate::fast_bytes::load_u32_le(input, 0),
+                FAST_HT_MF_HASH_ORDER,
+            );
+            mf.skip_bytes(
+                input,
+                &mut in_base_offset,
+                0,
+                self.chunk_start as u32,
+                &mut warmup_hash,
+            );
+        }
+
+        while in_next < in_end && !os.overflow {
+            stop.check()?;
+            let in_block_begin = in_next;
+            let in_max_block_end =
+                choose_max_block_end(in_next, in_end, FAST_SOFT_MAX_BLOCK_LENGTH);
+            let mut seq_idx = 0;
+
+            self.freqs.reset();
+            self.sequences[0].litrunlen_and_length = 0;
+
+            let mut next_hash = if in_next + 4 <= in_end {
+                lz_hash(
+                    crate::fast_bytes::load_u32_le(input, in_next),
+                    FAST_HT_MF_HASH_ORDER,
+                )
+            } else {
+                0
+            };
+
+            while in_next < in_max_block_end && seq_idx < FAST_SEQ_STORE_LENGTH {
+                let remaining = in_end - in_next;
+                let max_len = remaining.min(DEFLATE_MAX_MATCH_LEN as usize) as u32;
+                let nice_len = max_len.min(self.nice_match_length);
+
+                if max_len >= FAST_HT_REQUIRED_NBYTES {
+                    let (length, offset) = mf.longest_match(
+                        input,
+                        &mut in_base_offset,
+                        in_next,
+                        max_len,
+                        nice_len,
+                        &mut next_hash,
+                    );
+
+                    if length > 0 {
+                        seq_idx = choose_match(
+                            &mut self.freqs,
+                            length,
+                            offset,
+                            &mut self.sequences,
+                            seq_idx,
+                        );
+                        if length > 1 {
+                            mf.skip_bytes(
+                                input,
+                                &mut in_base_offset,
+                                in_next + 1,
+                                length - 1,
+                                &mut next_hash,
+                            );
+                        }
+                        in_next += length as usize;
+                        continue;
+                    }
+                }
+
+                choose_literal(
+                    &mut self.freqs,
+                    input[in_next],
+                    &mut self.sequences[seq_idx],
+                );
+                in_next += 1;
+            }
+
+            let block_length = in_next - in_block_begin;
+            let is_final = !self.force_nonfinal && in_next >= in_end;
+            finish_block(
+                os,
+                &input[in_block_begin..],
+                block_length,
+                &self.sequences[..=seq_idx],
+                &mut self.freqs,
+                &mut self.codes,
+                &self.static_codes,
+                is_final,
+            );
+        }
+
+        self.fast_ht_mf = Some(mf);
+        Ok(())
+    }
+
+    /// Greedy compression using hash chains matchfinder.
     ///
     /// Always takes the longest match at each position. Uses block splitting
     /// and adaptive min_match_len heuristic.
@@ -1833,10 +2089,11 @@ impl Compressor {
         let mut os = OutputBitstream::new(output);
 
         let result = match self.level.strategy() {
-            InternalStrategy::StaticTurbo | InternalStrategy::Turbo
-            | InternalStrategy::FastHt | InternalStrategy::HtGreedy => {
-                self.compress_fastest(&mut os, input, stop)
+            InternalStrategy::StaticTurbo | InternalStrategy::Turbo => {
+                self.compress_turbo(&mut os, input, stop)
             }
+            InternalStrategy::FastHt => self.compress_fast_ht(&mut os, input, stop),
+            InternalStrategy::HtGreedy => self.compress_fastest(&mut os, input, stop),
             InternalStrategy::Greedy => self.compress_greedy(&mut os, input, stop),
             InternalStrategy::Lazy => self.compress_lazy_generic(&mut os, input, false, stop),
             InternalStrategy::Lazy2 => self.compress_lazy_generic(&mut os, input, true, stop),
