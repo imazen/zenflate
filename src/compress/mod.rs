@@ -42,76 +42,270 @@ const FAST_SOFT_MAX_BLOCK_LENGTH: usize = 65535;
 /// Maximum number of sequences for the fastest strategy.
 const FAST_SEQ_STORE_LENGTH: usize = 8192;
 
-/// Compression level (0-12).
+/// Internal compression strategy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum InternalStrategy {
+    /// No compression — store blocks only.
+    Store,
+    /// Static Huffman codes + turbo matchfinder (single-entry hash, limited updates).
+    StaticTurbo,
+    /// Dynamic Huffman codes + turbo matchfinder (single-entry hash, limited updates).
+    Turbo,
+    /// 2-entry hash table + limited hash updates during skips.
+    FastHt,
+    /// Original 2-entry hash table with full hash updates (libdeflate level 1 compat).
+    HtGreedy,
+    /// Hash chain greedy matchfinder.
+    Greedy,
+    /// Hash chain lazy matchfinder (single lookahead).
+    Lazy,
+    /// Hash chain double-lazy matchfinder (two lookaheads).
+    Lazy2,
+    /// Binary tree near-optimal parser with iterative backward DP.
+    NearOptimal,
+}
+
+/// Map effort (0-30) to internal strategy.
+fn effort_to_strategy(effort: u32) -> InternalStrategy {
+    match effort {
+        0 => InternalStrategy::Store,
+        1..=2 => InternalStrategy::StaticTurbo,
+        3..=4 => InternalStrategy::Turbo,
+        5..=7 => InternalStrategy::FastHt,
+        8..=10 => InternalStrategy::Greedy,
+        11..=17 => InternalStrategy::Lazy,
+        18..=22 => InternalStrategy::Lazy2,
+        _ => InternalStrategy::NearOptimal,
+    }
+}
+
+/// Compression level controlling the speed/ratio tradeoff.
 ///
-/// Higher levels produce smaller output but take longer.
+/// Use `CompressionLevel::new(effort)` with effort 0-30 for the effort-based API,
+/// or `CompressionLevel::libdeflate(level)` with level 0-12 for byte-identical
+/// compatibility with C libdeflate.
 ///
-/// | Level | Strategy | Typical speed | Constructor |
-/// |-------|----------|---------------|-------------|
-/// | 0 | Store (no compression) | memcpy | [`none()`](Self::none) |
-/// | 1 | Hash table | ~150 MiB/s | [`fastest()`](Self::fastest) |
-/// | 2-4 | Greedy | ~105 MiB/s | [`fast()`](Self::fast) |
-/// | 5-7 | Lazy | ~105 MiB/s | [`balanced()`](Self::balanced) |
-/// | 8-9 | Lazy (double) | ~104 MiB/s | [`high()`](Self::high) |
-/// | 10-12 | Near-optimal | ~40 MiB/s | [`best()`](Self::best) |
-///
-/// Levels 2-9 produce similar ratios at similar speeds on most data.
-/// The big jumps are L0→L1 (store vs. compress) and L9→L10 (lazy vs. near-optimal).
+/// | Effort | Strategy | Constructor |
+/// |--------|----------|-------------|
+/// | 0 | Store | [`none()`](Self::none) |
+/// | 1-2 | Static turbo | [`fastest()`](Self::fastest) |
+/// | 3-4 | Dynamic turbo | |
+/// | 5-7 | Fast HT | |
+/// | 8-10 | Greedy | [`fast()`](Self::fast) |
+/// | 11-17 | Lazy | [`balanced()`](Self::balanced) |
+/// | 18-22 | Lazy (double) | [`high()`](Self::high) |
+/// | 23-30 | Near-optimal | [`best()`](Self::best) |
 ///
 /// ```
 /// use zenflate::CompressionLevel;
 ///
-/// let level = CompressionLevel::balanced(); // level 6
-/// assert_eq!(level.level(), 6);
+/// let level = CompressionLevel::balanced(); // effort 15
+/// assert_eq!(level.effort(), 15);
+/// assert_eq!(level.level(), 6); // approximate backward-compat level
 ///
-/// // Specific levels via new(), clamped to 0-12
+/// // Effort levels via new(), clamped to 0-30
+/// assert_eq!(CompressionLevel::new(99).effort(), 30);
 /// assert_eq!(CompressionLevel::new(99).level(), 12);
+///
+/// // Byte-identical C libdeflate compatibility
+/// let compat = CompressionLevel::libdeflate(6);
+/// assert_eq!(compat.level(), 6);
 /// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct CompressionLevel(u32);
+pub struct CompressionLevel {
+    effort: u32,
+    strategy: InternalStrategy,
+    /// When Some, use exact C libdeflate parameters for byte-identical output.
+    libdeflate_level: Option<u8>,
+}
 
 impl CompressionLevel {
-    /// Create a compression level from a numeric value. Clamps to 0-12.
-    pub fn new(level: u32) -> Self {
-        Self(level.min(12))
+    /// Create a compression level from an effort value (0-30). Clamps to 0-30.
+    ///
+    /// Higher effort = better compression ratio but slower.
+    pub fn new(effort: u32) -> Self {
+        let effort = effort.min(30);
+        Self {
+            effort,
+            strategy: effort_to_strategy(effort),
+            libdeflate_level: None,
+        }
     }
 
-    /// Get the numeric level (0-12).
+    /// Create a compression level that produces byte-identical output with
+    /// C libdeflate at the given level (0-12). Clamps to 0-12.
+    pub fn libdeflate(level: u32) -> Self {
+        let level = level.min(12);
+        let (strategy, effort) = match level {
+            0 => (InternalStrategy::Store, 0),
+            1 => (InternalStrategy::HtGreedy, 4),
+            2 => (InternalStrategy::Greedy, 8),
+            3 => (InternalStrategy::Greedy, 9),
+            4 => (InternalStrategy::Greedy, 10),
+            5 => (InternalStrategy::Lazy, 11),
+            6 => (InternalStrategy::Lazy, 15),
+            7 => (InternalStrategy::Lazy, 17),
+            8 => (InternalStrategy::Lazy2, 18),
+            9 => (InternalStrategy::Lazy2, 22),
+            10 => (InternalStrategy::NearOptimal, 23),
+            11 => (InternalStrategy::NearOptimal, 26),
+            _ => (InternalStrategy::NearOptimal, 30),
+        };
+        Self {
+            effort,
+            strategy,
+            libdeflate_level: Some(level as u8),
+        }
+    }
+
+    /// Get the effort level (0-30).
+    pub fn effort(self) -> u32 {
+        self.effort
+    }
+
+    /// Get the approximate numeric level (0-12) for backward compatibility.
+    ///
+    /// For levels created with [`libdeflate()`](Self::libdeflate), returns the
+    /// exact libdeflate level. For effort-based levels, returns an approximation.
     pub fn level(self) -> u32 {
-        self.0
+        if let Some(ld) = self.libdeflate_level {
+            return ld as u32;
+        }
+        match self.effort {
+            0 => 0,
+            1..=7 => 1,
+            8 => 2,
+            9 => 3,
+            10 => 4,
+            11 => 5,
+            12..=15 => 6,
+            16..=17 => 7,
+            18..=19 => 8,
+            20..=22 => 9,
+            23..=25 => 10,
+            26..=28 => 11,
+            _ => 12,
+        }
     }
 
-    /// Level 0: no compression. Wraps input in uncompressed DEFLATE blocks.
+    /// Internal strategy for dispatch.
+    pub(crate) fn strategy(self) -> InternalStrategy {
+        self.strategy
+    }
+
+    /// Effort 0: no compression. Wraps input in uncompressed DEFLATE blocks.
     pub fn none() -> Self {
-        Self(0)
+        Self::new(0)
     }
 
-    /// Level 1: fastest compression. Hash table matchfinder, no lazy evaluation.
+    /// Effort 1: fastest compression. Static Huffman + turbo matchfinder.
     pub fn fastest() -> Self {
-        Self(1)
+        Self::new(1)
     }
 
-    /// Level 4: fast compression. Greedy hash-chain matchfinder.
+    /// Effort 8: fast compression. Greedy hash-chain matchfinder.
     pub fn fast() -> Self {
-        Self(4)
+        Self::new(8)
     }
 
-    /// Level 6: balanced compression. Lazy hash-chain matchfinder.
+    /// Effort 15: balanced compression. Lazy hash-chain matchfinder.
     /// This is the default.
     pub fn balanced() -> Self {
-        Self(6)
+        Self::new(15)
     }
 
-    /// Level 9: high compression. Double-lazy hash-chain matchfinder.
+    /// Effort 22: high compression. Double-lazy hash-chain matchfinder.
     /// Best ratio before the much slower near-optimal parser.
     pub fn high() -> Self {
-        Self(9)
+        Self::new(22)
     }
 
-    /// Level 12: maximum compression. Near-optimal parser with multiple passes.
-    /// About 3x slower than [`balanced()`](Self::balanced).
+    /// Effort 30: maximum compression. Near-optimal parser with multiple passes.
     pub fn best() -> Self {
-        Self(12)
+        Self::new(30)
+    }
+
+    /// Returns (max_search_depth, nice_match_length) for Compressor initialization.
+    pub(crate) fn compression_params(self) -> (u32, u32) {
+        if let Some(ld) = self.libdeflate_level {
+            return match ld {
+                0 => (0, 0),
+                1 => (0, 32),
+                2 => (6, 10),
+                3 => (12, 14),
+                4 => (16, 30),
+                5 => (16, 30),
+                6 => (35, 65),
+                7 => (100, 130),
+                8 => (300, DEFLATE_MAX_MATCH_LEN),
+                9 => (600, DEFLATE_MAX_MATCH_LEN),
+                10 => (35, 75),
+                11 => (100, 150),
+                _ => (300, DEFLATE_MAX_MATCH_LEN),
+            };
+        }
+        match self.strategy {
+            InternalStrategy::Store => (0, 0),
+            // Placeholder: use HtGreedy-compatible params until turbo matchfinders exist
+            InternalStrategy::StaticTurbo | InternalStrategy::Turbo
+            | InternalStrategy::FastHt | InternalStrategy::HtGreedy => {
+                match self.effort {
+                    0..=1 => (0, 16),
+                    2..=4 => (0, 32),
+                    5 => (0, 16),
+                    6 => (0, 32),
+                    _ => (0, 64),
+                }
+            }
+            InternalStrategy::Greedy => match self.effort {
+                0..=8 => (6, 10),
+                9 => (12, 14),
+                _ => (16, 30),
+            },
+            InternalStrategy::Lazy => match self.effort {
+                0..=11 => (16, 30),
+                12 => (20, 40),
+                13 => (35, 65),
+                14 => (50, 80),
+                15 => (65, 100),
+                16 => (80, 115),
+                _ => (100, 130),
+            },
+            InternalStrategy::Lazy2 => match self.effort {
+                0..=18 => (300, DEFLATE_MAX_MATCH_LEN),
+                19 => (350, DEFLATE_MAX_MATCH_LEN),
+                20 => (400, DEFLATE_MAX_MATCH_LEN),
+                21 => (500, DEFLATE_MAX_MATCH_LEN),
+                _ => (600, DEFLATE_MAX_MATCH_LEN),
+            },
+            InternalStrategy::NearOptimal => match self.effort {
+                0..=23 => (35, 75),
+                24 => (60, 100),
+                25 => (100, 150),
+                26 => (100, 150),
+                27 => (125, 200),
+                28 => (150, DEFLATE_MAX_MATCH_LEN),
+                29 => (200, DEFLATE_MAX_MATCH_LEN),
+                _ => (300, DEFLATE_MAX_MATCH_LEN),
+            },
+        }
+    }
+
+    /// Returns (passes, improvement_threshold, nonfinal_threshold, static_opt_threshold)
+    /// for near-optimal compression.
+    pub(crate) fn near_optimal_params(self) -> (u32, u32, u32, u32) {
+        if let Some(ld) = self.libdeflate_level {
+            return match ld {
+                10 => (2, 32, 32, 0),
+                11 => (4, 16, 16, 1000),
+                _ => (10, 1, 1, 10000),
+            };
+        }
+        match self.effort {
+            0..=25 => (2, 32, 32, 0),
+            26..=28 => (4, 16, 16, 1000),
+            _ => (10, 1, 1, 10000),
+        }
     }
 }
 
@@ -200,37 +394,22 @@ impl Compressor {
     /// Create a new compressor at the given compression level.
     #[cfg(feature = "alloc")]
     pub fn new(level: CompressionLevel) -> Self {
-        let lvl = level.level();
+        let strategy = level.strategy();
+        let (max_search_depth, nice_match_length) = level.compression_params();
+        let approx_level = level.level();
 
-        let (max_search_depth, nice_match_length) = match lvl {
-            0 => (0, 0),
-            1 => (0, 32), // ht_matchfinder has hardcoded depth
-            2 => (6, 10),
-            3 => (12, 14),
-            4 => (16, 30),
-            5 => (16, 30),
-            6 => (35, 65),
-            7 => (100, 130),
-            8 => (300, DEFLATE_MAX_MATCH_LEN),
-            9 => (600, DEFLATE_MAX_MATCH_LEN),
-            10 => (35, 75),
-            11 => (100, 150),
-            12 => (300, DEFLATE_MAX_MATCH_LEN),
-            _ => unreachable!(),
-        };
-
-        let max_passthrough_size = if lvl == 0 {
+        let max_passthrough_size = if strategy == InternalStrategy::Store {
             usize::MAX
         } else {
-            55 - (lvl as usize * 4)
+            55usize.saturating_sub(approx_level as usize * 4)
         };
 
-        let seq_capacity = if lvl == 1 {
-            FAST_SEQ_STORE_LENGTH + 1
-        } else if (2..=9).contains(&lvl) {
-            SEQ_STORE_LENGTH + 1
-        } else {
-            0
+        let seq_capacity = match strategy {
+            InternalStrategy::Store | InternalStrategy::NearOptimal => 0,
+            InternalStrategy::StaticTurbo | InternalStrategy::Turbo
+            | InternalStrategy::FastHt | InternalStrategy::HtGreedy => FAST_SEQ_STORE_LENGTH + 1,
+            InternalStrategy::Greedy | InternalStrategy::Lazy
+            | InternalStrategy::Lazy2 => SEQ_STORE_LENGTH + 1,
         };
 
         let mut freqs = DeflateFreqs::default();
@@ -248,22 +427,21 @@ impl Compressor {
             codes: DeflateCodes::default(),
             static_codes,
             sequences: alloc::vec![Sequence::default(); seq_capacity],
-            ht_mf: if lvl == 1 {
-                Some(Box::new(HtMatchfinder::new()))
-            } else {
-                None
+            ht_mf: match strategy {
+                InternalStrategy::StaticTurbo | InternalStrategy::Turbo
+                | InternalStrategy::FastHt | InternalStrategy::HtGreedy => {
+                    Some(Box::new(HtMatchfinder::new()))
+                }
+                _ => None,
             },
-            hc_mf: if (2..=9).contains(&lvl) {
-                Some(Box::new(HcMatchfinder::new()))
-            } else {
-                None
+            hc_mf: match strategy {
+                InternalStrategy::Greedy | InternalStrategy::Lazy
+                | InternalStrategy::Lazy2 => Some(Box::new(HcMatchfinder::new())),
+                _ => None,
             },
-            near_optimal: if lvl >= 10 {
-                let (passes, improvement, nonfinal, static_opt) = match lvl {
-                    10 => (2, 32, 32, 0),
-                    11 => (4, 16, 16, 1000),
-                    _ => (10, 1, 1, 10000),
-                };
+            near_optimal: if strategy == InternalStrategy::NearOptimal {
+                let (passes, improvement, nonfinal, static_opt) =
+                    level.near_optimal_params();
                 Some(NearOptimalState::new(
                     passes,
                     improvement,
@@ -293,27 +471,26 @@ impl Compressor {
 
         let mut os = OutputBitstream::new(output);
 
-        match self.level.level() {
-            0 => {
+        match self.level.strategy() {
+            InternalStrategy::Store => {
                 return deflate_compress_none(input, output);
             }
-            1 => {
+            // StaticTurbo/Turbo/FastHt temporarily use HtGreedy path
+            InternalStrategy::StaticTurbo | InternalStrategy::Turbo
+            | InternalStrategy::FastHt | InternalStrategy::HtGreedy => {
                 self.compress_fastest(&mut os, input, &stop)?;
             }
-            2..=4 => {
+            InternalStrategy::Greedy => {
                 self.compress_greedy(&mut os, input, &stop)?;
             }
-            5..=7 => {
+            InternalStrategy::Lazy => {
                 self.compress_lazy_generic(&mut os, input, false, &stop)?;
             }
-            8..=9 => {
+            InternalStrategy::Lazy2 => {
                 self.compress_lazy_generic(&mut os, input, true, &stop)?;
             }
-            10..=12 => {
+            InternalStrategy::NearOptimal => {
                 self.compress_near_optimal(&mut os, input, &stop)?;
-            }
-            _ => {
-                self.compress_literals(&mut os, input, &stop)?;
             }
         }
 
@@ -463,11 +640,13 @@ impl Compressor {
 
         let mut os = OutputBitstream::new(output);
 
-        match self.level.level() {
-            1 => {
+        match self.level.strategy() {
+            InternalStrategy::StaticTurbo | InternalStrategy::Turbo
+            | InternalStrategy::FastHt | InternalStrategy::HtGreedy => {
                 self.compress_incremental_ht(&mut os, data, new_start, is_final, &stop)?;
             }
-            2..=9 => {
+            InternalStrategy::Greedy | InternalStrategy::Lazy
+            | InternalStrategy::Lazy2 => {
                 self.compress_incremental_hc(&mut os, data, new_start, is_final, &stop)?;
             }
             _ => {
@@ -635,7 +814,7 @@ impl Compressor {
         let mut max_len = DEFLATE_MAX_MATCH_LEN;
         let mut nice_len = max_len.min(self.nice_match_length);
         let max_search_depth = self.max_search_depth;
-        let lazy2 = self.level.level() >= 8;
+        let lazy2 = self.level.strategy() == InternalStrategy::Lazy2;
 
         let mut next_hashes = [0u32; 2];
 
@@ -652,7 +831,7 @@ impl Compressor {
             let min_len =
                 calculate_min_match_len(&input[in_next..in_end.min(in_next + SOFT_MAX_BLOCK_LENGTH)], max_search_depth);
 
-            if lazy2 || self.level.level() >= 5 {
+            if matches!(self.level.strategy(), InternalStrategy::Lazy | InternalStrategy::Lazy2) {
                 // Lazy/lazy2 path
                 loop {
                     adjust_max_and_nice_len(&mut max_len, &mut nice_len, in_end - in_next);
@@ -1643,8 +1822,8 @@ impl Compressor {
         output: &mut [u8],
         stop: &impl enough::Stop,
     ) -> Result<usize, CompressionError> {
-        // Level 0: no matchfinder, just uncompressed blocks of the data portion.
-        if self.level.level() == 0 {
+        // Store: no matchfinder, just uncompressed blocks of the data portion.
+        if self.level.strategy() == InternalStrategy::Store {
             return deflate_compress_none_chunk(&input[chunk_start..], output, is_last_chunk);
         }
 
@@ -1653,13 +1832,16 @@ impl Compressor {
 
         let mut os = OutputBitstream::new(output);
 
-        let result = match self.level.level() {
-            1 => self.compress_fastest(&mut os, input, stop),
-            2..=4 => self.compress_greedy(&mut os, input, stop),
-            5..=7 => self.compress_lazy_generic(&mut os, input, false, stop),
-            8..=9 => self.compress_lazy_generic(&mut os, input, true, stop),
-            10..=12 => self.compress_near_optimal(&mut os, input, stop),
-            _ => self.compress_literals(&mut os, input, stop),
+        let result = match self.level.strategy() {
+            InternalStrategy::StaticTurbo | InternalStrategy::Turbo
+            | InternalStrategy::FastHt | InternalStrategy::HtGreedy => {
+                self.compress_fastest(&mut os, input, stop)
+            }
+            InternalStrategy::Greedy => self.compress_greedy(&mut os, input, stop),
+            InternalStrategy::Lazy => self.compress_lazy_generic(&mut os, input, false, stop),
+            InternalStrategy::Lazy2 => self.compress_lazy_generic(&mut os, input, true, stop),
+            InternalStrategy::NearOptimal => self.compress_near_optimal(&mut os, input, stop),
+            InternalStrategy::Store => unreachable!(),
         };
         if let Err(e) = result {
             self.chunk_start = 0;
@@ -1716,6 +1898,7 @@ impl Compressor {
     }
 
     /// Simple literal-only compressor that exercises the full block flushing path.
+    #[allow(dead_code)]
     fn compress_literals(
         &mut self,
         os: &mut OutputBitstream<'_>,
