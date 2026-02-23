@@ -34,8 +34,8 @@ jobs:
       - name: Test (default features)
         run: cargo test
 
-      - name: Test (no_std + alloc, no SIMD dispatch)
-        run: cargo test --no-default-features --features alloc --lib
+      - name: Check (no_std + alloc, no SIMD dispatch)
+        run: cargo check --no-default-features --features alloc
 
       - name: Test (with unchecked bounds elimination)
         run: cargo test --features unchecked

@@ -11,6 +11,9 @@
 //! the binary tree finds more matches per step (ideally log(n) vs n)
 //! but requires nearly twice as much memory.
 
+#[cfg(not(feature = "std"))]
+use alloc::{boxed::Box, vec, vec::Vec};
+
 #[cfg(not(feature = "unchecked"))]
 use super::lz_extend;
 use super::{

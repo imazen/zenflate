@@ -9,6 +9,9 @@ pub(crate) mod huffman;
 pub(crate) mod near_optimal;
 pub(crate) mod sequences;
 
+#[cfg(not(feature = "std"))]
+use alloc::{boxed::Box, vec, vec::Vec};
+
 use crate::checksum::{adler32, crc32};
 use crate::constants::*;
 use crate::error::CompressionError;
@@ -3612,9 +3615,9 @@ mod tests {
         // Mix of patterns: sequential, repeated, random-ish
         for (i, byte) in data.iter_mut().enumerate() {
             *byte = match i % 1024 {
-                0..=255 => (i % 256) as u8,             // sequential
-                256..=511 => (i / 256 % 256) as u8,     // slow-changing
-                512..=767 => b"Hello, World! "[i % 14], // repeated text
+                0..=255 => (i % 256) as u8,                    // sequential
+                256..=511 => (i / 256 % 256) as u8,            // slow-changing
+                512..=767 => b"Hello, World! "[i % 14],        // repeated text
                 _ => (i.wrapping_mul(2654435761) >> 16) as u8, // pseudo-random
             };
         }
