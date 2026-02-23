@@ -1,6 +1,7 @@
 /// Multi-library compression benchmark across 4 data types.
 ///
-/// Compares zenflate (effort 0-30), libdeflate C (1-12), flate2 (1-9), miniz_oxide (1-10).
+/// Compares zenflate (effort 0-30), libdeflate C (1-12), zlib-rs (1-9),
+/// miniz_oxide (1-9), and fdeflate (single level, PNG-optimized).
 ///
 /// Usage:
 ///   cargo run --release --features unchecked --example strategy_bench
@@ -169,7 +170,7 @@ fn bench_libdeflate(data: &[u8], level: i32) -> BenchResult {
     }
 }
 
-fn bench_flate2(data: &[u8], level: u32) -> BenchResult {
+fn bench_zlib_rs(data: &[u8], level: u32) -> BenchResult {
     let fl = flate2::Compression::new(level);
     let mut comp = flate2::Compress::new(fl, false);
     let mut out = vec![0u8; data.len() * 2 + 512];
@@ -188,7 +189,7 @@ fn bench_flate2(data: &[u8], level: u32) -> BenchResult {
     comp.compress(data, &mut out, flate2::FlushCompress::Finish).unwrap();
     let size = comp.total_out() as usize;
     BenchResult {
-        library: "flate2",
+        library: "zlib-rs",
         level: format!("L{level}"),
         strategy: "",
         size,
@@ -212,6 +213,28 @@ fn bench_miniz_oxide(data: &[u8], level: u8) -> BenchResult {
         level: format!("L{level}"),
         strategy: "",
         size: out.len(),
+        secs: best,
+    }
+}
+
+fn bench_fdeflate(data: &[u8]) -> BenchResult {
+    // fdeflate outputs zlib-wrapped data; subtract 2-byte header + 4-byte checksum
+    // for raw DEFLATE size comparison.
+    for _ in 0..WARMUP {
+        let _ = fdeflate::compress_to_vec(data);
+    }
+    let mut best = f64::MAX;
+    for _ in 0..ITERS {
+        let start = Instant::now();
+        let _ = fdeflate::compress_to_vec(data);
+        best = best.min(start.elapsed().as_secs_f64());
+    }
+    let out = fdeflate::compress_to_vec(data);
+    BenchResult {
+        library: "fdeflate",
+        level: String::new(),
+        strategy: "PNG-static",
+        size: out.len().saturating_sub(6),
         secs: best,
     }
 }
@@ -272,15 +295,18 @@ fn run_suite(name: &str, data: &[u8]) {
         results.push(bench_libdeflate(data, level));
     }
 
-    // flate2 (miniz_oxide backend): levels 1-9
+    // zlib-rs (via flate2): levels 1-9
     for level in 1..=9u32 {
-        results.push(bench_flate2(data, level));
+        results.push(bench_zlib_rs(data, level));
     }
 
-    // miniz_oxide direct: levels 1-9
+    // miniz_oxide: levels 1-9
     for level in 1..=9u8 {
         results.push(bench_miniz_oxide(data, level));
     }
+
+    // fdeflate: single level, PNG-optimized static Huffman
+    results.push(bench_fdeflate(data));
 
     print_table(name, data, &results);
 }
