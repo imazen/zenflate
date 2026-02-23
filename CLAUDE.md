@@ -27,8 +27,8 @@ Pure Rust port of libdeflate. DEFLATE/zlib/gzip compression and decompression.
 - [x] Phase 3: Compression Core (bitstream writer, Huffman construction, block flushing, 55 tests)
 - [x] Phase 4: Compression Strategies (levels 0-12: fastest, greedy, lazy, lazy2, near-optimal; 97 tests)
 - [x] Phase 5: SIMD Acceleration
-  - Adler-32: AVX-512 VNNI 512-bit (v4x) + AVX-512 (v4) + AVX2 (v3) + dotprod (arm_v2/v3) + NEON + WASM simd128 — 114 GiB/s (0.94x C)
-  - CRC-32: PCLMULQDQ 128-bit (v2) + VPCLMULQDQ 512-bit zmm (modern) + PMULL (aarch64) — 78 GiB/s (1.01x C)
+  - Adler-32: AVX-512 VNNI 512-bit (v4x) + AVX-512 (v4) + AVX2 (v3) + NEON + WASM simd128 — 114 GiB/s (0.94x C)
+  - CRC-32: PCLMULQDQ 128-bit (v2) + VPCLMULQDQ 512-bit zmm (modern) + PMULL (aarch64, NeonAes) — 78 GiB/s (1.01x C)
   - Decompression fastloop + optimized match copy
 - [x] Phase 6: Benchmarks + Polish (criterion benchmarks, README, doc examples, #[non_exhaustive] errors)
 - [x] Phase 7: Ecosystem benchmarks (flate2, miniz_oxide), justfile, Dockerfile, CI bench checks
@@ -187,11 +187,4 @@ Cachegrind: D1 cache misses nearly identical. Gap is pure instruction count.
 
 ## Known Bugs
 
-### aarch64 CI fails on stable Rust
-- `adler32_impl_arm_v2` uses `vdotq_u32` (NEON dot product) which requires
-  `#![feature(stdarch_neon_dotprod)]` — nightly-only
-- archmage's `#[arcane]` + `Arm64V2Token` sets `target_feature(enable="dotprod")`
-  but doesn't gate the unstable library feature
-- Affects: test-aarch64, bench-check aarch64
-- Fix: needs archmage to wrap `vdotq_u32` via inline assembly or provide
-  a safe_unaligned_simd wrapper that bypasses the feature gate
+(none currently)

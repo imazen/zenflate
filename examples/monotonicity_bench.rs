@@ -1,16 +1,16 @@
-/// Monotonicity benchmark: verify that higher effort never produces larger output.
-///
-/// Tests all 31 effort levels (0-30) on real corpus images + synthetic data.
-/// Reports per-data tables with size, ratio, delta from previous effort, and
-/// flags any monotonicity violations.
-///
-/// Usage:
-///   cargo run --release --features unchecked --example monotonicity_bench
-///   cargo run --release --features unchecked --example monotonicity_bench -- --quick
-///   cargo run --release --features unchecked --example monotonicity_bench -- --tsv > data.tsv
-///
-/// The `--quick` flag tests only efforts 0,1,3,5,7,8,9,10,12,15,20,24,30 (preset boundaries).
-/// The `--tsv` flag outputs machine-readable TSV with timing data for charting.
+// Monotonicity benchmark: verify that higher effort never produces larger output.
+//
+// Tests all 31 effort levels (0-30) on real corpus images + synthetic data.
+// Reports per-data tables with size, ratio, delta from previous effort, and
+// flags any monotonicity violations.
+//
+// Usage:
+//   cargo run --release --features unchecked --example monotonicity_bench
+//   cargo run --release --features unchecked --example monotonicity_bench -- --quick
+//   cargo run --release --features unchecked --example monotonicity_bench -- --tsv > data.tsv
+//
+// The --quick flag tests only efforts 0,1,3,5,7,8,9,10,12,15,20,24,30 (preset boundaries).
+// The --tsv flag outputs machine-readable TSV with timing data for charting.
 
 use std::time::Instant;
 
@@ -69,7 +69,10 @@ fn run() -> i32 {
     }
 
     // --- Synthetic data ---
-    datasets.push(("synth/screenshot-2560x1440".to_string(), make_screenshot(2560, 1440)));
+    datasets.push((
+        "synth/screenshot-2560x1440".to_string(),
+        make_screenshot(2560, 1440),
+    ));
     datasets.push(("synth/photo-2000x2000".to_string(), make_photo(2000, 2000)));
     datasets.push(("synth/noise-1M".to_string(), make_noise(1024 * 1024)));
     datasets.push(("synth/zeros-1M".to_string(), vec![0u8; 1024 * 1024]));
@@ -90,20 +93,17 @@ fn run() -> i32 {
     let mut total_fb_violations = 0usize;
 
     for (name, data) in &datasets {
-        println!(
-            "=== {name} ({:.1} KiB raw) ===",
-            data.len() as f64 / 1024.0,
-        );
+        println!("=== {name} ({:.1} KiB raw) ===", data.len() as f64 / 1024.0,);
         if use_fallback {
             println!(
-                "{:>6}  {:>12}  {:>10}  {:>10}  {:>7}  {:>10}  {}",
-                "Effort", "Strategy", "RawSize", "FbSize", "Ratio", "Delta", "Status"
+                "{:>6}  {:>12}  {:>10}  {:>10}  {:>7}  {:>10}  Status",
+                "Effort", "Strategy", "RawSize", "FbSize", "Ratio", "Delta"
             );
             println!("{}", "-".repeat(78));
         } else {
             println!(
-                "{:>6}  {:>12}  {:>10}  {:>7}  {:>10}  {}",
-                "Effort", "Strategy", "Size", "Ratio", "Delta", "Status"
+                "{:>6}  {:>12}  {:>10}  {:>7}  {:>10}  Status",
+                "Effort", "Strategy", "Size", "Ratio", "Delta"
             );
             println!("{}", "-".repeat(62));
         }
@@ -159,8 +159,12 @@ fn run() -> i32 {
                 ("--".to_string(), false, false)
             };
 
-            if raw_viol { raw_violations += 1; }
-            if fb_viol { fb_violations += 1; }
+            if raw_viol {
+                raw_violations += 1;
+            }
+            if fb_viol {
+                fb_violations += 1;
+            }
 
             let status = if fb_viol {
                 "  <<<" // Violation even with fallback
@@ -225,8 +229,13 @@ fn run() -> i32 {
         println!("Hint: re-run with --fallback to see effect of monotonicity_fallback()");
     }
 
-    if use_fallback { if total_fb_violations > 0 { 1 } else { 0 } }
-    else { if total_raw_violations > 0 { 1 } else { 0 } }
+    if use_fallback {
+        if total_fb_violations > 0 { 1 } else { 0 }
+    } else if total_raw_violations > 0 {
+        1
+    } else {
+        0
+    }
 }
 
 /// TSV mode: output machine-readable data with timing for charting.
@@ -241,7 +250,9 @@ fn run_tsv(datasets: &[(String, Vec<u8>)], efforts: &[u32]) -> i32 {
         efforts.len()
     );
 
-    println!("dataset\tcategory\teffort\tstrategy\traw_bytes\tcompressed_bytes\tratio\tspeed_mibps");
+    println!(
+        "dataset\tcategory\teffort\tstrategy\traw_bytes\tcompressed_bytes\tratio\tspeed_mibps"
+    );
 
     for (name, data) in datasets {
         let category = if name.starts_with("sc/") {
@@ -394,8 +405,8 @@ fn make_noise(size: usize) -> Vec<u8> {
 // ---------------------------------------------------------------------------
 
 fn decode_png_to_raw(path: &std::path::Path) -> Vec<u8> {
-    let file = std::fs::File::open(path)
-        .unwrap_or_else(|e| panic!("can't open {}: {e}", path.display()));
+    let file =
+        std::fs::File::open(path).unwrap_or_else(|e| panic!("can't open {}: {e}", path.display()));
     let decoder = png::Decoder::new(std::io::BufReader::new(file));
     let mut reader = decoder.read_info().expect("can't read PNG info");
     let buf_size = reader.output_buffer_size();

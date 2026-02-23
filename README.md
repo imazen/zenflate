@@ -243,7 +243,7 @@ zenflate and libdeflate produce **byte-identical output** at every level
 
 | Algorithm | zenflate | libdeflate (C) | Implementation |
 |-----------|----------|----------------|----------------|
-| Adler-32 | 114 GiB/s | 121 GiB/s | AVX-512 VNNI (x86), dotprod (aarch64), WASM simd128 |
+| Adler-32 | 114 GiB/s | 121 GiB/s | AVX-512 VNNI (x86), NEON (aarch64), WASM simd128 |
 | CRC-32 | 78 GiB/s | 77 GiB/s | PCLMULQDQ (x86), PMULL (aarch64) |
 
 **Parallel gzip** (4 MB mixed data):
@@ -265,7 +265,7 @@ zenflate extends libdeflate with:
 
 The C original is faster — zenflate runs at roughly 0.8-0.9x the speed of libdeflate depending on level and data. The gap comes from register pressure differences and bounds checking. The `unchecked` feature closes some of this gap.
 
-SIMD acceleration for checksums (AVX2/AVX-512/PCLMULQDQ on x86, NEON/dotprod/PMULL on aarch64, simd128 on WASM). Runtime feature detection via [archmage](https://crates.io/crates/archmage) with zero `unsafe`.
+SIMD acceleration for checksums (AVX2/AVX-512/PCLMULQDQ on x86, NEON/PMULL on aarch64, simd128 on WASM). Runtime feature detection via [archmage](https://crates.io/crates/archmage) with zero `unsafe`.
 
 ## License
 
