@@ -26,7 +26,7 @@ avx512 = ["archmage/avx512", "safe_unaligned_simd/avx512"]
 unchecked = []
 
 [dependencies]
-archmage = { version = "0.8.4", default-features = false, features = ["macros", "safe_unaligned_simd"] }
+archmage = { version = "0.8.6", default-features = false, features = ["macros", "safe_unaligned_simd"] }
 enough = { version = "0.4", default-features = false }
 safe_unaligned_simd = { version = "0.2", default-features = false }
 
@@ -40,6 +40,7 @@ fdeflate = "0.3"
 zlib-rs = "0.6"
 crc32fast = "1"
 simd-adler32 = "0.3"
+codec-corpus = { version = "1", path = "/home/lilith/work/codec-corpus/crate" }
 
 [[bench]]
 name = "throughput"
