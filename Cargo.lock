@@ -145,6 +145,8 @@ checksum = "3a822ea5bc7590f9d40f1ba12c0dc3c2760f3482c6984db1573ad11031420831"
 [[package]]
 name = "codec-corpus"
 version = "1.0.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e6d51122d6dd6352b5fa106205860511778e221001de7511f89c60001184ca91"
 dependencies = [
  "dirs",
  "fd-lock",
@@ -732,7 +734,7 @@ checksum = "589f6da84c646204747d1270a2a5661ea66ed1cced2631d546fdfb155959f9ec"
 
 [[package]]
 name = "zenflate"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "archmage",
  "codec-corpus",

@@ -8,7 +8,7 @@ Pure Rust DEFLATE/zlib/gzip compression and decompression, ported from [libdefla
 
 ```toml
 [dependencies]
-zenflate = "0.1"
+zenflate = "0.2"
 ```
 
 ### Compress
