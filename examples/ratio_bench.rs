@@ -1,4 +1,4 @@
-/// Compression ratio + speed benchmark across all levels 1-12.
+/// Compression ratio + speed benchmark across all effort levels 0-30.
 ///
 /// Usage:
 ///   cargo run --release --example ratio_bench              # safe mode
@@ -125,66 +125,66 @@ fn main() {
     println!("\nMode: {mode} | Input: {size_mib:.2} MiB\n");
 
     println!(
-        "{:<14} {:>5}  {:>10}  {:>8}  {:>10}",
-        "Library", "Level", "Size", "Ratio", "Speed"
+        "{:<14} {:>7}  {:>14}  {:>10}  {:>8}  {:>10}",
+        "Library", "Effort", "Strategy", "Size", "Ratio", "Speed"
     );
-    println!("{}", "-".repeat(55));
+    println!("{}", "-".repeat(72));
 
-    // zenflate: levels 1-12
-    for level in 1..=12u32 {
-        let (len, secs) = bench_zenflate(&data, level);
+    // zenflate: effort 1-30 (key points on the Pareto frontier)
+    let effort_levels = [1, 2, 3, 4, 5, 6, 7, 8, 10, 12, 15, 18, 22, 25, 28, 30];
+    for &effort in &effort_levels {
+        let level = zenflate::CompressionLevel::new(effort);
+        let strategy = match effort {
+            0 => "Store",
+            1..=2 => "StaticTurbo",
+            3..=4 => "Turbo",
+            5..=7 => "FastHt",
+            8..=10 => "Greedy",
+            11..=17 => "Lazy",
+            18..=22 => "Lazy2",
+            _ => "NearOptimal",
+        };
+        let (len, secs) = bench_zenflate(&data, effort);
         let ratio = len as f64 / data.len() as f64 * 100.0;
         println!(
-            "{:<14} {:>5}  {:>10}  {:>7.2}%  {:>10}",
-            "zenflate",
-            level,
-            len,
-            ratio,
+            "{:<14} {:>7}  {:>14}  {:>10}  {:>7.2}%  {:>10}",
+            "zenflate", effort, strategy, len, ratio,
             format_speed(data.len(), secs)
         );
     }
-    println!("{}", "-".repeat(55));
+    println!("{}", "-".repeat(72));
 
-    // libdeflate: levels 1-12
+    // libdeflate C: levels 1-12
     for level in 1..=12i32 {
         let (len, secs) = bench_libdeflate(&data, level);
         let ratio = len as f64 / data.len() as f64 * 100.0;
         println!(
-            "{:<14} {:>5}  {:>10}  {:>7.2}%  {:>10}",
-            "libdeflate",
-            level,
-            len,
-            ratio,
+            "{:<14} {:>7}  {:>14}  {:>10}  {:>7.2}%  {:>10}",
+            "libdeflate-C", level, "", len, ratio,
             format_speed(data.len(), secs)
         );
     }
-    println!("{}", "-".repeat(55));
+    println!("{}", "-".repeat(72));
 
     // flate2: levels 1-9
     for level in 1..=9u32 {
         let (len, secs) = bench_flate2(&data, level);
         let ratio = len as f64 / data.len() as f64 * 100.0;
         println!(
-            "{:<14} {:>5}  {:>10}  {:>7.2}%  {:>10}",
-            "flate2",
-            level,
-            len,
-            ratio,
+            "{:<14} {:>7}  {:>14}  {:>10}  {:>7.2}%  {:>10}",
+            "flate2", level, "", len, ratio,
             format_speed(data.len(), secs)
         );
     }
-    println!("{}", "-".repeat(55));
+    println!("{}", "-".repeat(72));
 
     // miniz_oxide: levels 1-9
     for level in 1..=9u8 {
         let (len, secs) = bench_miniz_oxide(&data, level);
         let ratio = len as f64 / data.len() as f64 * 100.0;
         println!(
-            "{:<14} {:>5}  {:>10}  {:>7.2}%  {:>10}",
-            "miniz_oxide",
-            level,
-            len,
-            ratio,
+            "{:<14} {:>7}  {:>14}  {:>10}  {:>7.2}%  {:>10}",
+            "miniz_oxide", level, "", len, ratio,
             format_speed(data.len(), secs)
         );
     }

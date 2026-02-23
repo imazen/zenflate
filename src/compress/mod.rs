@@ -257,7 +257,7 @@ impl CompressionLevel {
         }
         match self.strategy {
             InternalStrategy::Store => (0, 0),
-            // Placeholder: use HtGreedy-compatible params until turbo matchfinders exist
+            // Hash-table matchfinders: search_depth unused, only nice_len matters
             InternalStrategy::StaticTurbo | InternalStrategy::Turbo
             | InternalStrategy::FastHt | InternalStrategy::HtGreedy => {
                 match self.effort {
