@@ -187,4 +187,11 @@ Cachegrind: D1 cache misses nearly identical. Gap is pure instruction count.
 
 ## Known Bugs
 
-(none)
+### aarch64 CI fails on stable Rust
+- `adler32_impl_arm_v2` uses `vdotq_u32` (NEON dot product) which requires
+  `#![feature(stdarch_neon_dotprod)]` — nightly-only
+- archmage's `#[arcane]` + `Arm64V2Token` sets `target_feature(enable="dotprod")`
+  but doesn't gate the unstable library feature
+- Affects: test-aarch64, bench-check aarch64
+- Fix: needs archmage to wrap `vdotq_u32` via inline assembly or provide
+  a safe_unaligned_simd wrapper that bypasses the feature gate
