@@ -415,16 +415,16 @@ pub(crate) fn compute_precode_items_flagged(
             let run_len = run_end - run_start;
 
             if flags.fuse_7 && run_len == 7 {
-                // Fuse: 1 literal + code16(4) + code16(3) = 7 total
+                // Fuse: 1 literal + code16(3) + code16(3) = 7 total
                 precode_freqs[len as usize] += 1;
                 precode_items[item_count] = len as u32;
                 item_count += 1;
                 run_start += 1;
-                // code16 repeat 4 (extra=1)
+                // code16 repeat 3 (extra=0)
                 precode_freqs[16] += 1;
-                precode_items[item_count] = 16 | (1 << 5);
+                precode_items[item_count] = 16;
                 item_count += 1;
-                run_start += 4;
+                run_start += 3;
                 // code16 repeat 3 (extra=0)
                 precode_freqs[16] += 1;
                 precode_items[item_count] = 16;
