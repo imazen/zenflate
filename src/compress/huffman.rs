@@ -374,6 +374,165 @@ pub(crate) fn make_huffman_code(
     gen_codewords(a, lens, &len_counts, max_codeword_len, num_syms);
 }
 
+/// Optimize Huffman frequency counts for better RLE encoding (Brotli-inspired).
+///
+/// Smooths frequency arrays so that the resulting Huffman code lengths form
+/// longer runs of identical values, which compress better with DEFLATE's
+/// precode RLE symbols (16, 17, 18). Operates in-place on frequency counts.
+///
+/// Algorithm:
+/// 1. Trim trailing zeros
+/// 2. Identify "good for RLE" regions: zero runs >= 5, non-zero runs >= 7
+/// 3. Collapse strides of similar counts to their average
+pub fn optimize_huffman_for_rle(counts: &mut [u32]) {
+    let mut n = counts.len();
+
+    // Trim trailing zeros
+    while n > 0 && counts[n - 1] == 0 {
+        n -= 1;
+    }
+    if n == 0 {
+        return;
+    }
+
+    // Mark which positions are "good for RLE" (stride boundaries).
+    // A position is good if it's part of a zero run >= 5 or a non-zero run >= 7.
+    // We reuse a stack-allocated bitvec via a bool array.
+    // For DEFLATE, max symbol count is 288+32=320, so stack is fine.
+    let mut good_for_rle = [false; 512];
+
+    // Mark zero runs >= 5
+    {
+        let mut i = 0;
+        while i < n {
+            if counts[i] == 0 {
+                let start = i;
+                while i < n && counts[i] == 0 {
+                    i += 1;
+                }
+                if i - start >= 5 {
+                    for j in start..i {
+                        good_for_rle[j] = true;
+                    }
+                }
+            } else {
+                i += 1;
+            }
+        }
+    }
+
+    // Mark non-zero runs >= 7 where values are similar
+    {
+        let mut i = 0;
+        while i < n {
+            if counts[i] != 0 {
+                let start = i;
+                let mut sum = 0u64;
+                while i < n && counts[i] != 0 {
+                    sum += counts[i] as u64;
+                    i += 1;
+                }
+                let run_len = i - start;
+                if run_len >= 7 {
+                    // Check if values are within the streak limit
+                    let avg = sum / run_len as u64;
+                    // streak_limit = 1240 (fixed-point threshold from Brotli)
+                    let limit = (avg * 1240) >> 10; // ~1.21x average
+                    let mut all_similar = true;
+                    for j in start..i {
+                        if (counts[j] as u64).abs_diff(avg) > limit {
+                            all_similar = false;
+                            break;
+                        }
+                    }
+                    if all_similar {
+                        for j in start..i {
+                            good_for_rle[j] = true;
+                        }
+                    }
+                }
+            } else {
+                i += 1;
+            }
+        }
+    }
+
+    // Collapse strides: replace runs of good_for_rle positions with their average
+    {
+        let mut i = 0;
+        while i < n {
+            if good_for_rle[i] {
+                let start = i;
+                let mut sum = 0u64;
+                while i < n && good_for_rle[i] {
+                    sum += counts[i] as u64;
+                    i += 1;
+                }
+                let run_len = (i - start) as u64;
+                // Use ceiling division to avoid zeroing out small counts
+                let avg = ((sum + run_len - 1) / run_len) as u32;
+                for j in start..i {
+                    counts[j] = avg;
+                }
+            } else {
+                i += 1;
+            }
+        }
+    }
+}
+
+/// Optimize Huffman frequency counts for RLE encoding (Zopfli-style, simpler).
+///
+/// Similar to `optimize_huffman_for_rle()` but with simpler thresholds:
+/// - Stride limit: 4 (shorter runs)
+/// - Difference threshold: absolute difference <= 4
+/// - Simple arithmetic mean averaging
+pub fn optimize_huffman_for_rle_zop(counts: &mut [u32]) {
+    let mut n = counts.len();
+
+    // Trim trailing zeros
+    while n > 0 && counts[n - 1] == 0 {
+        n -= 1;
+    }
+    if n == 0 {
+        return;
+    }
+
+    let mut i = 0;
+    while i < n {
+        let val = counts[i];
+        let start = i;
+        i += 1;
+
+        if val == 0 {
+            // Zero run: collapse if >= 4 consecutive zeros
+            while i < n && counts[i] == 0 {
+                i += 1;
+            }
+            // Zero runs are already zero, nothing to smooth
+            continue;
+        }
+
+        // Non-zero run: find consecutive values within ±4
+        while i < n && counts[i] != 0 {
+            let diff = (counts[i] as i64 - counts[i - 1] as i64).unsigned_abs();
+            if diff > 4 {
+                break;
+            }
+            i += 1;
+        }
+
+        let run_len = i - start;
+        if run_len >= 4 {
+            let sum: u64 = counts[start..i].iter().map(|&c| c as u64).sum();
+            let avg = ((sum + run_len as u64 - 1) / run_len as u64) as u32;
+            for j in start..i {
+                counts[j] = avg;
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -497,5 +656,82 @@ mod tests {
         for &l in &lens {
             assert!(l <= 7, "code length {l} exceeds max of 7");
         }
+    }
+
+    #[test]
+    fn test_optimize_huffman_for_rle_zero_run() {
+        // A run of 6 zeros should be smoothed (>= 5)
+        let mut counts = [10, 10, 0, 0, 0, 0, 0, 0, 10, 10];
+        optimize_huffman_for_rle(&mut counts);
+        // The zero run should remain zero (avg of zeros is zero)
+        for &c in &counts[2..8] {
+            assert_eq!(c, 0);
+        }
+    }
+
+    #[test]
+    fn test_optimize_huffman_for_rle_nonzero_run() {
+        // A run of 8 similar non-zero values should be averaged
+        let mut counts = [10, 11, 10, 12, 10, 11, 10, 11, 0, 0];
+        optimize_huffman_for_rle(&mut counts);
+        // After smoothing, the first 8 values should all be the same
+        let first = counts[0];
+        for &c in &counts[..8] {
+            assert_eq!(c, first);
+        }
+    }
+
+    #[test]
+    fn test_optimize_huffman_for_rle_preserves_short_runs() {
+        // A run of 3 non-zero values should NOT be smoothed (< 7)
+        let original = [5, 6, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        let mut counts = original;
+        optimize_huffman_for_rle(&mut counts);
+        // The first 3 should be unchanged
+        assert_eq!(counts[..3], original[..3]);
+    }
+
+    #[test]
+    fn test_optimize_huffman_for_rle_empty() {
+        let mut counts: [u32; 0] = [];
+        optimize_huffman_for_rle(&mut counts);
+    }
+
+    #[test]
+    fn test_optimize_huffman_for_rle_all_zeros() {
+        let mut counts = [0u32; 10];
+        optimize_huffman_for_rle(&mut counts);
+        assert_eq!(counts, [0; 10]);
+    }
+
+    #[test]
+    fn test_optimize_huffman_for_rle_zop_smooths_run() {
+        // Run of 5 values within ±4 should be smoothed
+        let mut counts = [10, 12, 14, 12, 10, 0, 0, 0, 0];
+        optimize_huffman_for_rle_zop(&mut counts);
+        // First 5 should all be same averaged value
+        let first = counts[0];
+        for &c in &counts[..5] {
+            assert_eq!(c, first);
+        }
+    }
+
+    #[test]
+    fn test_optimize_huffman_for_rle_zop_preserves_short() {
+        // Run of 3 should NOT be smoothed (< 4)
+        let original = [10, 12, 14];
+        let mut counts = original;
+        optimize_huffman_for_rle_zop(&mut counts);
+        assert_eq!(counts, original);
+    }
+
+    #[test]
+    fn test_optimize_huffman_for_rle_zop_breaks_on_jump() {
+        // Jump of >4 should break the run
+        let mut counts = [10, 12, 14, 100, 10, 0, 0, 0, 0];
+        let original = counts;
+        optimize_huffman_for_rle_zop(&mut counts);
+        // The first 3 are a run too short to smooth, the 100 breaks the chain
+        assert_eq!(counts[..4], original[..4]);
     }
 }
