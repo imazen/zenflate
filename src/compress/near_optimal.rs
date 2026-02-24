@@ -20,7 +20,7 @@ use super::block::{
     make_huffman_codes, make_huffman_codes_best,
 };
 use super::block_split::{BlockSplitStats, MIN_BLOCK_LENGTH, NUM_OBSERVATION_TYPES};
-use super::huffman::make_huffman_code;
+use super::huffman::{make_huffman_code, optimize_huffman_for_rle};
 use super::sequences::Sequence;
 use super::{SOFT_MAX_BLOCK_LENGTH, choose_min_match_len};
 
@@ -129,6 +129,36 @@ impl Default for DeflateCosts {
             length: [0; DEFLATE_MAX_MATCH_LEN as usize + 1],
             offset_slot: [0; DEFLATE_NUM_OFFSET_SYMS as usize],
         }
+    }
+}
+
+/// Marsaglia multiply-with-carry RNG for diversification.
+///
+/// Simple, fast PRNG used to perturb cost models when the optimization
+/// loop gets stuck in a local minimum. Not cryptographic.
+#[derive(Clone, Copy)]
+struct MwcRng {
+    z: u32,
+    w: u32,
+}
+
+impl MwcRng {
+    fn new(seed: u32) -> Self {
+        Self {
+            z: seed.wrapping_add(362436069),
+            w: seed.wrapping_mul(521288629).wrapping_add(1),
+        }
+    }
+
+    /// Generate a pseudo-random u32.
+    fn next_u32(&mut self) -> u32 {
+        self.z = 36969u32
+            .wrapping_mul(self.z & 0xFFFF)
+            .wrapping_add(self.z >> 16);
+        self.w = 18000u32
+            .wrapping_mul(self.w & 0xFFFF)
+            .wrapping_add(self.w >> 16);
+        (self.z << 16).wrapping_add(self.w)
     }
 }
 
@@ -983,8 +1013,30 @@ pub(crate) fn optimize_and_flush_block(
         is_first_block,
     );
 
+    // Increase max passes for high effort levels
+    let max_passes = if effort >= 29 {
+        30
+    } else if effort >= 28 {
+        20
+    } else {
+        num_passes_remaining
+    };
+    num_passes_remaining = max_passes;
+
+    let use_diversification = effort >= 28;
+    let use_milestone_rle = effort >= 26;
+
+    let mut rng = MwcRng::new(block_length.wrapping_mul(0x9E3779B9));
+    let mut no_improvement_count = 0u32;
+    let mut pass_number = 0u32;
+    let mut checkpoint_costs: Option<DeflateCosts> = None;
+    let mut diversification_attempts = 0u32;
+    let mut prev_costs: Option<DeflateCosts> = None;
+
     // Iterative optimization loop
     loop {
+        pass_number += 1;
+
         find_min_cost_path(
             &mut ns.optimum_nodes,
             &ns.costs,
@@ -999,15 +1051,142 @@ pub(crate) fn optimize_and_flush_block(
         let true_cost = compute_true_cost_inner(freqs, codes, use_best_precode);
 
         if true_cost + ns.min_improvement_to_continue > best_true_cost {
+            no_improvement_count += 1;
+
+            // Randomized diversification: when stuck, perturb costs
+            if use_diversification && no_improvement_count >= 2 && diversification_attempts < 3 {
+                diversification_attempts += 1;
+
+                // Save checkpoint at first stall (pass 2+)
+                if checkpoint_costs.is_none() && pass_number >= 2 {
+                    checkpoint_costs = Some(ns.costs_saved.clone());
+                }
+
+                // Perturb ~33% of symbol costs with random other symbol costs
+                let saved = ns.costs_saved.clone();
+                for i in 0..DEFLATE_NUM_LITERALS as usize {
+                    if rng.next_u32().is_multiple_of(3) {
+                        let other = rng.next_u32() as usize % DEFLATE_NUM_LITERALS as usize;
+                        ns.costs.literal[i] = saved.literal[other];
+                    }
+                }
+                for i in DEFLATE_MIN_MATCH_LEN as usize..=DEFLATE_MAX_MATCH_LEN as usize {
+                    if rng.next_u32().is_multiple_of(3) {
+                        let other = DEFLATE_MIN_MATCH_LEN as usize
+                            + rng.next_u32() as usize
+                                % (DEFLATE_MAX_MATCH_LEN - DEFLATE_MIN_MATCH_LEN + 1) as usize;
+                        ns.costs.length[i] = saved.length[other];
+                    }
+                }
+
+                no_improvement_count = 0;
+                num_passes_remaining -= 1;
+                if num_passes_remaining == 0 {
+                    break;
+                }
+                continue;
+            }
+
+            // If diversification didn't help, restore checkpoint
+            if let Some(ref cp) = checkpoint_costs
+                && diversification_attempts >= 3 {
+                    ns.costs = cp.clone();
+                    // Re-run with checkpoint costs
+                    find_min_cost_path(
+                        &mut ns.optimum_nodes,
+                        &ns.costs,
+                        &ns.offset_slot_full,
+                        block_length,
+                        &ns.match_cache,
+                        cache_end,
+                        freqs,
+                        codes,
+                    );
+                    let cp_cost = compute_true_cost_inner(freqs, codes, use_best_precode);
+                    if cp_cost < best_true_cost {
+                        best_true_cost = cp_cost;
+                        ns.costs_saved = ns.costs.clone();
+                    }
+                }
             break;
         }
+
         best_true_cost = true_cost;
+        no_improvement_count = 0;
         ns.costs_saved = ns.costs.clone();
+
+        // Save previous costs for blending
+        if use_diversification {
+            prev_costs = Some(ns.costs.clone());
+        }
+
         set_costs_from_codes(&mut ns.costs, codes);
+
+        // Weighted cost blending (effort >= 28): after pass 2+, blend
+        // current costs with previous pass costs to slow convergence
+        // and explore more of the solution space.
+        if use_diversification && pass_number >= 2
+            && let Some(ref prev) = prev_costs {
+                // Blend: new = 1.0 * current + 0.5 * previous, normalized
+                for i in 0..DEFLATE_NUM_LITERALS as usize {
+                    ns.costs.literal[i] =
+                        (2 * ns.costs.literal[i] + prev.literal[i]) / 3;
+                }
+                for i in DEFLATE_MIN_MATCH_LEN as usize..=DEFLATE_MAX_MATCH_LEN as usize {
+                    ns.costs.length[i] =
+                        (2 * ns.costs.length[i] + prev.length[i]) / 3;
+                }
+                for i in 0..30 {
+                    ns.costs.offset_slot[i] =
+                        (2 * ns.costs.offset_slot[i] + prev.offset_slot[i]) / 3;
+                }
+            }
+
+        // Milestone RLE application (effort >= 26): at passes 4, 8,
+        // apply optimize_huffman_for_rle to the current frequencies,
+        // rebuild codes, and use those as the cost model.
+        if use_milestone_rle && (pass_number == 4 || pass_number == 8) {
+            let mut rle_freqs = freqs.clone();
+            optimize_huffman_for_rle(&mut rle_freqs.litlen);
+            optimize_huffman_for_rle(&mut rle_freqs.offset);
+            let mut rle_codes = DeflateCodes::default();
+            make_huffman_codes(&rle_freqs, &mut rle_codes);
+            set_costs_from_codes(&mut ns.costs, &rle_codes);
+        }
 
         num_passes_remaining -= 1;
         if num_passes_remaining == 0 {
             break;
+        }
+    }
+
+    // Final milestone RLE pass
+    if use_milestone_rle && pass_number > 4 {
+        let mut rle_freqs = freqs.clone();
+        optimize_huffman_for_rle(&mut rle_freqs.litlen);
+        optimize_huffman_for_rle(&mut rle_freqs.offset);
+        let mut rle_codes = DeflateCodes::default();
+        make_huffman_codes(&rle_freqs, &mut rle_codes);
+
+        // Only use the RLE-smoothed costs if they produce improvement
+        let mut rle_costs = ns.costs.clone();
+        set_costs_from_codes(&mut rle_costs, &rle_codes);
+
+        find_min_cost_path(
+            &mut ns.optimum_nodes,
+            &rle_costs,
+            &ns.offset_slot_full,
+            block_length,
+            &ns.match_cache,
+            cache_end,
+            freqs,
+            codes,
+        );
+        let rle_true_cost = compute_true_cost_inner(freqs, codes, use_best_precode);
+        if rle_true_cost < best_true_cost {
+            best_true_cost = rle_true_cost;
+            ns.costs_saved = rle_costs;
+            set_costs_from_codes(&mut ns.costs, codes);
         }
     }
 
