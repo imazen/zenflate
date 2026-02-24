@@ -6,7 +6,7 @@
 use crate::constants::*;
 
 use super::bitstream::{BITBUF_NBITS, OutputBitstream, can_buffer};
-use super::huffman::make_huffman_code;
+use super::huffman::{make_huffman_code, optimize_huffman_for_rle, optimize_huffman_for_rle_zop};
 use super::near_optimal::{OPTIMUM_LEN_MASK, OPTIMUM_OFFSET_SHIFT, OptimumNode};
 use super::sequences::Sequence;
 
@@ -150,6 +150,166 @@ pub(crate) fn init_static_codes(freqs: &mut DeflateFreqs, codes: &mut DeflateCod
         freqs.offset[..32].fill(1 << (5 - 5));
     }
     make_huffman_codes(freqs, codes);
+}
+
+/// Compute the data symbol cost: sum of freq * code_length for all symbols.
+///
+/// Uses the ORIGINAL frequencies against the given code lengths.
+/// This measures how many bits the actual data would take to encode.
+fn block_symbol_cost(
+    orig_freqs: &DeflateFreqs,
+    lens_litlen: &[u8],
+    lens_offset: &[u8],
+) -> u32 {
+    let mut cost = 0u32;
+    // Literal + end-of-block cost
+    for (&freq, &len) in orig_freqs.litlen[..DEFLATE_FIRST_LEN_SYM as usize]
+        .iter()
+        .zip(&lens_litlen[..DEFLATE_FIRST_LEN_SYM as usize])
+    {
+        cost += freq * len as u32;
+    }
+    // Length symbol cost
+    for (i, &extra) in DEFLATE_LENGTH_EXTRA_BITS.iter().enumerate() {
+        let sym = DEFLATE_FIRST_LEN_SYM as usize + i;
+        cost += orig_freqs.litlen[sym] * (lens_litlen[sym] as u32 + extra as u32);
+    }
+    // Offset symbol cost
+    for (sym, &extra) in DEFLATE_OFFSET_EXTRA_BITS[..30].iter().enumerate() {
+        cost += orig_freqs.offset[sym] * (lens_offset[sym] as u32 + extra as u32);
+    }
+    cost
+}
+
+/// Compute the tree header cost for given code lengths.
+///
+/// This is the cost of encoding the Huffman tree itself in the dynamic block header.
+fn tree_header_cost(lens_litlen: &[u8], lens_offset: &[u8]) -> u32 {
+    let mut num_litlen_syms = DEFLATE_NUM_LITLEN_SYMS as usize;
+    while num_litlen_syms > 257 && lens_litlen[num_litlen_syms - 1] == 0 {
+        num_litlen_syms -= 1;
+    }
+    let mut num_offset_syms = DEFLATE_NUM_OFFSET_SYMS as usize;
+    while num_offset_syms > 1 && lens_offset[num_offset_syms - 1] == 0 {
+        num_offset_syms -= 1;
+    }
+
+    let total_lens = num_litlen_syms + num_offset_syms;
+    let mut combined_lens = [0u8; (DEFLATE_NUM_LITLEN_SYMS + DEFLATE_NUM_OFFSET_SYMS) as usize];
+    combined_lens[..num_litlen_syms].copy_from_slice(&lens_litlen[..num_litlen_syms]);
+    combined_lens[num_litlen_syms..num_litlen_syms + num_offset_syms]
+        .copy_from_slice(&lens_offset[..num_offset_syms]);
+
+    // Use the best precode encoding for header cost
+    let best = compute_precode_items_best(&combined_lens[..total_lens]);
+    best.cost
+}
+
+/// Build litlen and offset Huffman codes using multi-strategy optimization.
+///
+/// Tries three frequency smoothing strategies:
+/// - Strategy A: `optimize_huffman_for_rle()` (Brotli-inspired)
+/// - Strategy B: `optimize_huffman_for_rle_zop()` (Zopfli-style)
+/// - Strategy C: Raw frequencies (no smoothing)
+///
+/// For each strategy, builds codes and computes total cost (data + header)
+/// against the ORIGINAL frequencies. Picks the cheapest strategy.
+/// Then tries reduced max_bits (8..14) to see if shorter codes help.
+pub(crate) fn make_huffman_codes_best(orig_freqs: &DeflateFreqs, codes: &mut DeflateCodes) {
+    let mut best_cost = u32::MAX;
+    let mut best_codes = DeflateCodes::default();
+
+    // Helper: build codes from (possibly smoothed) freqs with given max_bits,
+    // but measure cost against orig_freqs.
+    let mut try_strategy = |litlen_freqs: &[u32], offset_freqs: &[u32],
+                            max_litlen_bits: u32, max_offset_bits: u32| {
+        let mut trial = DeflateCodes::default();
+        make_huffman_code(
+            DEFLATE_NUM_LITLEN_SYMS as usize,
+            max_litlen_bits,
+            litlen_freqs,
+            &mut trial.lens_litlen,
+            &mut trial.codewords_litlen,
+        );
+        make_huffman_code(
+            DEFLATE_NUM_OFFSET_SYMS as usize,
+            max_offset_bits,
+            offset_freqs,
+            &mut trial.lens_offset,
+            &mut trial.codewords_offset,
+        );
+
+        let data_cost = block_symbol_cost(orig_freqs, &trial.lens_litlen, &trial.lens_offset);
+        let header_cost = tree_header_cost(&trial.lens_litlen, &trial.lens_offset);
+        let total_cost = data_cost + header_cost;
+
+        if total_cost < best_cost {
+            best_cost = total_cost;
+            best_codes = trial;
+        }
+    };
+
+    // Strategy C: raw frequencies, max_bits=15
+    try_strategy(
+        &orig_freqs.litlen,
+        &orig_freqs.offset,
+        DEFLATE_MAX_LITLEN_CODEWORD_LEN,
+        DEFLATE_MAX_OFFSET_CODEWORD_LEN,
+    );
+
+    // Strategy A: optimize_huffman_for_rle (Brotli-inspired)
+    {
+        let mut litlen = orig_freqs.litlen;
+        let mut offset = orig_freqs.offset;
+        optimize_huffman_for_rle(&mut litlen);
+        optimize_huffman_for_rle(&mut offset);
+        try_strategy(
+            &litlen,
+            &offset,
+            DEFLATE_MAX_LITLEN_CODEWORD_LEN,
+            DEFLATE_MAX_OFFSET_CODEWORD_LEN,
+        );
+    }
+
+    // Strategy B: optimize_huffman_for_rle_zop (Zopfli-style)
+    {
+        let mut litlen = orig_freqs.litlen;
+        let mut offset = orig_freqs.offset;
+        optimize_huffman_for_rle_zop(&mut litlen);
+        optimize_huffman_for_rle_zop(&mut offset);
+        try_strategy(
+            &litlen,
+            &offset,
+            DEFLATE_MAX_LITLEN_CODEWORD_LEN,
+            DEFLATE_MAX_OFFSET_CODEWORD_LEN,
+        );
+    }
+
+    // For the winning strategy's frequencies, try reduced max_bits
+    // (shorter trees can sometimes yield smaller total cost).
+    // Minimum max_bits for N used symbols is ceil(log2(N)), but we need at
+    // least 9 bits for 288 litlen symbols and 5 bits for 30 offset symbols.
+    // We start at 14 (one below the default 15) and go down to 9.
+    for max_bits in (9..DEFLATE_MAX_LITLEN_CODEWORD_LEN).rev() {
+        // Raw frequencies with reduced max_bits
+        try_strategy(
+            &orig_freqs.litlen,
+            &orig_freqs.offset,
+            max_bits,
+            DEFLATE_MAX_OFFSET_CODEWORD_LEN,
+        );
+
+        // RLE with reduced max_bits
+        {
+            let mut litlen = orig_freqs.litlen;
+            let mut offset = orig_freqs.offset;
+            optimize_huffman_for_rle(&mut litlen);
+            optimize_huffman_for_rle(&mut offset);
+            try_strategy(&litlen, &offset, max_bits, DEFLATE_MAX_OFFSET_CODEWORD_LEN);
+        }
+    }
+
+    *codes = best_codes;
 }
 
 /// Flags controlling which RLE codes are used in precode encoding.

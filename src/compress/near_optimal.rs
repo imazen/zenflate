@@ -17,7 +17,7 @@ use super::bitstream::OutputBitstream;
 use super::block::{
     BlockOutput, DeflateCodes, DeflateFreqs, EXTRA_PRECODE_BITS, LENGTH_SLOT,
     compute_precode_items, compute_precode_items_best, flush_block, flush_block_best,
-    make_huffman_codes,
+    make_huffman_codes, make_huffman_codes_best,
 };
 use super::block_split::{BlockSplitStats, MIN_BLOCK_LENGTH, NUM_OBSERVATION_TYPES};
 use super::huffman::make_huffman_code;
@@ -1070,6 +1070,16 @@ pub(crate) fn optimize_and_flush_block(
             codes,
         );
         set_costs_from_codes(&mut ns.costs, codes);
+    }
+
+    // Multi-strategy Huffman code refinement (effort >= 26):
+    // After the optimization loop converges, rebuild codes using the best
+    // of multiple frequency smoothing strategies. This can produce shorter
+    // total output because smoothed frequencies yield shorter tree headers
+    // even if data encoding is slightly longer.
+    let use_best_codes = effort >= 26;
+    if use_best_codes {
+        make_huffman_codes_best(freqs, codes);
     }
 
     let flush_fn = if use_best_precode { flush_block_best } else { flush_block };
