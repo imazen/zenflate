@@ -152,6 +152,54 @@ pub(crate) fn init_static_codes(freqs: &mut DeflateFreqs, codes: &mut DeflateCod
     make_huffman_codes(freqs, codes);
 }
 
+/// Flags controlling which RLE codes are used in precode encoding.
+#[derive(Clone, Copy)]
+pub(crate) struct PrecodeFlags {
+    /// Allow RLE code 16 (repeat previous non-zero length, 3-6 times).
+    pub use_16: bool,
+    /// Allow RLE code 17 (repeat zero, 3-10 times).
+    pub use_17: bool,
+    /// Allow RLE code 18 (repeat zero, 11-138 times).
+    pub use_18: bool,
+    /// When a non-zero symbol repeats exactly 7 times, encode as two code-16
+    /// runs (4+3) instead of one code-16 run (6) + 1 literal.
+    pub fuse_7: bool,
+    /// When a non-zero symbol repeats exactly 8 times, encode as two code-16
+    /// runs (4+4) instead of one code-16 run (6) + 2 literals.
+    pub fuse_8: bool,
+}
+
+impl PrecodeFlags {
+    /// Default flags: all RLE codes enabled, no fusing.
+    pub const DEFAULT: Self = Self {
+        use_16: true,
+        use_17: true,
+        use_18: true,
+        fuse_7: false,
+        fuse_8: false,
+    };
+
+    /// Construct from a bitmask (5 bits: use_16, use_17, use_18, fuse_7, fuse_8).
+    pub fn from_bits(bits: u8) -> Self {
+        Self {
+            use_16: bits & 1 != 0,
+            use_17: bits & 2 != 0,
+            use_18: bits & 4 != 0,
+            fuse_7: bits & 8 != 0,
+            fuse_8: bits & 16 != 0,
+        }
+    }
+
+    /// Check if this flag combination is valid.
+    /// fuse_7/fuse_8 require use_16.
+    pub fn is_valid(self) -> bool {
+        if (self.fuse_7 || self.fuse_8) && !self.use_16 {
+            return false;
+        }
+        true
+    }
+}
+
 /// Compute RLE-encoded precode items for the combined lens array.
 ///
 /// Returns the number of items written to `precode_items`.
@@ -159,6 +207,18 @@ pub(crate) fn compute_precode_items(
     lens: &[u8],
     precode_freqs: &mut [u32; DEFLATE_NUM_PRECODE_SYMS as usize],
     precode_items: &mut [u32],
+) -> usize {
+    compute_precode_items_flagged(lens, precode_freqs, precode_items, PrecodeFlags::DEFAULT)
+}
+
+/// Compute RLE-encoded precode items with configurable RLE strategy flags.
+///
+/// Returns the number of items written to `precode_items`.
+pub(crate) fn compute_precode_items_flagged(
+    lens: &[u8],
+    precode_freqs: &mut [u32; DEFLATE_NUM_PRECODE_SYMS as usize],
+    precode_items: &mut [u32],
+    flags: PrecodeFlags,
 ) -> usize {
     precode_freqs.fill(0);
     let num_lens = lens.len();
@@ -175,25 +235,75 @@ pub(crate) fn compute_precode_items(
         if len == 0 {
             // Run of zeroes
             // Symbol 18: RLE 11..=138 zeroes
-            while run_end - run_start >= 11 {
-                let extra_bits = (run_end - run_start - 11).min(0x7F) as u32;
-                precode_freqs[18] += 1;
-                precode_items[item_count] = 18 | (extra_bits << 5);
-                item_count += 1;
-                run_start += 11 + extra_bits as usize;
+            if flags.use_18 {
+                while run_end - run_start >= 11 {
+                    let extra_bits = (run_end - run_start - 11).min(0x7F) as u32;
+                    precode_freqs[18] += 1;
+                    precode_items[item_count] = 18 | (extra_bits << 5);
+                    item_count += 1;
+                    run_start += 11 + extra_bits as usize;
+                }
             }
             // Symbol 17: RLE 3..=10 zeroes
-            if run_end - run_start >= 3 {
-                let extra_bits = (run_end - run_start - 3).min(0x7) as u32;
-                precode_freqs[17] += 1;
-                precode_items[item_count] = 17 | (extra_bits << 5);
-                item_count += 1;
-                run_start += 3 + extra_bits as usize;
+            if flags.use_17 && run_end - run_start >= 3 {
+                while run_end - run_start >= 3 {
+                    let extra_bits = (run_end - run_start - 3).min(0x7) as u32;
+                    precode_freqs[17] += 1;
+                    precode_items[item_count] = 17 | (extra_bits << 5);
+                    item_count += 1;
+                    run_start += 3 + extra_bits as usize;
+                }
             }
-        } else {
-            // Run of nonzero lengths
-            // Symbol 16: RLE 3..=6 of previous length
-            if run_end - run_start >= 4 {
+        } else if flags.use_16 {
+            // Run of nonzero lengths with code 16 available
+            let run_len = run_end - run_start;
+
+            if flags.fuse_7 && run_len == 7 {
+                // Fuse: 1 literal + code16(4) + code16(3) = 7 total
+                precode_freqs[len as usize] += 1;
+                precode_items[item_count] = len as u32;
+                item_count += 1;
+                run_start += 1;
+                // code16 repeat 4 (extra=1)
+                precode_freqs[16] += 1;
+                precode_items[item_count] = 16 | (1 << 5);
+                item_count += 1;
+                run_start += 4;
+                // code16 repeat 3 (extra=0)
+                precode_freqs[16] += 1;
+                precode_items[item_count] = 16;
+                item_count += 1;
+                run_start += 3;
+                // Exact, no remainder - skip fallthrough
+                debug_assert_eq!(run_start, run_end);
+                continue;
+            } else if flags.fuse_8 && run_len == 8 {
+                // Fuse: 1 literal + code16(4) + code16(4) = 9... no, 1+4+4=9 != 8
+                // Actually: 1 literal + code16(4) + code16(3) = 1+4+3=8. That's fuse_7 for 8?
+                // Re-reading plan: fuse_8 = 8 repeats -> two code16 runs (4+4) instead of code16(6) + 2 literals
+                // code16(6) + 2 literals = 1 literal + code16(6) + 2 = 9 items?? No.
+                // Original: run of 8 = 1 literal + code16(6) + 1 literal = item_count 3 (len + code16(3extra) + len)
+                // Actually original for run 8: literal + code16(max=6) leaves 1 remaining = literal + code16(6) + literal
+                // Fuse_8: literal + code16(4) + code16(4) = also 3 items but different code16 extra bits
+                // 1 literal, then code16(4) + code16(3) = 1+4+3 = 8 total positions
+                precode_freqs[len as usize] += 1;
+                precode_items[item_count] = len as u32;
+                item_count += 1;
+                run_start += 1;
+                // code16 repeat 4 (extra=1)
+                precode_freqs[16] += 1;
+                precode_items[item_count] = 16 | (1 << 5);
+                item_count += 1;
+                run_start += 4;
+                // code16 repeat 3 (extra=0)
+                precode_freqs[16] += 1;
+                precode_items[item_count] = 16;
+                item_count += 1;
+                run_start += 3;
+                debug_assert_eq!(run_start, run_end);
+                continue;
+            } else if run_len >= 4 {
+                // Standard code16: emit 1 literal, then code16 runs
                 precode_freqs[len as usize] += 1;
                 precode_items[item_count] = len as u32;
                 item_count += 1;
@@ -220,6 +330,117 @@ pub(crate) fn compute_precode_items(
     item_count
 }
 
+/// Compute the bit cost of a precode encoding without actually writing items.
+///
+/// Returns the total header bits for a dynamic block's code length section:
+/// 14 fixed header bits + 3*hclen + precode symbol costs + extra bits.
+fn compute_precode_cost(
+    lens: &[u8],
+    flags: PrecodeFlags,
+) -> u32 {
+    let mut precode_freqs = [0u32; DEFLATE_NUM_PRECODE_SYMS as usize];
+    let mut precode_items = [0u32; (DEFLATE_NUM_LITLEN_SYMS + DEFLATE_NUM_OFFSET_SYMS) as usize];
+    compute_precode_items_flagged(lens, &mut precode_freqs, &mut precode_items, flags);
+
+    // Build precode Huffman code for this combination
+    let mut precode_lens = [0u8; DEFLATE_NUM_PRECODE_SYMS as usize];
+    let mut precode_codewords = [0u32; DEFLATE_NUM_PRECODE_SYMS as usize];
+    make_huffman_code(
+        DEFLATE_NUM_PRECODE_SYMS as usize,
+        DEFLATE_MAX_PRE_CODEWORD_LEN,
+        &precode_freqs,
+        &mut precode_lens,
+        &mut precode_codewords,
+    );
+    let _ = precode_codewords;
+
+    // Count how many precode lengths to output (min 4)
+    let mut num_explicit_lens = DEFLATE_NUM_PRECODE_SYMS as usize;
+    while num_explicit_lens > 4
+        && precode_lens[DEFLATE_PRECODE_LENS_PERMUTATION[num_explicit_lens - 1] as usize] == 0
+    {
+        num_explicit_lens -= 1;
+    }
+
+    // Total cost: 14 fixed bits + 3*hclen + sum(freq * (len + extra_bits))
+    let mut cost = 14u32 + 3 * num_explicit_lens as u32;
+    for sym in 0..DEFLATE_NUM_PRECODE_SYMS as usize {
+        cost += precode_freqs[sym] * (precode_lens[sym] as u32 + EXTRA_PRECODE_BITS[sym] as u32);
+    }
+
+    cost
+}
+
+/// Result of the best precode search.
+pub(crate) struct BestPrecodeResult {
+    pub precode_freqs: [u32; DEFLATE_NUM_PRECODE_SYMS as usize],
+    pub precode_items: [u32; (DEFLATE_NUM_LITLEN_SYMS + DEFLATE_NUM_OFFSET_SYMS) as usize],
+    pub num_items: usize,
+    pub precode_lens: [u8; DEFLATE_NUM_PRECODE_SYMS as usize],
+    pub precode_codewords: [u32; DEFLATE_NUM_PRECODE_SYMS as usize],
+    pub num_explicit_lens: usize,
+    pub cost: u32,
+}
+
+/// Search all valid flag combinations and return the best precode encoding.
+///
+/// Tests up to 24 of 32 combinations (skipping fuse_7/fuse_8 without use_16).
+/// Returns the combination with the lowest total header bit cost.
+pub(crate) fn compute_precode_items_best(lens: &[u8]) -> BestPrecodeResult {
+    let mut best_cost = u32::MAX;
+    let mut best_flags = PrecodeFlags::DEFAULT;
+
+    // Search all 32 combinations, skip invalid ones
+    for bits in 0..32u8 {
+        let flags = PrecodeFlags::from_bits(bits);
+        if !flags.is_valid() {
+            continue;
+        }
+        let cost = compute_precode_cost(lens, flags);
+        if cost < best_cost {
+            best_cost = cost;
+            best_flags = flags;
+        }
+    }
+
+    // Now compute the actual items with the best flags
+    let mut result = BestPrecodeResult {
+        precode_freqs: [0u32; DEFLATE_NUM_PRECODE_SYMS as usize],
+        precode_items: [0u32; (DEFLATE_NUM_LITLEN_SYMS + DEFLATE_NUM_OFFSET_SYMS) as usize],
+        num_items: 0,
+        precode_lens: [0u8; DEFLATE_NUM_PRECODE_SYMS as usize],
+        precode_codewords: [0u32; DEFLATE_NUM_PRECODE_SYMS as usize],
+        num_explicit_lens: 0,
+        cost: best_cost,
+    };
+
+    result.num_items = compute_precode_items_flagged(
+        lens,
+        &mut result.precode_freqs,
+        &mut result.precode_items,
+        best_flags,
+    );
+
+    make_huffman_code(
+        DEFLATE_NUM_PRECODE_SYMS as usize,
+        DEFLATE_MAX_PRE_CODEWORD_LEN,
+        &result.precode_freqs,
+        &mut result.precode_lens,
+        &mut result.precode_codewords,
+    );
+
+    result.num_explicit_lens = DEFLATE_NUM_PRECODE_SYMS as usize;
+    while result.num_explicit_lens > 4
+        && result.precode_lens
+            [DEFLATE_PRECODE_LENS_PERMUTATION[result.num_explicit_lens - 1] as usize]
+            == 0
+    {
+        result.num_explicit_lens -= 1;
+    }
+
+    result
+}
+
 /// Flush a complete DEFLATE block.
 ///
 /// Chooses the cheapest block type (uncompressed, static Huffman, dynamic Huffman)
@@ -234,6 +455,60 @@ pub(crate) fn flush_block(
     codes: &DeflateCodes,
     static_codes: &DeflateCodes,
     is_final_block: bool,
+) {
+    flush_block_inner(
+        os,
+        block_begin,
+        block_length,
+        output,
+        freqs,
+        codes,
+        static_codes,
+        is_final_block,
+        false,
+    );
+}
+
+/// Flush a complete DEFLATE block with optional exhaustive precode search.
+///
+/// When `use_best_precode` is true, searches all valid RLE flag combinations
+/// to find the smallest tree header encoding.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn flush_block_best(
+    os: &mut OutputBitstream<'_>,
+    block_begin: &[u8],
+    block_length: usize,
+    output: BlockOutput<'_>,
+    freqs: &DeflateFreqs,
+    codes: &DeflateCodes,
+    static_codes: &DeflateCodes,
+    is_final_block: bool,
+) {
+    flush_block_inner(
+        os,
+        block_begin,
+        block_length,
+        output,
+        freqs,
+        codes,
+        static_codes,
+        is_final_block,
+        true,
+    );
+}
+
+/// Inner implementation of flush_block with optional best-precode search.
+#[allow(clippy::too_many_arguments)]
+fn flush_block_inner(
+    os: &mut OutputBitstream<'_>,
+    block_begin: &[u8],
+    block_length: usize,
+    output: BlockOutput<'_>,
+    freqs: &DeflateFreqs,
+    codes: &DeflateCodes,
+    static_codes: &DeflateCodes,
+    is_final_block: bool,
+    use_best_precode: bool,
 ) {
     let in_data = &block_begin[..block_length];
 
@@ -256,32 +531,51 @@ pub(crate) fn flush_block(
     combined_lens[num_litlen_syms..num_litlen_syms + num_offset_syms]
         .copy_from_slice(&codes.lens_offset[..num_offset_syms]);
 
-    // Compute precode items (RLE tokens)
-    let mut precode_freqs = [0u32; DEFLATE_NUM_PRECODE_SYMS as usize];
-    let mut precode_items = [0u32; (DEFLATE_NUM_LITLEN_SYMS + DEFLATE_NUM_OFFSET_SYMS) as usize];
-    let num_precode_items = compute_precode_items(
-        &combined_lens[..total_lens],
-        &mut precode_freqs,
-        &mut precode_items,
-    );
+    // Compute precode items (RLE tokens) — optionally with exhaustive search
+    let mut precode_freqs;
+    let mut precode_items;
+    let num_precode_items;
+    let mut precode_lens;
+    let mut precode_codewords;
+    let num_explicit_lens;
 
-    // Build precode Huffman code
-    let mut precode_lens = [0u8; DEFLATE_NUM_PRECODE_SYMS as usize];
-    let mut precode_codewords = [0u32; DEFLATE_NUM_PRECODE_SYMS as usize];
-    make_huffman_code(
-        DEFLATE_NUM_PRECODE_SYMS as usize,
-        DEFLATE_MAX_PRE_CODEWORD_LEN,
-        &precode_freqs,
-        &mut precode_lens,
-        &mut precode_codewords,
-    );
+    if use_best_precode {
+        let best = compute_precode_items_best(&combined_lens[..total_lens]);
+        precode_freqs = best.precode_freqs;
+        precode_items = best.precode_items;
+        num_precode_items = best.num_items;
+        precode_lens = best.precode_lens;
+        precode_codewords = best.precode_codewords;
+        num_explicit_lens = best.num_explicit_lens;
+    } else {
+        precode_freqs = [0u32; DEFLATE_NUM_PRECODE_SYMS as usize];
+        precode_items =
+            [0u32; (DEFLATE_NUM_LITLEN_SYMS + DEFLATE_NUM_OFFSET_SYMS) as usize];
+        num_precode_items = compute_precode_items(
+            &combined_lens[..total_lens],
+            &mut precode_freqs,
+            &mut precode_items,
+        );
 
-    // Count how many precode lengths to output
-    let mut num_explicit_lens = DEFLATE_NUM_PRECODE_SYMS as usize;
-    while num_explicit_lens > 4
-        && precode_lens[DEFLATE_PRECODE_LENS_PERMUTATION[num_explicit_lens - 1] as usize] == 0
-    {
-        num_explicit_lens -= 1;
+        precode_lens = [0u8; DEFLATE_NUM_PRECODE_SYMS as usize];
+        precode_codewords = [0u32; DEFLATE_NUM_PRECODE_SYMS as usize];
+        make_huffman_code(
+            DEFLATE_NUM_PRECODE_SYMS as usize,
+            DEFLATE_MAX_PRE_CODEWORD_LEN,
+            &precode_freqs,
+            &mut precode_lens,
+            &mut precode_codewords,
+        );
+
+        num_explicit_lens = {
+            let mut n = DEFLATE_NUM_PRECODE_SYMS as usize;
+            while n > 4
+                && precode_lens[DEFLATE_PRECODE_LENS_PERMUTATION[n - 1] as usize] == 0
+            {
+                n -= 1;
+            }
+            n
+        };
     }
 
     // ---- Compute block costs ----

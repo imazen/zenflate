@@ -2417,6 +2417,7 @@ impl Compressor {
                     &self.static_codes,
                     &self.split_stats,
                     max_search_depth,
+                    self.level.effort(),
                 );
 
                 // Move remaining cache entries to beginning
@@ -2447,6 +2448,7 @@ impl Compressor {
                     &self.static_codes,
                     &self.split_stats,
                     max_search_depth,
+                    self.level.effort(),
                 );
 
                 cache_idx = 0;

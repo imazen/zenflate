@@ -16,7 +16,8 @@ use crate::matchfinder::bt::{BtMatchfinder, LzMatch};
 use super::bitstream::OutputBitstream;
 use super::block::{
     BlockOutput, DeflateCodes, DeflateFreqs, EXTRA_PRECODE_BITS, LENGTH_SLOT,
-    compute_precode_items, flush_block, make_huffman_codes,
+    compute_precode_items, compute_precode_items_best, flush_block, flush_block_best,
+    make_huffman_codes,
 };
 use super::block_split::{BlockSplitStats, MIN_BLOCK_LENGTH, NUM_OBSERVATION_TYPES};
 use super::huffman::make_huffman_code;
@@ -661,8 +662,13 @@ fn choose_all_literals(
 
 /// Compute the true (exact) dynamic block cost from freqs and codes.
 ///
-/// Includes the dynamic Huffman header cost.
-fn compute_true_cost(freqs: &DeflateFreqs, codes: &DeflateCodes) -> u32 {
+/// Includes the dynamic Huffman header cost. When `use_best_precode` is true,
+/// searches all valid RLE flag combinations for the smallest tree header.
+fn compute_true_cost_inner(
+    freqs: &DeflateFreqs,
+    codes: &DeflateCodes,
+    use_best_precode: bool,
+) -> u32 {
     let mut cost = 0u32;
 
     // Count active symbols
@@ -682,37 +688,43 @@ fn compute_true_cost(freqs: &DeflateFreqs, codes: &DeflateCodes) -> u32 {
     combined_lens[num_litlen_syms..num_litlen_syms + num_offset_syms]
         .copy_from_slice(&codes.lens_offset[..num_offset_syms]);
 
-    // Compute precode
-    let mut precode_freqs = [0u32; DEFLATE_NUM_PRECODE_SYMS as usize];
-    let mut precode_items = [0u32; (DEFLATE_NUM_LITLEN_SYMS + DEFLATE_NUM_OFFSET_SYMS) as usize];
-    compute_precode_items(
-        &combined_lens[..total_lens],
-        &mut precode_freqs,
-        &mut precode_items,
-    );
+    if use_best_precode {
+        let best = compute_precode_items_best(&combined_lens[..total_lens]);
+        cost += best.cost;
+    } else {
+        // Compute precode with default flags
+        let mut precode_freqs = [0u32; DEFLATE_NUM_PRECODE_SYMS as usize];
+        let mut precode_items =
+            [0u32; (DEFLATE_NUM_LITLEN_SYMS + DEFLATE_NUM_OFFSET_SYMS) as usize];
+        compute_precode_items(
+            &combined_lens[..total_lens],
+            &mut precode_freqs,
+            &mut precode_items,
+        );
 
-    let mut precode_lens = [0u8; DEFLATE_NUM_PRECODE_SYMS as usize];
-    let mut precode_codewords = [0u32; DEFLATE_NUM_PRECODE_SYMS as usize];
-    make_huffman_code(
-        DEFLATE_NUM_PRECODE_SYMS as usize,
-        DEFLATE_MAX_PRE_CODEWORD_LEN,
-        &precode_freqs,
-        &mut precode_lens,
-        &mut precode_codewords,
-    );
-    let _ = precode_codewords; // only need lens for cost
+        let mut precode_lens = [0u8; DEFLATE_NUM_PRECODE_SYMS as usize];
+        let mut precode_codewords = [0u32; DEFLATE_NUM_PRECODE_SYMS as usize];
+        make_huffman_code(
+            DEFLATE_NUM_PRECODE_SYMS as usize,
+            DEFLATE_MAX_PRE_CODEWORD_LEN,
+            &precode_freqs,
+            &mut precode_lens,
+            &mut precode_codewords,
+        );
+        let _ = precode_codewords;
 
-    let mut num_explicit_lens = DEFLATE_NUM_PRECODE_SYMS as usize;
-    while num_explicit_lens > 4
-        && precode_lens[DEFLATE_PRECODE_LENS_PERMUTATION[num_explicit_lens - 1] as usize] == 0
-    {
-        num_explicit_lens -= 1;
-    }
+        let mut num_explicit_lens = DEFLATE_NUM_PRECODE_SYMS as usize;
+        while num_explicit_lens > 4
+            && precode_lens[DEFLATE_PRECODE_LENS_PERMUTATION[num_explicit_lens - 1] as usize] == 0
+        {
+            num_explicit_lens -= 1;
+        }
 
-    // Header cost
-    cost += 5 + 5 + 4 + 3 * num_explicit_lens as u32;
-    for sym in 0..DEFLATE_NUM_PRECODE_SYMS as usize {
-        cost += precode_freqs[sym] * (precode_lens[sym] as u32 + EXTRA_PRECODE_BITS[sym] as u32);
+        cost += 5 + 5 + 4 + 3 * num_explicit_lens as u32;
+        for sym in 0..DEFLATE_NUM_PRECODE_SYMS as usize {
+            cost +=
+                precode_freqs[sym] * (precode_lens[sym] as u32 + EXTRA_PRECODE_BITS[sym] as u32);
+        }
     }
 
     // Literal cost
@@ -920,13 +932,18 @@ pub(crate) fn optimize_and_flush_block(
     static_codes: &DeflateCodes,
     split_stats: &BlockSplitStats,
     max_search_depth: u32,
+    effort: u32,
 ) -> bool {
+    // Use exhaustive precode search for near-optimal efforts (always, since
+    // this function is only called for near-optimal strategy, effort >= 23)
+    let use_best_precode = effort >= 23;
+
     let mut num_passes_remaining = ns.max_optim_passes;
     let mut best_true_cost = u32::MAX;
 
     // Consider all-literals encoding
     choose_all_literals(block_begin, block_length, freqs, codes);
-    let only_lits_cost = compute_true_cost(freqs, codes);
+    let only_lits_cost = compute_true_cost_inner(freqs, codes, use_best_precode);
 
     // Force the block to end at the desired length (prevent match overshoot)
     let sentinel_end =
@@ -979,7 +996,7 @@ pub(crate) fn optimize_and_flush_block(
             codes,
         );
 
-        let true_cost = compute_true_cost(freqs, codes);
+        let true_cost = compute_true_cost_inner(freqs, codes, use_best_precode);
 
         if true_cost + ns.min_improvement_to_continue > best_true_cost {
             break;
@@ -996,7 +1013,7 @@ pub(crate) fn optimize_and_flush_block(
 
     // Choose the best approach
     let used_only_literals = false;
-    let true_cost = compute_true_cost(freqs, codes);
+    let true_cost = compute_true_cost_inner(freqs, codes, use_best_precode);
 
     if only_lits_cost.min(static_cost) < best_true_cost {
         if only_lits_cost < static_cost {
@@ -1009,7 +1026,12 @@ pub(crate) fn optimize_and_flush_block(
                 offset: 0,
                 offset_slot: 0,
             };
-            flush_block(
+            let flush_fn = if use_best_precode {
+                flush_block_best
+            } else {
+                flush_block
+            };
+            flush_fn(
                 os,
                 block_begin,
                 block_length as usize,
@@ -1050,7 +1072,8 @@ pub(crate) fn optimize_and_flush_block(
         set_costs_from_codes(&mut ns.costs, codes);
     }
 
-    flush_block(
+    let flush_fn = if use_best_precode { flush_block_best } else { flush_block };
+    flush_fn(
         os,
         block_begin,
         block_length as usize,

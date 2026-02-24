@@ -384,6 +384,7 @@ pub(crate) fn make_huffman_code(
 /// 1. Trim trailing zeros
 /// 2. Identify "good for RLE" regions: zero runs >= 5, non-zero runs >= 7
 /// 3. Collapse strides of similar counts to their average
+#[allow(dead_code)] // Used in Phase 3 (multi-strategy Huffman)
 pub fn optimize_huffman_for_rle(counts: &mut [u32]) {
     let mut n = counts.len();
 
@@ -411,9 +412,7 @@ pub fn optimize_huffman_for_rle(counts: &mut [u32]) {
                     i += 1;
                 }
                 if i - start >= 5 {
-                    for j in start..i {
-                        good_for_rle[j] = true;
-                    }
+                    good_for_rle[start..i].fill(true);
                 }
             } else {
                 i += 1;
@@ -438,17 +437,11 @@ pub fn optimize_huffman_for_rle(counts: &mut [u32]) {
                     let avg = sum / run_len as u64;
                     // streak_limit = 1240 (fixed-point threshold from Brotli)
                     let limit = (avg * 1240) >> 10; // ~1.21x average
-                    let mut all_similar = true;
-                    for j in start..i {
-                        if (counts[j] as u64).abs_diff(avg) > limit {
-                            all_similar = false;
-                            break;
-                        }
-                    }
+                    let all_similar = counts[start..i]
+                        .iter()
+                        .all(|&c| (c as u64).abs_diff(avg) <= limit);
                     if all_similar {
-                        for j in start..i {
-                            good_for_rle[j] = true;
-                        }
+                        good_for_rle[start..i].fill(true);
                     }
                 }
             } else {
@@ -470,10 +463,8 @@ pub fn optimize_huffman_for_rle(counts: &mut [u32]) {
                 }
                 let run_len = (i - start) as u64;
                 // Use ceiling division to avoid zeroing out small counts
-                let avg = ((sum + run_len - 1) / run_len) as u32;
-                for j in start..i {
-                    counts[j] = avg;
-                }
+                let avg = sum.div_ceil(run_len) as u32;
+                counts[start..i].fill(avg);
             } else {
                 i += 1;
             }
@@ -487,6 +478,7 @@ pub fn optimize_huffman_for_rle(counts: &mut [u32]) {
 /// - Stride limit: 4 (shorter runs)
 /// - Difference threshold: absolute difference <= 4
 /// - Simple arithmetic mean averaging
+#[allow(dead_code)] // Used in Phase 3 (multi-strategy Huffman)
 pub fn optimize_huffman_for_rle_zop(counts: &mut [u32]) {
     let mut n = counts.len();
 
@@ -525,10 +517,8 @@ pub fn optimize_huffman_for_rle_zop(counts: &mut [u32]) {
         let run_len = i - start;
         if run_len >= 4 {
             let sum: u64 = counts[start..i].iter().map(|&c| c as u64).sum();
-            let avg = ((sum + run_len as u64 - 1) / run_len as u64) as u32;
-            for j in start..i {
-                counts[j] = avg;
-            }
+            let avg = sum.div_ceil(run_len as u64) as u32;
+            counts[start..i].fill(avg);
         }
     }
 }
