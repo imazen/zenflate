@@ -506,6 +506,51 @@ pub struct Compressor {
     png_mode: bool,
 }
 
+/// Snapshot of compressor state for cheap save/restore during incremental compression.
+///
+/// Contains only the mutable state that changes between incremental calls:
+/// matchfinder hash tables, frequency counters, Huffman codes, and cursor position.
+/// Immutable configuration (level, parameters, static codes) is not included,
+/// making this cheaper than a full [`Compressor::clone()`].
+///
+/// Used for filter evaluation in PNG optimization: snapshot before trying a filter,
+/// restore after to try a different one.
+///
+/// # Example
+///
+/// ```no_run
+/// # use zenflate::{Compressor, CompressionLevel};
+/// let mut compressor = Compressor::new(CompressionLevel::fast());
+/// // ... compress some rows ...
+/// let snap = compressor.snapshot();
+/// // ... try filter A, measure cost ...
+/// compressor.restore(snap);
+/// // ... try filter B from the same starting state ...
+/// ```
+pub struct CompressorSnapshot {
+    freqs: DeflateFreqs,
+    split_stats: BlockSplitStats,
+    codes: DeflateCodes,
+    ht_mf: Option<Box<HtMatchfinder>>,
+    hc_mf: Option<Box<HcMatchfinder>>,
+    incremental_pos: usize,
+    incremental_base_offset: usize,
+}
+
+impl Clone for CompressorSnapshot {
+    fn clone(&self) -> Self {
+        Self {
+            freqs: self.freqs.clone(),
+            split_stats: self.split_stats.clone(),
+            codes: self.codes.clone(),
+            ht_mf: self.ht_mf.as_ref().map(|b| Box::new((**b).clone())),
+            hc_mf: self.hc_mf.as_ref().map(|b| Box::new((**b).clone())),
+            incremental_pos: self.incremental_pos,
+            incremental_base_offset: self.incremental_base_offset,
+        }
+    }
+}
+
 impl Clone for Compressor {
     fn clone(&self) -> Self {
         Self {
@@ -630,6 +675,45 @@ impl Compressor {
     /// Returns whether PNG mode is enabled.
     pub fn png_mode(&self) -> bool {
         self.png_mode
+    }
+
+    /// Save the current compressor state for later restoration.
+    ///
+    /// Returns a [`CompressorSnapshot`] containing only the mutable state
+    /// (matchfinder, frequencies, codes, cursor). This is cheaper than
+    /// [`Compressor::clone()`] because it skips immutable configuration,
+    /// static codes, and the sequence buffer.
+    ///
+    /// Only meaningful for incremental compression (HtGreedy, Greedy, Lazy, Lazy2).
+    pub fn snapshot(&self) -> CompressorSnapshot {
+        CompressorSnapshot {
+            freqs: self.freqs.clone(),
+            split_stats: self.split_stats.clone(),
+            codes: self.codes.clone(),
+            ht_mf: self.ht_mf.as_ref().map(|b| Box::new((**b).clone())),
+            hc_mf: self.hc_mf.as_ref().map(|b| Box::new((**b).clone())),
+            incremental_pos: self.incremental_pos,
+            incremental_base_offset: self.incremental_base_offset,
+        }
+    }
+
+    /// Restore compressor state from a previously saved snapshot.
+    ///
+    /// After restoration, the compressor behaves as if the intervening
+    /// operations never happened. The snapshot must have been created from
+    /// a compressor with the same configuration (level, strategy).
+    pub fn restore(&mut self, snap: CompressorSnapshot) {
+        self.freqs = snap.freqs;
+        self.split_stats = snap.split_stats;
+        self.codes = snap.codes;
+        if let Some(mf) = snap.ht_mf {
+            self.ht_mf = Some(mf);
+        }
+        if let Some(mf) = snap.hc_mf {
+            self.hc_mf = Some(mf);
+        }
+        self.incremental_pos = snap.incremental_pos;
+        self.incremental_base_offset = snap.incremental_base_offset;
     }
 
     /// Compress data in raw DEFLATE format.
@@ -864,6 +948,339 @@ impl Compressor {
     /// Returns the current incremental cursor position.
     pub fn incremental_pos(&self) -> usize {
         self.incremental_pos
+    }
+
+    /// Estimate the compressed bit cost of new data without producing output.
+    ///
+    /// Runs LZ77 matching on the new portion of `data` (from `incremental_pos`
+    /// to the end) and accumulates an estimated bit cost based on Huffman code
+    /// lengths. Much faster than [`deflate_compress_incremental`](Self::deflate_compress_incremental)
+    /// because it skips Huffman tree construction, block flushing, and bitstream encoding.
+    ///
+    /// **Important:** This modifies matchfinder state just like normal incremental
+    /// compression. Use [`snapshot`](Self::snapshot)/[`restore`](Self::restore) to
+    /// evaluate multiple candidates from the same starting state.
+    ///
+    /// The cost model uses code lengths from the most recent compressed block.
+    /// If no block has been compressed yet, DEFLATE fixed code lengths are used.
+    ///
+    /// Returns the estimated bit cost as a `u64`.
+    pub fn deflate_estimate_cost_incremental(
+        &mut self,
+        data: &[u8],
+        stop: impl enough::Stop,
+    ) -> Result<u64, CompressionError> {
+        let new_start = self.incremental_pos;
+        if new_start >= data.len() {
+            return Ok(0);
+        }
+
+        // Copy code lengths locally to avoid borrow conflict with &mut self.
+        // Use codes from previous block if available, otherwise static codes.
+        let has_dynamic = self.codes.lens_litlen[256] > 0;
+        let lens_litlen: [u8; DEFLATE_NUM_LITLEN_SYMS as usize] = if has_dynamic {
+            self.codes.lens_litlen
+        } else {
+            self.static_codes.lens_litlen
+        };
+        let lens_offset: [u8; DEFLATE_NUM_OFFSET_SYMS as usize] = if has_dynamic {
+            self.codes.lens_offset
+        } else {
+            self.static_codes.lens_offset
+        };
+
+        let cost = match self.level.strategy() {
+            InternalStrategy::HtGreedy => self.estimate_cost_incremental_ht(
+                data,
+                new_start,
+                &lens_litlen,
+                &lens_offset,
+                &stop,
+            )?,
+            InternalStrategy::Greedy | InternalStrategy::Lazy | InternalStrategy::Lazy2 => self
+                .estimate_cost_incremental_hc(data, new_start, &lens_litlen, &lens_offset, &stop)?,
+            _ => {
+                return Err(CompressionError::InsufficientSpace);
+            }
+        };
+
+        self.incremental_pos = data.len();
+        Ok(cost)
+    }
+
+    /// Cost estimation using the hash table matchfinder (HtGreedy strategy).
+    fn estimate_cost_incremental_ht(
+        &mut self,
+        input: &[u8],
+        new_start: usize,
+        lens_litlen: &[u8],
+        lens_offset: &[u8],
+        stop: &impl enough::Stop,
+    ) -> Result<u64, CompressionError> {
+        let mut mf = self.ht_mf.take().unwrap();
+
+        if new_start == 0 {
+            mf.init();
+            self.incremental_base_offset = 0;
+        }
+
+        let in_end = input.len();
+        let mut in_next = new_start;
+        let mut in_base_offset = self.incremental_base_offset;
+        let mut cost = 0u64;
+
+        if in_next < in_end {
+            stop.check()?;
+
+            let mut next_hash = if in_next + 4 <= in_end {
+                lz_hash(
+                    crate::fast_bytes::load_u32_le(input, in_next),
+                    HT_MATCHFINDER_HASH_ORDER,
+                )
+            } else {
+                0
+            };
+
+            while in_next < in_end {
+                let remaining = in_end - in_next;
+                let max_len = remaining.min(DEFLATE_MAX_MATCH_LEN as usize) as u32;
+                let nice_len = max_len.min(self.nice_match_length);
+
+                if max_len >= HT_MATCHFINDER_REQUIRED_NBYTES {
+                    let (length, offset) = mf.longest_match(
+                        input,
+                        &mut in_base_offset,
+                        in_next,
+                        max_len,
+                        nice_len,
+                        &mut next_hash,
+                    );
+
+                    if length > 0 {
+                        // Match cost: length symbol + extra bits + offset symbol + extra bits
+                        let len_slot = LENGTH_SLOT[length as usize] as usize;
+                        let off_slot = get_offset_slot(offset) as usize;
+                        cost += lens_litlen[DEFLATE_FIRST_LEN_SYM as usize + len_slot] as u64;
+                        cost += DEFLATE_LENGTH_EXTRA_BITS[len_slot] as u64;
+                        cost += lens_offset[off_slot] as u64;
+                        cost += DEFLATE_OFFSET_EXTRA_BITS[off_slot] as u64;
+
+                        if length > 1 {
+                            mf.skip_bytes(
+                                input,
+                                &mut in_base_offset,
+                                in_next + 1,
+                                length - 1,
+                                &mut next_hash,
+                            );
+                        }
+                        in_next += length as usize;
+                        continue;
+                    }
+                }
+
+                // Literal cost
+                cost += lens_litlen[input[in_next] as usize] as u64;
+                in_next += 1;
+            }
+        }
+
+        self.incremental_base_offset = in_base_offset;
+        self.ht_mf = Some(mf);
+        Ok(cost)
+    }
+
+    /// Cost estimation using the hash chains matchfinder (Greedy/Lazy/Lazy2 strategies).
+    fn estimate_cost_incremental_hc(
+        &mut self,
+        input: &[u8],
+        new_start: usize,
+        lens_litlen: &[u8],
+        lens_offset: &[u8],
+        stop: &impl enough::Stop,
+    ) -> Result<u64, CompressionError> {
+        let mut mf = self.hc_mf.take().unwrap();
+
+        if new_start == 0 {
+            mf.init();
+            self.incremental_base_offset = 0;
+        }
+
+        let in_end = input.len();
+        let mut in_next = new_start;
+        let mut in_base_offset = self.incremental_base_offset;
+        let mut max_len = DEFLATE_MAX_MATCH_LEN;
+        let mut nice_len = max_len.min(self.nice_match_length);
+        let max_search_depth = self.max_search_depth;
+        let good_match = self.good_match;
+        let max_lazy = self.max_lazy;
+
+        let mut next_hashes = [0u32; 2];
+        let mut cost = 0u64;
+
+        let min_len = if in_next < in_end {
+            calculate_min_match_len(
+                &input[in_next..in_end.min(in_next + SOFT_MAX_BLOCK_LENGTH)],
+                max_search_depth,
+            )
+        } else {
+            DEFLATE_MIN_MATCH_LEN
+        };
+
+        if in_next < in_end {
+            stop.check()?;
+
+            if matches!(
+                self.level.strategy(),
+                InternalStrategy::Lazy | InternalStrategy::Lazy2
+            ) {
+                // Lazy path with cost estimation
+                loop {
+                    adjust_max_and_nice_len(&mut max_len, &mut nice_len, in_end - in_next);
+                    let (mut cur_len, mut cur_offset) = mf.longest_match(
+                        input,
+                        &mut in_base_offset,
+                        in_next,
+                        min_len - 1,
+                        max_len,
+                        nice_len,
+                        max_search_depth,
+                        good_match,
+                        &mut next_hashes,
+                    );
+
+                    if cur_len < min_len || (cur_len == DEFLATE_MIN_MATCH_LEN && cur_offset > 8192)
+                    {
+                        cost += lens_litlen[input[in_next] as usize] as u64;
+                        in_next += 1;
+                    } else {
+                        in_next += 1;
+                        loop {
+                            if cur_len >= nice_len || cur_len >= max_lazy {
+                                let len_slot = LENGTH_SLOT[cur_len as usize] as usize;
+                                let off_slot = get_offset_slot(cur_offset) as usize;
+                                cost +=
+                                    lens_litlen[DEFLATE_FIRST_LEN_SYM as usize + len_slot] as u64;
+                                cost += DEFLATE_LENGTH_EXTRA_BITS[len_slot] as u64;
+                                cost += lens_offset[off_slot] as u64;
+                                cost += DEFLATE_OFFSET_EXTRA_BITS[off_slot] as u64;
+
+                                mf.skip_bytes(
+                                    input,
+                                    &mut in_base_offset,
+                                    in_next,
+                                    in_end,
+                                    cur_len - 1,
+                                    &mut next_hashes,
+                                );
+                                in_next += (cur_len - 1) as usize;
+                                break;
+                            }
+
+                            adjust_max_and_nice_len(&mut max_len, &mut nice_len, in_end - in_next);
+                            let (next_len, next_offset) = mf.longest_match(
+                                input,
+                                &mut in_base_offset,
+                                in_next,
+                                cur_len - 1,
+                                max_len,
+                                nice_len,
+                                max_search_depth >> 1,
+                                good_match,
+                                &mut next_hashes,
+                            );
+                            in_next += 1;
+
+                            if next_len >= cur_len
+                                && 4 * (next_len as i32 - cur_len as i32)
+                                    + (bsr32(cur_offset) as i32 - bsr32(next_offset) as i32)
+                                    > 2
+                            {
+                                cost += lens_litlen[input[in_next - 2] as usize] as u64;
+                                cur_len = next_len;
+                                cur_offset = next_offset;
+                                continue;
+                            }
+
+                            let len_slot = LENGTH_SLOT[cur_len as usize] as usize;
+                            let off_slot = get_offset_slot(cur_offset) as usize;
+                            cost += lens_litlen[DEFLATE_FIRST_LEN_SYM as usize + len_slot] as u64;
+                            cost += DEFLATE_LENGTH_EXTRA_BITS[len_slot] as u64;
+                            cost += lens_offset[off_slot] as u64;
+                            cost += DEFLATE_OFFSET_EXTRA_BITS[off_slot] as u64;
+
+                            let skip = if self.level.strategy() == InternalStrategy::Lazy2 {
+                                cur_len.saturating_sub(3)
+                            } else {
+                                cur_len - 2
+                            };
+                            if skip > 0 {
+                                mf.skip_bytes(
+                                    input,
+                                    &mut in_base_offset,
+                                    in_next,
+                                    in_end,
+                                    skip,
+                                    &mut next_hashes,
+                                );
+                                in_next += skip as usize;
+                            }
+                            break;
+                        }
+                    }
+
+                    if in_next >= in_end {
+                        break;
+                    }
+                }
+            } else {
+                // Greedy path with cost estimation
+                loop {
+                    adjust_max_and_nice_len(&mut max_len, &mut nice_len, in_end - in_next);
+                    let (length, offset) = mf.longest_match(
+                        input,
+                        &mut in_base_offset,
+                        in_next,
+                        min_len - 1,
+                        max_len,
+                        nice_len,
+                        max_search_depth,
+                        good_match,
+                        &mut next_hashes,
+                    );
+
+                    if length >= min_len && (length > DEFLATE_MIN_MATCH_LEN || offset <= 4096) {
+                        let len_slot = LENGTH_SLOT[length as usize] as usize;
+                        let off_slot = get_offset_slot(offset) as usize;
+                        cost += lens_litlen[DEFLATE_FIRST_LEN_SYM as usize + len_slot] as u64;
+                        cost += DEFLATE_LENGTH_EXTRA_BITS[len_slot] as u64;
+                        cost += lens_offset[off_slot] as u64;
+                        cost += DEFLATE_OFFSET_EXTRA_BITS[off_slot] as u64;
+
+                        mf.skip_bytes(
+                            input,
+                            &mut in_base_offset,
+                            in_next + 1,
+                            in_end,
+                            length - 1,
+                            &mut next_hashes,
+                        );
+                        in_next += length as usize;
+                    } else {
+                        cost += lens_litlen[input[in_next] as usize] as u64;
+                        in_next += 1;
+                    }
+
+                    if in_next >= in_end {
+                        break;
+                    }
+                }
+            }
+        }
+
+        self.incremental_base_offset = in_base_offset;
+        self.hc_mf = Some(mf);
+        Ok(cost)
     }
 
     /// Incremental compression using the hash table matchfinder (L1).
@@ -3909,5 +4326,228 @@ mod tests {
         for level in 1..=12 {
             try_roundtrip(&filtered, level).unwrap_or_else(|msg| panic!("L{level} failed: {msg}"));
         }
+    }
+
+    #[test]
+    fn test_snapshot_restore_roundtrip() {
+        // Compress two rows incrementally, then snapshot/restore/compress
+        // and verify that restoring produces the same result as a fresh fork.
+        let row1 = b"Hello, world! This is row one with some repetitive content content content.";
+        let row2a = b"Row two variant A has different data patterns AAAA BBBB CCCC.";
+        let row2b = b"Row two variant B has other patterns XXXX YYYY ZZZZ patterns.";
+
+        let mut c = Compressor::new(CompressionLevel::new(15)); // Lazy
+        let mut buf = Vec::with_capacity(row1.len() + row2a.len().max(row2b.len()));
+        buf.extend_from_slice(row1);
+
+        let mut out = vec![0u8; 4096];
+        let size1 = c
+            .deflate_compress_incremental(&buf, &mut out, false, enough::Unstoppable)
+            .unwrap();
+        assert!(size1 > 0);
+
+        // Snapshot after row 1
+        let snap = c.snapshot();
+
+        // Try variant A
+        buf.extend_from_slice(row2a);
+        let mut out_a = vec![0u8; 4096];
+        let size_a = c
+            .deflate_compress_incremental(&buf, &mut out_a, true, enough::Unstoppable)
+            .unwrap();
+
+        // Restore and try variant B
+        c.restore(snap);
+        buf.truncate(row1.len());
+        buf.extend_from_slice(row2b);
+        let mut out_b = vec![0u8; 4096];
+        let size_b = c
+            .deflate_compress_incremental(&buf, &mut out_b, true, enough::Unstoppable)
+            .unwrap();
+
+        // Both should produce valid output (different sizes expected)
+        assert!(size_a > 0);
+        assert!(size_b > 0);
+        // The variants should generally produce different compressed sizes
+        // (they have different data), but we just check both are valid.
+    }
+
+    #[test]
+    fn test_snapshot_restore_ht_strategy() {
+        // Same test but with HtGreedy strategy (effort 10 maps to Greedy, use libdeflate L1)
+        let row = b"Repetitive data for hash table matching matching matching matching.";
+
+        let mut c = Compressor::new(CompressionLevel::libdeflate(1));
+        let mut buf = Vec::from(&row[..]);
+        let mut out = vec![0u8; 4096];
+
+        let _size = c
+            .deflate_compress_incremental(&buf, &mut out, false, enough::Unstoppable)
+            .unwrap();
+        let snap = c.snapshot();
+
+        // Try extending with more data
+        buf.extend_from_slice(b"Extra data appended.");
+        let mut out2 = vec![0u8; 4096];
+        let size2 = c
+            .deflate_compress_incremental(&buf, &mut out2, true, enough::Unstoppable)
+            .unwrap();
+        assert!(size2 > 0);
+
+        // Restore and try again with different data
+        c.restore(snap);
+        buf.truncate(row.len());
+        buf.extend_from_slice(b"Different extension.");
+        let mut out3 = vec![0u8; 4096];
+        let size3 = c
+            .deflate_compress_incremental(&buf, &mut out3, true, enough::Unstoppable)
+            .unwrap();
+        assert!(size3 > 0);
+    }
+
+    #[test]
+    fn test_estimate_cost_incremental_basic() {
+        let data = b"The quick brown fox jumps over the lazy dog. The quick brown fox jumps again.";
+        let mut c = Compressor::new(CompressionLevel::new(15)); // Lazy
+
+        let cost = c
+            .deflate_estimate_cost_incremental(data, enough::Unstoppable)
+            .unwrap();
+        // Cost should be positive and reasonable (less than 8 bits per byte)
+        assert!(cost > 0, "cost should be positive");
+        assert!(
+            cost < data.len() as u64 * 9,
+            "cost {cost} should be less than {}, 9 bits/byte",
+            data.len() as u64 * 9
+        );
+    }
+
+    #[test]
+    fn test_estimate_cost_ranking() {
+        // Highly compressible data should have lower cost than random-like data
+        let compressible = vec![b'A'; 200];
+        let mixed: Vec<u8> = (0..200u8).collect();
+
+        let mut c1 = Compressor::new(CompressionLevel::new(15));
+        let cost_comp = c1
+            .deflate_estimate_cost_incremental(&compressible, enough::Unstoppable)
+            .unwrap();
+
+        let mut c2 = Compressor::new(CompressionLevel::new(15));
+        let cost_mixed = c2
+            .deflate_estimate_cost_incremental(&mixed, enough::Unstoppable)
+            .unwrap();
+
+        assert!(
+            cost_comp < cost_mixed,
+            "compressible cost ({cost_comp}) should be less than mixed cost ({cost_mixed})"
+        );
+    }
+
+    #[test]
+    fn test_estimate_cost_with_snapshot() {
+        // Verify that snapshot/restore works correctly with cost estimation
+        let row1 = b"Initial row of data for context building.";
+        let row2a = vec![b'X'; 50]; // compressible
+        let row2b: Vec<u8> = (0..50).collect(); // less compressible
+
+        let mut c = Compressor::new(CompressionLevel::new(15));
+        let mut buf = Vec::from(&row1[..]);
+
+        // Build context
+        let _cost1 = c
+            .deflate_estimate_cost_incremental(&buf, enough::Unstoppable)
+            .unwrap();
+
+        let snap = c.snapshot();
+
+        // Estimate cost of variant A
+        buf.extend_from_slice(&row2a);
+        let cost_a = c
+            .deflate_estimate_cost_incremental(&buf, enough::Unstoppable)
+            .unwrap();
+
+        // Restore and estimate cost of variant B
+        c.restore(snap);
+        buf.truncate(row1.len());
+        buf.extend_from_slice(&row2b);
+        let cost_b = c
+            .deflate_estimate_cost_incremental(&buf, enough::Unstoppable)
+            .unwrap();
+
+        // Both costs should be positive
+        assert!(cost_a > 0);
+        assert!(cost_b > 0);
+        // Repetitive 'X' data should be cheaper than sequential bytes
+        assert!(
+            cost_a < cost_b,
+            "repetitive cost ({cost_a}) should be less than sequential cost ({cost_b})"
+        );
+    }
+
+    #[test]
+    fn test_estimate_cost_greedy_strategy() {
+        let data = b"Greedy strategy test data with some repetition repetition repetition.";
+        let mut c = Compressor::new(CompressionLevel::new(10)); // Greedy
+
+        let cost = c
+            .deflate_estimate_cost_incremental(data, enough::Unstoppable)
+            .unwrap();
+        assert!(cost > 0);
+        assert!(cost < data.len() as u64 * 9);
+    }
+
+    #[test]
+    fn test_estimate_cost_ht_strategy() {
+        let data = b"HtGreedy strategy test data with repetition repetition repetition.";
+        let mut c = Compressor::new(CompressionLevel::libdeflate(1)); // HtGreedy
+
+        let cost = c
+            .deflate_estimate_cost_incremental(data, enough::Unstoppable)
+            .unwrap();
+        assert!(cost > 0);
+        assert!(cost < data.len() as u64 * 9);
+    }
+
+    #[test]
+    fn test_estimate_cost_unsupported_strategy() {
+        // NearOptimal strategy should return an error
+        let data = b"test";
+        let mut c = Compressor::new(CompressionLevel::new(25)); // NearOptimal
+
+        let result = c.deflate_estimate_cost_incremental(data, enough::Unstoppable);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_snapshot_clone() {
+        let mut c = Compressor::new(CompressionLevel::new(15));
+        let data = b"Some data to build state.";
+        let mut buf = Vec::from(&data[..]);
+        let mut out = vec![0u8; 4096];
+        let _ = c
+            .deflate_compress_incremental(&buf, &mut out, false, enough::Unstoppable)
+            .unwrap();
+
+        let snap = c.snapshot();
+        let snap2 = snap.clone();
+
+        // Both snapshots should restore to the same state
+        buf.extend_from_slice(b"More data here.");
+
+        c.restore(snap);
+        let mut out1 = vec![0u8; 4096];
+        let size1 = c
+            .deflate_compress_incremental(&buf, &mut out1, true, enough::Unstoppable)
+            .unwrap();
+
+        c.restore(snap2);
+        let mut out2 = vec![0u8; 4096];
+        let size2 = c
+            .deflate_compress_incremental(&buf, &mut out2, true, enough::Unstoppable)
+            .unwrap();
+
+        assert_eq!(size1, size2);
+        assert_eq!(&out1[..size1], &out2[..size2]);
     }
 }

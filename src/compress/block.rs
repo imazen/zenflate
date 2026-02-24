@@ -156,11 +156,7 @@ pub(crate) fn init_static_codes(freqs: &mut DeflateFreqs, codes: &mut DeflateCod
 ///
 /// Uses the ORIGINAL frequencies against the given code lengths.
 /// This measures how many bits the actual data would take to encode.
-fn block_symbol_cost(
-    orig_freqs: &DeflateFreqs,
-    lens_litlen: &[u8],
-    lens_offset: &[u8],
-) -> u32 {
+fn block_symbol_cost(orig_freqs: &DeflateFreqs, lens_litlen: &[u8], lens_offset: &[u8]) -> u32 {
     let mut cost = 0u32;
     // Literal + end-of-block cost
     for (&freq, &len) in orig_freqs.litlen[..DEFLATE_FIRST_LEN_SYM as usize]
@@ -221,33 +217,33 @@ pub(crate) fn make_huffman_codes_best(orig_freqs: &DeflateFreqs, codes: &mut Def
 
     // Helper: build codes from (possibly smoothed) freqs with given max_bits,
     // but measure cost against orig_freqs.
-    let mut try_strategy = |litlen_freqs: &[u32], offset_freqs: &[u32],
-                            max_litlen_bits: u32, max_offset_bits: u32| {
-        let mut trial = DeflateCodes::default();
-        make_huffman_code(
-            DEFLATE_NUM_LITLEN_SYMS as usize,
-            max_litlen_bits,
-            litlen_freqs,
-            &mut trial.lens_litlen,
-            &mut trial.codewords_litlen,
-        );
-        make_huffman_code(
-            DEFLATE_NUM_OFFSET_SYMS as usize,
-            max_offset_bits,
-            offset_freqs,
-            &mut trial.lens_offset,
-            &mut trial.codewords_offset,
-        );
+    let mut try_strategy =
+        |litlen_freqs: &[u32], offset_freqs: &[u32], max_litlen_bits: u32, max_offset_bits: u32| {
+            let mut trial = DeflateCodes::default();
+            make_huffman_code(
+                DEFLATE_NUM_LITLEN_SYMS as usize,
+                max_litlen_bits,
+                litlen_freqs,
+                &mut trial.lens_litlen,
+                &mut trial.codewords_litlen,
+            );
+            make_huffman_code(
+                DEFLATE_NUM_OFFSET_SYMS as usize,
+                max_offset_bits,
+                offset_freqs,
+                &mut trial.lens_offset,
+                &mut trial.codewords_offset,
+            );
 
-        let data_cost = block_symbol_cost(orig_freqs, &trial.lens_litlen, &trial.lens_offset);
-        let header_cost = tree_header_cost(&trial.lens_litlen, &trial.lens_offset);
-        let total_cost = data_cost + header_cost;
+            let data_cost = block_symbol_cost(orig_freqs, &trial.lens_litlen, &trial.lens_offset);
+            let header_cost = tree_header_cost(&trial.lens_litlen, &trial.lens_offset);
+            let total_cost = data_cost + header_cost;
 
-        if total_cost < best_cost {
-            best_cost = total_cost;
-            best_codes = trial;
-        }
-    };
+            if total_cost < best_cost {
+                best_cost = total_cost;
+                best_codes = trial;
+            }
+        };
 
     // Strategy C: raw frequencies, max_bits=15
     try_strategy(
@@ -494,10 +490,7 @@ pub(crate) fn compute_precode_items_flagged(
 ///
 /// Returns the total header bits for a dynamic block's code length section:
 /// 14 fixed header bits + 3*hclen + precode symbol costs + extra bits.
-fn compute_precode_cost(
-    lens: &[u8],
-    flags: PrecodeFlags,
-) -> u32 {
+fn compute_precode_cost(lens: &[u8], flags: PrecodeFlags) -> u32 {
     let mut precode_freqs = [0u32; DEFLATE_NUM_PRECODE_SYMS as usize];
     let mut precode_items = [0u32; (DEFLATE_NUM_LITLEN_SYMS + DEFLATE_NUM_OFFSET_SYMS) as usize];
     compute_precode_items_flagged(lens, &mut precode_freqs, &mut precode_items, flags);
@@ -709,8 +702,7 @@ fn flush_block_inner(
         num_explicit_lens = best.num_explicit_lens;
     } else {
         precode_freqs = [0u32; DEFLATE_NUM_PRECODE_SYMS as usize];
-        precode_items =
-            [0u32; (DEFLATE_NUM_LITLEN_SYMS + DEFLATE_NUM_OFFSET_SYMS) as usize];
+        precode_items = [0u32; (DEFLATE_NUM_LITLEN_SYMS + DEFLATE_NUM_OFFSET_SYMS) as usize];
         num_precode_items = compute_precode_items(
             &combined_lens[..total_lens],
             &mut precode_freqs,
@@ -729,9 +721,7 @@ fn flush_block_inner(
 
         num_explicit_lens = {
             let mut n = DEFLATE_NUM_PRECODE_SYMS as usize;
-            while n > 4
-                && precode_lens[DEFLATE_PRECODE_LENS_PERMUTATION[n - 1] as usize] == 0
-            {
+            while n > 4 && precode_lens[DEFLATE_PRECODE_LENS_PERMUTATION[n - 1] as usize] == 0 {
                 n -= 1;
             }
             n

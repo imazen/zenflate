@@ -1136,25 +1136,26 @@ pub(crate) fn optimize_and_flush_block(
 
             // If diversification didn't help, restore checkpoint
             if let Some(ref cp) = checkpoint_costs
-                && diversification_attempts >= 3 {
-                    ns.costs = cp.clone();
-                    // Re-run with checkpoint costs
-                    find_min_cost_path(
-                        &mut ns.optimum_nodes,
-                        &ns.costs,
-                        &ns.offset_slot_full,
-                        block_length,
-                        &ns.match_cache,
-                        cache_end,
-                        freqs,
-                        codes,
-                    );
-                    let cp_cost = compute_true_cost_inner(freqs, codes, use_best_precode);
-                    if cp_cost < best_true_cost {
-                        best_true_cost = cp_cost;
-                        ns.costs_saved = ns.costs.clone();
-                    }
+                && diversification_attempts >= 3
+            {
+                ns.costs = cp.clone();
+                // Re-run with checkpoint costs
+                find_min_cost_path(
+                    &mut ns.optimum_nodes,
+                    &ns.costs,
+                    &ns.offset_slot_full,
+                    block_length,
+                    &ns.match_cache,
+                    cache_end,
+                    freqs,
+                    codes,
+                );
+                let cp_cost = compute_true_cost_inner(freqs, codes, use_best_precode);
+                if cp_cost < best_true_cost {
+                    best_true_cost = cp_cost;
+                    ns.costs_saved = ns.costs.clone();
                 }
+            }
             break;
         }
 
@@ -1177,22 +1178,21 @@ pub(crate) fn optimize_and_flush_block(
         // Weighted cost blending (effort >= 28): after pass 2+, blend
         // current costs with previous pass costs to slow convergence
         // and explore more of the solution space.
-        if use_diversification && pass_number >= 2
-            && let Some(ref prev) = prev_costs {
-                // Blend: new = 1.0 * current + 0.5 * previous, normalized
-                for i in 0..DEFLATE_NUM_LITERALS as usize {
-                    ns.costs.literal[i] =
-                        (2 * ns.costs.literal[i] + prev.literal[i]) / 3;
-                }
-                for i in DEFLATE_MIN_MATCH_LEN as usize..=DEFLATE_MAX_MATCH_LEN as usize {
-                    ns.costs.length[i] =
-                        (2 * ns.costs.length[i] + prev.length[i]) / 3;
-                }
-                for i in 0..30 {
-                    ns.costs.offset_slot[i] =
-                        (2 * ns.costs.offset_slot[i] + prev.offset_slot[i]) / 3;
-                }
+        if use_diversification
+            && pass_number >= 2
+            && let Some(ref prev) = prev_costs
+        {
+            // Blend: new = 1.0 * current + 0.5 * previous, normalized
+            for i in 0..DEFLATE_NUM_LITERALS as usize {
+                ns.costs.literal[i] = (2 * ns.costs.literal[i] + prev.literal[i]) / 3;
             }
+            for i in DEFLATE_MIN_MATCH_LEN as usize..=DEFLATE_MAX_MATCH_LEN as usize {
+                ns.costs.length[i] = (2 * ns.costs.length[i] + prev.length[i]) / 3;
+            }
+            for i in 0..30 {
+                ns.costs.offset_slot[i] = (2 * ns.costs.offset_slot[i] + prev.offset_slot[i]) / 3;
+            }
+        }
 
         // Milestone RLE application (effort >= 26): at passes 4, 8,
         // apply optimize_huffman_for_rle to the current frequencies,
@@ -1313,7 +1313,11 @@ pub(crate) fn optimize_and_flush_block(
         make_huffman_codes_best(freqs, codes);
     }
 
-    let flush_fn = if use_best_precode { flush_block_best } else { flush_block };
+    let flush_fn = if use_best_precode {
+        flush_block_best
+    } else {
+        flush_block
+    };
     flush_fn(
         os,
         block_begin,
