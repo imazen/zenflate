@@ -1005,10 +1005,11 @@ pub(crate) fn optimize_and_flush_block(
     max_search_depth: u32,
     effort: u32,
     png_mode: bool,
+    libdeflate_compat: bool,
 ) -> bool {
-    // Use exhaustive precode search for near-optimal efforts (always, since
-    // this function is only called for near-optimal strategy, effort >= 23)
-    let use_best_precode = effort >= 23;
+    // In libdeflate compat mode, suppress all ECT-derived optimizations
+    // to maintain byte-identical output with C libdeflate.
+    let use_best_precode = !libdeflate_compat && effort >= 23;
 
     let mut num_passes_remaining = ns.max_optim_passes;
     let mut best_true_cost = u32::MAX;
@@ -1060,8 +1061,10 @@ pub(crate) fn optimize_and_flush_block(
         ns.costs.apply_png_bias();
     }
 
-    // Increase max passes for high effort levels
-    let max_passes = if effort >= 29 {
+    // Increase max passes for high effort levels (not in libdeflate compat mode)
+    let max_passes = if libdeflate_compat {
+        num_passes_remaining
+    } else if effort >= 29 {
         30
     } else if effort >= 28 {
         20
@@ -1070,8 +1073,8 @@ pub(crate) fn optimize_and_flush_block(
     };
     num_passes_remaining = max_passes;
 
-    let use_diversification = effort >= 28;
-    let use_milestone_rle = effort >= 26;
+    let use_diversification = !libdeflate_compat && effort >= 28;
+    let use_milestone_rle = !libdeflate_compat && effort >= 26;
 
     let mut rng = MwcRng::new(block_length.wrapping_mul(0x9E3779B9));
     let mut no_improvement_count = 0u32;
@@ -1308,7 +1311,7 @@ pub(crate) fn optimize_and_flush_block(
     // of multiple frequency smoothing strategies. This can produce shorter
     // total output because smoothed frequencies yield shorter tree headers
     // even if data encoding is slightly longer.
-    let use_best_codes = effort >= 26;
+    let use_best_codes = !libdeflate_compat && effort >= 26;
     if use_best_codes {
         make_huffman_codes_best(freqs, codes);
     }

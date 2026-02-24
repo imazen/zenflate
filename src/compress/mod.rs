@@ -206,6 +206,12 @@ impl CompressionLevel {
         self.effort
     }
 
+    /// Returns true if this level was created with [`libdeflate()`](Self::libdeflate)
+    /// and requires byte-identical output with C libdeflate.
+    pub(crate) fn is_libdeflate_compat(self) -> bool {
+        self.libdeflate_level.is_some()
+    }
+
     /// Get the approximate numeric level (0-12) for backward compatibility.
     ///
     /// For levels created with [`libdeflate()`](Self::libdeflate), returns the
@@ -2836,6 +2842,7 @@ impl Compressor {
                     max_search_depth,
                     self.level.effort(),
                     self.png_mode,
+                    self.level.is_libdeflate_compat(),
                 );
 
                 // Move remaining cache entries to beginning
@@ -2868,6 +2875,7 @@ impl Compressor {
                     max_search_depth,
                     self.level.effort(),
                     self.png_mode,
+                    self.level.is_libdeflate_compat(),
                 );
 
                 cache_idx = 0;
