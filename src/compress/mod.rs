@@ -2418,6 +2418,7 @@ impl Compressor {
                     &self.split_stats,
                     max_search_depth,
                     self.level.effort(),
+                    self.png_mode,
                 );
 
                 // Move remaining cache entries to beginning
@@ -2449,6 +2450,7 @@ impl Compressor {
                     &self.split_stats,
                     max_search_depth,
                     self.level.effort(),
+                    self.png_mode,
                 );
 
                 cache_idx = 0;

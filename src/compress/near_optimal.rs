@@ -132,6 +132,47 @@ impl Default for DeflateCosts {
     }
 }
 
+impl DeflateCosts {
+    /// Apply PNG-specific cost biases for filtered scanline data.
+    ///
+    /// PNG-filtered data has distinct statistical properties:
+    /// - Literal 0 is very common (filtered differences are often zero)
+    /// - Literal 1 is moderately common
+    /// - Distance-1 matches are common (vertical repetition)
+    /// - Long matches are less valuable than in generic data
+    ///
+    /// All biases are in BIT_COST units (16 per bit). Negative biases
+    /// make symbols cheaper (more likely to be chosen by the DP).
+    pub fn apply_png_bias(&mut self) {
+        // All literals: small discount (-0.2 bits = -3 units)
+        for cost in self.literal.iter_mut() {
+            *cost = cost.saturating_sub(3);
+        }
+        // Literal 0: additional discount (-1.0 bits = -16 units, total -1.2 bits)
+        self.literal[0] = self.literal[0].saturating_sub(16);
+        // Literal 1: moderate discount (-0.4 bits = -6 units, total -0.6 bits)
+        self.literal[1] = self.literal[1].saturating_sub(6);
+
+        // Distance slot 0 (distance 1): heavy discount (-1.5 bits = -24 units)
+        // Distance-1 matches come from vertical repetition in PNG scanlines.
+        self.offset_slot[0] = self.offset_slot[0].saturating_sub(24);
+        // Distance slot 3 (distances 5-6): moderate discount (-1.4 bits = -22 units)
+        self.offset_slot[3] = self.offset_slot[3].saturating_sub(22);
+
+        // Length symbols 270-285 (long matches, lengths ~67-258): penalty
+        // Long matches are less valuable in PNG because scanlines are short
+        // and filter boundaries break correlation.
+        // Length slots map: slot 17 (len 67-82) through slot 28 (len 258)
+        for len in 67..=DEFLATE_MAX_MATCH_LEN {
+            let slot = LENGTH_SLOT[len as usize] as usize;
+            // Ramp penalty from +0.4 to +1.2 bits (6 to 19 units)
+            let penalty = 6 + (len - 67) * 13 / (DEFLATE_MAX_MATCH_LEN - 67);
+            self.length[len as usize] += penalty;
+            let _ = slot; // slot used indirectly via LENGTH_SLOT
+        }
+    }
+}
+
 /// Marsaglia multiply-with-carry RNG for diversification.
 ///
 /// Simple, fast PRNG used to perturb cost models when the optimization
@@ -963,6 +1004,7 @@ pub(crate) fn optimize_and_flush_block(
     split_stats: &BlockSplitStats,
     max_search_depth: u32,
     effort: u32,
+    png_mode: bool,
 ) -> bool {
     // Use exhaustive precode search for near-optimal efforts (always, since
     // this function is only called for near-optimal strategy, effort >= 23)
@@ -1012,6 +1054,11 @@ pub(crate) fn optimize_and_flush_block(
         block_length,
         is_first_block,
     );
+
+    // Apply PNG bias to initial costs
+    if png_mode {
+        ns.costs.apply_png_bias();
+    }
 
     // Increase max passes for high effort levels
     let max_passes = if effort >= 29 {
@@ -1121,6 +1168,11 @@ pub(crate) fn optimize_and_flush_block(
         }
 
         set_costs_from_codes(&mut ns.costs, codes);
+
+        // Apply PNG bias to updated costs (only in early passes)
+        if png_mode && pass_number < 9 {
+            ns.costs.apply_png_bias();
+        }
 
         // Weighted cost blending (effort >= 28): after pass 2+, blend
         // current costs with previous pass costs to slow convergence
