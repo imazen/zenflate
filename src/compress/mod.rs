@@ -1196,11 +1196,9 @@ impl Compressor {
                             cost += lens_offset[off_slot] as u64;
                             cost += DEFLATE_OFFSET_EXTRA_BITS[off_slot] as u64;
 
-                            let skip = if self.level.strategy() == InternalStrategy::Lazy2 {
-                                cur_len.saturating_sub(3)
-                            } else {
-                                cur_len - 2
-                            };
+                            // Same as compress path: only one lookahead, so
+                            // 2 in_next advances, skip = cur_len - 2.
+                            let skip = cur_len - 2;
                             if skip > 0 {
                                 mf.skip_bytes(
                                     input,
@@ -1402,8 +1400,6 @@ impl Compressor {
         let max_search_depth = self.max_search_depth;
         let good_match = self.good_match;
         let max_lazy = self.max_lazy;
-        let lazy2 = self.level.strategy() == InternalStrategy::Lazy2;
-
         let mut next_hashes = [0u32; 2];
 
         // Feed new bytes and produce one DEFLATE block.
@@ -1511,11 +1507,10 @@ impl Compressor {
                                 seq_idx,
                             );
                             self.split_stats.observe_match(cur_len);
-                            let skip = if lazy2 {
-                                cur_len.saturating_sub(3)
-                            } else {
-                                cur_len - 2
-                            };
+                            // The incremental lazy path only does one lookahead
+                            // (not two like the non-incremental lazy2 path), so
+                            // we've consumed 2 in_next advances, not 3.
+                            let skip = cur_len - 2;
                             if skip > 0 {
                                 mf.skip_bytes(
                                     input,
