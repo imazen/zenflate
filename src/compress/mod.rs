@@ -3817,6 +3817,31 @@ mod tests {
         }
     }
 
+    // ---- Full-optimal (Zopfli) tests ----
+
+    #[test]
+    fn test_full_optimal_small() {
+        roundtrip_verify(b"Hello, World!", 31);
+    }
+
+    #[test]
+    fn test_full_optimal_repetitive() {
+        let data: Vec<u8> = b"abcabcabcabcabcabcabc".repeat(100);
+        roundtrip_verify(&data, 31);
+    }
+
+    #[test]
+    fn test_full_optimal_zeros() {
+        let data = vec![0u8; 100_000];
+        roundtrip_verify(&data, 31);
+    }
+
+    #[test]
+    fn test_full_optimal_sequential() {
+        let data: Vec<u8> = (0..=255u8).cycle().take(100_000).collect();
+        roundtrip_verify(&data, 31);
+    }
+
     // ---- Cross-level tests ----
 
     #[test]

@@ -567,7 +567,9 @@ impl Lz77Store {
                     self.lit_len_dist(leng, dist, i - 1);
                     for _ in 2..leng {
                         i += 1;
-                        h.update(arr, i);
+                        if i < inend {
+                            h.update(arr, i);
+                        }
                     }
                     i += 1;
                     continue;
@@ -585,7 +587,9 @@ impl Lz77Store {
                 let step = leng;
                 for _ in 1..step {
                     i += 1;
-                    h.update(arr, i);
+                    if i < inend {
+                        h.update(arr, i);
+                    }
                 }
             } else {
                 self.lit_len_dist(u16::from(arr[i]), 0, i);
