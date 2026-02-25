@@ -769,7 +769,7 @@ impl Compressor {
             InternalStrategy::FullOptimal => {
                 let fo = self.full_optimal.as_ref().unwrap();
                 let iterations = fo.iterations();
-                full_optimal::compress_full_optimal(&mut os, input, iterations, true);
+                full_optimal::compress_full_optimal(&mut os, input, iterations, true, &stop)?;
             }
         }
 

@@ -9,12 +9,13 @@ use alloc::{boxed::Box, vec, vec::Vec};
 
 use core::cmp;
 
+use crate::CompressionError;
 use crate::constants::*;
 
 use super::bitstream::OutputBitstream;
 use super::block::{
-    BlockOutput, DeflateCodes, DeflateFreqs, LENGTH_SLOT, flush_block_best, get_offset_slot,
-    make_huffman_codes_best,
+    BlockOutput, DeflateCodes, DeflateFreqs, LENGTH_SLOT, block_cost_best, flush_block_best,
+    get_offset_slot, make_huffman_codes_best,
 };
 use super::huffman::{make_huffman_code_optimal, optimize_huffman_for_rle};
 use super::katajainen::HuffmanScratch;
@@ -1000,7 +1001,12 @@ fn trace(size: usize, length_array: &[u16], dist_array: &[u16]) -> Vec<(u16, u16
 
 // ---- Block Cost Estimation ----
 
-/// Estimate dynamic block cost from LZ77 store histogram.
+/// Compute accurate dynamic block cost from LZ77 store histogram.
+///
+/// Uses multi-strategy Huffman optimization (3 RLE strategies + max-bits sweep)
+/// with exhaustive precode flag search for accurate tree header cost.
+/// This matches the quality of block encoding in `flush_block_best`, ensuring
+/// block split decisions use the same cost model as final output.
 fn calculate_block_size_dynamic(
     store: &Lz77Store,
     lstart: usize,
@@ -1008,59 +1014,20 @@ fn calculate_block_size_dynamic(
     scratch: &mut HuffmanScratch,
 ) -> f64 {
     // Build histograms
-    let mut ll_counts = [0u32; NUM_LL];
-    let mut d_counts = [0u32; NUM_D];
+    let mut freqs = DeflateFreqs::default();
     for &litlen in &store.litlens[lstart..lend] {
         match litlen {
-            LitLen::Literal(lit) => ll_counts[lit as usize] += 1,
+            LitLen::Literal(lit) => freqs.litlen[lit as usize] += 1,
             LitLen::LengthDist(len, dist) => {
-                ll_counts[get_length_symbol(len as usize)] += 1;
-                d_counts[get_dist_symbol(dist)] += 1;
+                freqs.litlen[get_length_symbol(len as usize)] += 1;
+                freqs.offset[get_dist_symbol(dist)] += 1;
             }
         }
     }
-    ll_counts[256] += 1; // end symbol
+    freqs.litlen[256] += 1; // end symbol
 
-    // Build Huffman codes
-    let mut ll_lens = [0u8; NUM_LL];
-    let mut ll_cw = [0u32; NUM_LL];
-    make_huffman_code_optimal(NUM_LL, 15, &ll_counts, &mut ll_lens, &mut ll_cw, scratch);
-
-    let mut d_lens = [0u8; NUM_D];
-    let mut d_cw = [0u32; NUM_D];
-    make_huffman_code_optimal(NUM_D, 15, &d_counts, &mut d_lens, &mut d_cw, scratch);
-
-    // Calculate data cost
-    let mut cost = 0u64;
-    for (sym, (&freq, &len)) in ll_counts.iter().zip(ll_lens.iter()).enumerate() {
-        if sym < DEFLATE_FIRST_LEN_SYM as usize {
-            cost += freq as u64 * len as u64;
-        } else if sym < DEFLATE_FIRST_LEN_SYM as usize + 29 {
-            let extra = DEFLATE_LENGTH_EXTRA_BITS[sym - DEFLATE_FIRST_LEN_SYM as usize] as u64;
-            cost += freq as u64 * (len as u64 + extra);
-        }
-    }
-    for (sym, (&freq, &len)) in d_counts[..30].iter().zip(d_lens[..30].iter()).enumerate() {
-        let extra = DEFLATE_OFFSET_EXTRA_BITS[sym] as u64;
-        cost += freq as u64 * (len as u64 + extra);
-    }
-
-    // Tree header cost estimate (simplified)
-    let mut num_litlen_syms = NUM_LL;
-    while num_litlen_syms > 257 && ll_lens[num_litlen_syms - 1] == 0 {
-        num_litlen_syms -= 1;
-    }
-    let mut num_offset_syms = NUM_D;
-    while num_offset_syms > 1 && d_lens[num_offset_syms - 1] == 0 {
-        num_offset_syms -= 1;
-    }
-
-    // Rough tree cost: 14 header bits + precode items
-    // (accurate enough for block splitting decisions)
-    let total_syms = num_litlen_syms + num_offset_syms;
-    let tree_cost = 14 + total_syms * 3; // conservative estimate
-
-    3.0 + cost as f64 + tree_cost as f64
+    // Use the same multi-strategy cost evaluation as final block encoding
+    f64::from(block_cost_best(&freqs, scratch))
 }
 
 // ---- Block Splitter ----
@@ -1227,7 +1194,13 @@ fn lz77_optimal_run(
     store.store_from_path(in_data, instart, path);
 }
 
-fn lz77_optimal(in_data: &[u8], instart: usize, inend: usize, iterations: u64) -> Lz77Store {
+fn lz77_optimal(
+    in_data: &[u8],
+    instart: usize,
+    inend: usize,
+    iterations: u64,
+    stop: &impl enough::Stop,
+) -> Result<Lz77Store, CompressionError> {
     let blocksize = inend - instart;
     let mut lmc = MatchCache::new(blocksize);
     let mut currentstore = Lz77Store::with_capacity(blocksize);
@@ -1266,6 +1239,15 @@ fn lz77_optimal(in_data: &[u8], instart: usize, inend: usize, iterations: u64) -
     let mut iterations_without_improvement: u64 = 0;
 
     loop {
+        // Check cooperative cancellation
+        match stop.check() {
+            Ok(()) => {}
+            Err(enough::StopReason::Cancelled) => {
+                return Err(CompressionError::Stopped(enough::StopReason::Cancelled));
+            }
+            Err(_) => break, // Timeout: return best-so-far
+        }
+
         // Enhanced: milestone RLE at iteration 29
         if current_iteration == 29 {
             stats.calculate_huffman_costs(&beststats, &mut huff_scratch);
@@ -1369,7 +1351,7 @@ fn lz77_optimal(in_data: &[u8], instart: usize, inend: usize, iterations: u64) -
         }
         lastcost = cost;
     }
-    outputstore
+    Ok(outputstore)
 }
 
 // ---- Public entry point ----
@@ -1399,15 +1381,17 @@ impl FullOptimalState {
 
 /// Compress a block using the full-optimal (Zopfli) parser.
 ///
-/// Returns the number of DEFLATE blocks written.
+/// Supports cooperative cancellation via the `stop` token. On timeout,
+/// returns the best result found so far. On cancel, returns an error.
 pub(crate) fn compress_full_optimal(
     os: &mut OutputBitstream<'_>,
     input: &[u8],
     iterations: u64,
     is_final: bool,
-) {
+    stop: &impl enough::Stop,
+) -> Result<(), CompressionError> {
     if input.is_empty() {
-        return;
+        return Ok(());
     }
 
     // Block splitting
@@ -1430,11 +1414,12 @@ pub(crate) fn compress_full_optimal(
         let is_final_block = is_final && bi == boundaries.len() - 2;
 
         // Run squeeze loop for this sub-block
-        let store = lz77_optimal(input, block_start, block_end, iterations);
+        let store = lz77_optimal(input, block_start, block_end, iterations, stop)?;
 
         // Convert Lz77Store to zenflate's format and flush
         flush_lz77_block(os, input, block_start, &store, is_final_block);
     }
+    Ok(())
 }
 
 /// Convert an Lz77Store to zenflate's Sequence format and flush through the block encoder.
