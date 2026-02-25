@@ -1,2 +1,4 @@
 /target
 heaptrack.*
+.claude/
+fuzz/Cargo.lock

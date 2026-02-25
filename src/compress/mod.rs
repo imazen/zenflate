@@ -507,9 +507,6 @@ pub struct Compressor {
     incremental_pos: usize,
     /// Incremental compression: matchfinder base offset (for window sliding).
     incremental_base_offset: usize,
-    /// PNG mode: enables PNG-specific cost biases in the near-optimal parser.
-    /// When true, the cost model is biased for filtered PNG scanline data.
-    png_mode: bool,
 }
 
 /// Snapshot of compressor state for cheap save/restore during incremental compression.
@@ -580,7 +577,6 @@ impl Clone for Compressor {
             force_nonfinal: self.force_nonfinal,
             incremental_pos: self.incremental_pos,
             incremental_base_offset: self.incremental_base_offset,
-            png_mode: self.png_mode,
         }
     }
 }
@@ -665,22 +661,7 @@ impl Compressor {
             force_nonfinal: false,
             incremental_pos: 0,
             incremental_base_offset: 0,
-            png_mode: false,
         }
-    }
-
-    /// Enable PNG mode for cost model biases optimized for filtered PNG data.
-    ///
-    /// When enabled, the near-optimal parser applies biases that favor
-    /// patterns common in PNG scanlines (frequent literal 0, distance-1
-    /// matches from vertical repetition, etc.).
-    pub fn set_png_mode(&mut self, enabled: bool) {
-        self.png_mode = enabled;
-    }
-
-    /// Returns whether PNG mode is enabled.
-    pub fn png_mode(&self) -> bool {
-        self.png_mode
     }
 
     /// Save the current compressor state for later restoration.
@@ -2841,7 +2822,6 @@ impl Compressor {
                     &self.split_stats,
                     max_search_depth,
                     self.level.effort(),
-                    self.png_mode,
                     self.level.is_libdeflate_compat(),
                 );
 
@@ -2874,7 +2854,6 @@ impl Compressor {
                     &self.split_stats,
                     max_search_depth,
                     self.level.effort(),
-                    self.png_mode,
                     self.level.is_libdeflate_compat(),
                 );
 
