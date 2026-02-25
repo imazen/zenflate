@@ -398,7 +398,7 @@ fn find_longest_match(
     if pos + limit > size {
         limit = size - pos;
     }
-    let (bestdist, bestlength) = find_longest_match_loop(h, array, pos, size, limit, sublen);
+    let (bestlength, bestdist) = find_longest_match_loop(h, array, pos, size, limit, sublen);
     lmc.store(pos, limit, sublen, bestdist, bestlength, blockstart);
     longest_match.distance = bestdist;
     longest_match.length = bestlength;
@@ -472,7 +472,11 @@ fn find_longest_match_loop(
         dist += if p < pp { pp - p } else { WINDOW_SIZE - p + pp };
         chain_counter -= 1;
     }
-    (bestdist as u16, bestlength as u16)
+    debug_assert!(
+        bestlength <= limit,
+        "find_longest_match_loop: bestlength={bestlength} > limit={limit}"
+    );
+    (bestlength as u16, bestdist as u16)
 }
 
 // ---- LZ77 Store ----
@@ -518,8 +522,16 @@ impl Lz77Store {
 
     fn lit_len_dist(&mut self, length: u16, dist: u16, pos: usize) {
         let litlen = if dist == 0 {
+            debug_assert!(
+                (length as usize) < NUM_LL,
+                "literal value out of range: {length}"
+            );
             LitLen::Literal(length)
         } else {
+            debug_assert!(
+                length as usize >= MIN_MATCH && length as usize <= MAX_MATCH,
+                "match length out of range: {length}"
+            );
             LitLen::LengthDist(length, dist)
         };
         self.litlens.push(litlen);
@@ -622,6 +634,7 @@ fn find_longest_match_no_cache(
         return (0, 0);
     }
     let limit = cmp::min(limit, size - pos);
+    // Returns (length, dist)
     find_longest_match_loop(h, array, pos, size, limit, &mut None)
 }
 
