@@ -522,6 +522,18 @@ impl Lz77Store {
         self.litlens.len()
     }
 
+    /// Extract a sub-store covering lz77 indices `start..end`.
+    fn sub_store(&self, start: usize, end: usize) -> Self {
+        Self {
+            litlens: self.litlens[start..end].to_vec(),
+            pos: if self.pos.is_empty() {
+                Vec::new()
+            } else {
+                self.pos[start..end].to_vec()
+            },
+        }
+    }
+
     fn lit_len_dist(&mut self, length: u16, dist: u16, pos: usize) {
         let litlen = if dist == 0 {
             debug_assert!(
@@ -1234,7 +1246,10 @@ fn lz77_optimal(
     let mut checkpoint: Option<SymbolStats> = None;
 
     let mut current_iteration: u64 = 0;
-    let max_iterations_without_improvement = iterations; // Use iterations as the limit
+    // Don't exit early due to stagnation — always run all requested iterations.
+    // Diversification + checkpoint/restore handles stagnation recovery.
+    // This matches zenzop's default of iterations_without_improvement = u64::MAX.
+    let max_iterations_without_improvement = u64::MAX;
 
     let mut iterations_without_improvement: u64 = 0;
 
@@ -1394,32 +1409,104 @@ pub(crate) fn compress_full_optimal(
         return Ok(());
     }
 
-    // Block splitting
+    // Phase 1: Initial byte-based block splitting
     let maxblocks = 15u16;
-    let mut splitpoints = Vec::new();
-    blocksplit(input, 0, input.len(), maxblocks, &mut splitpoints);
+    let mut byte_splitpoints = Vec::new();
+    blocksplit(input, 0, input.len(), maxblocks, &mut byte_splitpoints);
 
-    // Build block boundaries
-    let mut boundaries = Vec::with_capacity(splitpoints.len() + 2);
+    // Build block boundaries from byte split points
+    let mut boundaries = Vec::with_capacity(byte_splitpoints.len() + 2);
     boundaries.push(0usize);
-    for &sp in &splitpoints {
+    for &sp in &byte_splitpoints {
         boundaries.push(sp);
     }
     boundaries.push(input.len());
 
-    // Compress each block
-    for (bi, window) in boundaries.windows(2).enumerate() {
+    // Phase 2: LZ77-optimize each block and concatenate
+    let mut combined_lz77 = Lz77Store::with_capacity(input.len());
+    let mut lz77_splitpoints = Vec::with_capacity(byte_splitpoints.len());
+
+    for window in boundaries.windows(2) {
         let block_start = window[0];
         let block_end = window[1];
-        let is_final_block = is_final && bi == boundaries.len() - 2;
 
-        // Run squeeze loop for this sub-block
         let store = lz77_optimal(input, block_start, block_end, iterations, stop)?;
 
-        // Convert Lz77Store to zenflate's format and flush
-        flush_lz77_block(os, input, block_start, &store, is_final_block);
+        // Append to combined store
+        for &litlen in &store.litlens {
+            combined_lz77.litlens.push(litlen);
+        }
+
+        // Record split point (all but last block)
+        if block_end < input.len() {
+            lz77_splitpoints.push(combined_lz77.size());
+        }
+    }
+
+    // Phase 3: Second block split attempt on the LZ77 data (matches zenzop)
+    let npoints = byte_splitpoints.len();
+    if npoints > 1 {
+        let mut splitpoints2 = Vec::with_capacity(npoints);
+        blocksplit_lz77(&combined_lz77, maxblocks, &mut splitpoints2);
+
+        // Compare costs of both splits
+        let mut scratch = HuffmanScratch::new();
+        let cost1 = calculate_split_cost(
+            &combined_lz77,
+            &lz77_splitpoints,
+            &mut scratch,
+        );
+        let cost2 = calculate_split_cost(
+            &combined_lz77,
+            &splitpoints2,
+            &mut scratch,
+        );
+
+        if cost2 < cost1 {
+            lz77_splitpoints = splitpoints2;
+        }
+    }
+
+    // Phase 4: Flush blocks using the best split
+    let mut block_ranges = Vec::with_capacity(lz77_splitpoints.len() + 1);
+    let mut last = 0;
+    for &sp in &lz77_splitpoints {
+        block_ranges.push((last, sp));
+        last = sp;
+    }
+    block_ranges.push((last, combined_lz77.size()));
+
+    // We need to track byte offsets for each LZ77 block
+    let mut byte_offset = 0usize;
+    for (bi, &(lz_start, lz_end)) in block_ranges.iter().enumerate() {
+        let is_final_block = is_final && bi == block_ranges.len() - 1;
+
+        // Extract the sub-store for this block
+        let sub_store = combined_lz77.sub_store(lz_start, lz_end);
+
+        // Calculate byte length of this sub-store
+        let block_byte_len: usize = sub_store.litlens.iter().map(|ll| ll.size()).sum();
+
+        flush_lz77_block(os, &input[byte_offset..], 0, &sub_store, is_final_block);
+        byte_offset += block_byte_len;
     }
     Ok(())
+}
+
+/// Calculate the total block cost for a given set of LZ77 split points.
+fn calculate_split_cost(
+    lz77: &Lz77Store,
+    splitpoints: &[usize],
+    scratch: &mut HuffmanScratch,
+) -> f64 {
+    let mut cost = 0.0;
+    let mut last = 0;
+    for &sp in splitpoints {
+        cost += calculate_block_size_dynamic(lz77, last, sp, scratch);
+        last = sp;
+    }
+    cost += calculate_block_size_dynamic(lz77, last, lz77.size(), scratch);
+    cost
 }
 
 /// Convert an Lz77Store to zenflate's Sequence format and flush through the block encoder.
