@@ -1044,7 +1044,7 @@ fn calculate_block_size_dynamic(
 
 // ---- Block Splitter ----
 
-fn find_minimum<F: Fn(usize) -> f64>(f: F, start: usize, end: usize) -> (usize, f64) {
+fn find_minimum<F: FnMut(usize) -> f64>(mut f: F, start: usize, end: usize) -> (usize, f64) {
     if end - start < 1024 {
         let mut best = f64::INFINITY;
         let mut result = start;
@@ -1097,18 +1097,17 @@ fn blocksplit_lz77(lz77: &Lz77Store, maxblocks: u16, splitpoints: &mut Vec<usize
     let mut done = vec![0u8; lz77.size()];
     let mut lstart = 0;
     let mut lend = lz77.size();
+    let mut scratch = HuffmanScratch::new();
 
     while maxblocks != 0 && numblocks < u32::from(maxblocks) {
         let (llpos, splitcost) = find_minimum(
             |i| {
-                let mut s = HuffmanScratch::new();
-                calculate_block_size_dynamic(lz77, lstart, i, &mut s)
-                    + calculate_block_size_dynamic(lz77, i, lend, &mut s)
+                calculate_block_size_dynamic(lz77, lstart, i, &mut scratch)
+                    + calculate_block_size_dynamic(lz77, i, lend, &mut scratch)
             },
             lstart + 1,
             lend,
         );
-        let mut scratch = HuffmanScratch::new();
         let origcost = calculate_block_size_dynamic(lz77, lstart, lend, &mut scratch);
 
         if splitcost > origcost || llpos == lstart + 1 || llpos == lend {
