@@ -5,6 +5,7 @@
 pub(crate) mod bitstream;
 pub(crate) mod block;
 pub(crate) mod block_split;
+pub(crate) mod full_optimal;
 pub(crate) mod huffman;
 pub(crate) mod near_optimal;
 pub(crate) mod sequences;
@@ -78,9 +79,11 @@ pub(crate) enum InternalStrategy {
     Lazy2,
     /// Binary tree near-optimal parser with iterative backward DP.
     NearOptimal,
+    /// Zopfli-style forward DP with iterative cost model refinement.
+    FullOptimal,
 }
 
-/// Map effort (0-30) to internal strategy.
+/// Map effort (0-200) to internal strategy.
 fn effort_to_strategy(effort: u32) -> InternalStrategy {
     match effort {
         0 => InternalStrategy::Store,
@@ -89,7 +92,8 @@ fn effort_to_strategy(effort: u32) -> InternalStrategy {
         10 => InternalStrategy::Greedy,
         11..=17 => InternalStrategy::Lazy,
         18..=22 => InternalStrategy::Lazy2,
-        _ => InternalStrategy::NearOptimal,
+        23..=30 => InternalStrategy::NearOptimal,
+        _ => InternalStrategy::FullOptimal,
     }
 }
 
@@ -121,7 +125,7 @@ pub(crate) struct CompressionParams {
 ///
 /// # Fine-grained control
 ///
-/// [`new(effort)`](Self::new) accepts 0-30 for intermediate tradeoffs.
+/// [`new(effort)`](Self::new) accepts 0-200 for intermediate tradeoffs.
 /// Higher effort within a strategy increases search depth and match quality.
 ///
 /// | Effort range | Strategy |
@@ -133,6 +137,7 @@ pub(crate) struct CompressionParams {
 /// | 11-17 | Lazy |
 /// | 18-22 | Double-lazy |
 /// | 23-30 | Near-optimal |
+/// | 31-200 | Full-optimal (Zopfli) |
 ///
 /// # C libdeflate compatibility
 ///
@@ -146,7 +151,7 @@ pub(crate) struct CompressionParams {
 /// let level = CompressionLevel::balanced(); // effort 15, lazy matching
 /// assert_eq!(level.effort(), 15);
 ///
-/// // Fine-grained effort (clamped to 0-30)
+/// // Fine-grained effort (clamped to 0-200)
 /// let level = CompressionLevel::new(12); // lazy matching, mid-range depth
 /// assert_eq!(level.effort(), 12);
 ///
@@ -163,11 +168,13 @@ pub struct CompressionLevel {
 }
 
 impl CompressionLevel {
-    /// Create a compression level from an effort value (0-30). Clamps to 0-30.
+    /// Create a compression level from an effort value (0-200). Clamps to 0-200.
     ///
     /// Higher effort = better compression ratio but slower.
+    /// Effort 31+ uses the Zopfli-style full-optimal parser, where
+    /// `iterations = effort - 16` (e.g., effort 31 = 15 iterations, 76 = 60 iterations).
     pub fn new(effort: u32) -> Self {
-        let effort = effort.min(30);
+        let effort = effort.min(200);
         Self {
             effort,
             strategy: effort_to_strategy(effort),
@@ -201,7 +208,7 @@ impl CompressionLevel {
         }
     }
 
-    /// Get the effort level (0-30).
+    /// Get the effort level (0-200).
     pub fn effort(self) -> u32 {
         self.effort
     }
@@ -308,10 +315,11 @@ impl CompressionLevel {
         // Each strategy's levels fall back to the previous strategy's max.
         // The chain terminates at FastHt (Turbo→FastHt always improves).
         match self.effort {
-            10 => Some(Self::new(9)),       // Greedy → FastHt max
-            11..=17 => Some(Self::new(10)), // Lazy → Greedy max
-            18..=22 => Some(Self::new(17)), // Lazy2 → Lazy max
-            23..=30 => Some(Self::new(22)), // NearOptimal → Lazy2 max
+            10 => Some(Self::new(9)),        // Greedy → FastHt max
+            11..=17 => Some(Self::new(10)),  // Lazy → Greedy max
+            18..=22 => Some(Self::new(17)),  // Lazy2 → Lazy max
+            23..=30 => Some(Self::new(22)),  // NearOptimal → Lazy2 max
+            31..=200 => Some(Self::new(30)), // FullOptimal → NearOptimal max
             _ => None,
         }
     }
@@ -390,6 +398,8 @@ impl CompressionLevel {
                 29 => (200, DEFLATE_MAX_MATCH_LEN),
                 _ => (300, DEFLATE_MAX_MATCH_LEN),
             },
+            // FullOptimal has its own matchfinder; these params are not used.
+            InternalStrategy::FullOptimal => (0, 0),
         };
 
         let (good_match, max_lazy) = match self.strategy {
@@ -497,6 +507,8 @@ pub struct Compressor {
     hc_mf: Option<Box<HcMatchfinder>>,
     /// Near-optimal state for the NearOptimal strategy.
     near_optimal: Option<Box<NearOptimalState>>,
+    /// Full-optimal (Zopfli) state for the FullOptimal strategy.
+    full_optimal: Option<Box<full_optimal::FullOptimalState>>,
     /// Starting offset: skip dictionary bytes at the start of input.
     /// Set by `deflate_compress_chunk`; 0 for normal operation.
     chunk_start: usize,
@@ -573,6 +585,7 @@ impl Clone for Compressor {
             ht_mf: self.ht_mf.as_ref().map(|b| Box::new((**b).clone())),
             hc_mf: self.hc_mf.as_ref().map(|b| Box::new((**b).clone())),
             near_optimal: self.near_optimal.as_ref().map(|b| Box::new((**b).clone())),
+            full_optimal: self.full_optimal.as_ref().map(|b| Box::new((**b).clone())),
             chunk_start: self.chunk_start,
             force_nonfinal: self.force_nonfinal,
             incremental_pos: self.incremental_pos,
@@ -598,7 +611,8 @@ impl Compressor {
         let seq_capacity = match strategy {
             InternalStrategy::Store
             | InternalStrategy::StaticTurbo
-            | InternalStrategy::NearOptimal => 0,
+            | InternalStrategy::NearOptimal
+            | InternalStrategy::FullOptimal => 0,
             InternalStrategy::Turbo | InternalStrategy::FastHt | InternalStrategy::HtGreedy => {
                 FAST_SEQ_STORE_LENGTH + 1
             }
@@ -654,6 +668,13 @@ impl Compressor {
                     nonfinal,
                     static_opt,
                 ))
+            } else {
+                None
+            },
+            full_optimal: if strategy == InternalStrategy::FullOptimal {
+                // iterations = effort - 16 (effort 31 → 15 iterations, 76 → 60 iterations)
+                let iterations = (level.effort().saturating_sub(16)) as u64;
+                Some(full_optimal::FullOptimalState::new(iterations.max(1)))
             } else {
                 None
             },
@@ -743,6 +764,11 @@ impl Compressor {
             }
             InternalStrategy::NearOptimal => {
                 self.compress_near_optimal(&mut os, input, &stop)?;
+            }
+            InternalStrategy::FullOptimal => {
+                let fo = self.full_optimal.as_ref().unwrap();
+                let iterations = fo.iterations();
+                full_optimal::compress_full_optimal(&mut os, input, iterations, true);
             }
         }
 
@@ -2902,7 +2928,7 @@ impl Compressor {
             InternalStrategy::Lazy => self.compress_lazy_generic(&mut os, input, false, stop),
             InternalStrategy::Lazy2 => self.compress_lazy_generic(&mut os, input, true, stop),
             InternalStrategy::NearOptimal => self.compress_near_optimal(&mut os, input, stop),
-            InternalStrategy::Store => unreachable!(),
+            InternalStrategy::Store | InternalStrategy::FullOptimal => unreachable!(),
         };
         if let Err(e) = result {
             self.chunk_start = 0;
