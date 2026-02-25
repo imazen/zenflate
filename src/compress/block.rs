@@ -6,7 +6,11 @@
 use crate::constants::*;
 
 use super::bitstream::{BITBUF_NBITS, OutputBitstream, can_buffer};
-use super::huffman::{make_huffman_code, optimize_huffman_for_rle, optimize_huffman_for_rle_zop};
+use super::huffman::{
+    make_huffman_code, make_huffman_code_optimal, optimize_huffman_for_rle,
+    optimize_huffman_for_rle_zop,
+};
+use super::katajainen::HuffmanScratch;
 use super::near_optimal::{OPTIMUM_LEN_MASK, OPTIMUM_OFFSET_SHIFT, OptimumNode};
 use super::sequences::Sequence;
 
@@ -180,7 +184,7 @@ fn block_symbol_cost(orig_freqs: &DeflateFreqs, lens_litlen: &[u8], lens_offset:
 /// Compute the tree header cost for given code lengths.
 ///
 /// This is the cost of encoding the Huffman tree itself in the dynamic block header.
-fn tree_header_cost(lens_litlen: &[u8], lens_offset: &[u8]) -> u32 {
+fn tree_header_cost(lens_litlen: &[u8], lens_offset: &[u8], scratch: &mut HuffmanScratch) -> u32 {
     let mut num_litlen_syms = DEFLATE_NUM_LITLEN_SYMS as usize;
     while num_litlen_syms > 257 && lens_litlen[num_litlen_syms - 1] == 0 {
         num_litlen_syms -= 1;
@@ -197,7 +201,7 @@ fn tree_header_cost(lens_litlen: &[u8], lens_offset: &[u8]) -> u32 {
         .copy_from_slice(&lens_offset[..num_offset_syms]);
 
     // Use the best precode encoding for header cost
-    let best = compute_precode_items_best(&combined_lens[..total_lens]);
+    let best = compute_precode_items_best(&combined_lens[..total_lens], scratch);
     best.cost
 }
 
@@ -212,41 +216,48 @@ fn tree_header_cost(lens_litlen: &[u8], lens_offset: &[u8]) -> u32 {
 /// against the ORIGINAL frequencies. Picks the cheapest strategy.
 /// Then tries reduced max_bits (8..14) to see if shorter codes help.
 pub(crate) fn make_huffman_codes_best(orig_freqs: &DeflateFreqs, codes: &mut DeflateCodes) {
+    let mut scratch = HuffmanScratch::new();
     let mut best_cost = u32::MAX;
     let mut best_codes = DeflateCodes::default();
 
     // Helper: build codes from (possibly smoothed) freqs with given max_bits,
     // but measure cost against orig_freqs.
-    let mut try_strategy =
-        |litlen_freqs: &[u32], offset_freqs: &[u32], max_litlen_bits: u32, max_offset_bits: u32| {
-            let mut trial = DeflateCodes::default();
-            make_huffman_code(
-                DEFLATE_NUM_LITLEN_SYMS as usize,
-                max_litlen_bits,
-                litlen_freqs,
-                &mut trial.lens_litlen,
-                &mut trial.codewords_litlen,
-            );
-            make_huffman_code(
-                DEFLATE_NUM_OFFSET_SYMS as usize,
-                max_offset_bits,
-                offset_freqs,
-                &mut trial.lens_offset,
-                &mut trial.codewords_offset,
-            );
+    let mut try_strategy = |scratch: &mut HuffmanScratch,
+                            litlen_freqs: &[u32],
+                            offset_freqs: &[u32],
+                            max_litlen_bits: u32,
+                            max_offset_bits: u32| {
+        let mut trial = DeflateCodes::default();
+        make_huffman_code_optimal(
+            DEFLATE_NUM_LITLEN_SYMS as usize,
+            max_litlen_bits,
+            litlen_freqs,
+            &mut trial.lens_litlen,
+            &mut trial.codewords_litlen,
+            scratch,
+        );
+        make_huffman_code_optimal(
+            DEFLATE_NUM_OFFSET_SYMS as usize,
+            max_offset_bits,
+            offset_freqs,
+            &mut trial.lens_offset,
+            &mut trial.codewords_offset,
+            scratch,
+        );
 
-            let data_cost = block_symbol_cost(orig_freqs, &trial.lens_litlen, &trial.lens_offset);
-            let header_cost = tree_header_cost(&trial.lens_litlen, &trial.lens_offset);
-            let total_cost = data_cost + header_cost;
+        let data_cost = block_symbol_cost(orig_freqs, &trial.lens_litlen, &trial.lens_offset);
+        let header_cost = tree_header_cost(&trial.lens_litlen, &trial.lens_offset, scratch);
+        let total_cost = data_cost + header_cost;
 
-            if total_cost < best_cost {
-                best_cost = total_cost;
-                best_codes = trial;
-            }
-        };
+        if total_cost < best_cost {
+            best_cost = total_cost;
+            best_codes = trial;
+        }
+    };
 
     // Strategy C: raw frequencies, max_bits=15
     try_strategy(
+        &mut scratch,
         &orig_freqs.litlen,
         &orig_freqs.offset,
         DEFLATE_MAX_LITLEN_CODEWORD_LEN,
@@ -260,6 +271,7 @@ pub(crate) fn make_huffman_codes_best(orig_freqs: &DeflateFreqs, codes: &mut Def
         optimize_huffman_for_rle(&mut litlen);
         optimize_huffman_for_rle(&mut offset);
         try_strategy(
+            &mut scratch,
             &litlen,
             &offset,
             DEFLATE_MAX_LITLEN_CODEWORD_LEN,
@@ -274,6 +286,7 @@ pub(crate) fn make_huffman_codes_best(orig_freqs: &DeflateFreqs, codes: &mut Def
         optimize_huffman_for_rle_zop(&mut litlen);
         optimize_huffman_for_rle_zop(&mut offset);
         try_strategy(
+            &mut scratch,
             &litlen,
             &offset,
             DEFLATE_MAX_LITLEN_CODEWORD_LEN,
@@ -289,6 +302,7 @@ pub(crate) fn make_huffman_codes_best(orig_freqs: &DeflateFreqs, codes: &mut Def
     for max_bits in (9..DEFLATE_MAX_LITLEN_CODEWORD_LEN).rev() {
         // Raw frequencies with reduced max_bits
         try_strategy(
+            &mut scratch,
             &orig_freqs.litlen,
             &orig_freqs.offset,
             max_bits,
@@ -301,7 +315,13 @@ pub(crate) fn make_huffman_codes_best(orig_freqs: &DeflateFreqs, codes: &mut Def
             let mut offset = orig_freqs.offset;
             optimize_huffman_for_rle(&mut litlen);
             optimize_huffman_for_rle(&mut offset);
-            try_strategy(&litlen, &offset, max_bits, DEFLATE_MAX_OFFSET_CODEWORD_LEN);
+            try_strategy(
+                &mut scratch,
+                &litlen,
+                &offset,
+                max_bits,
+                DEFLATE_MAX_OFFSET_CODEWORD_LEN,
+            );
         }
     }
 
@@ -490,7 +510,7 @@ pub(crate) fn compute_precode_items_flagged(
 ///
 /// Returns the total header bits for a dynamic block's code length section:
 /// 14 fixed header bits + 3*hclen + precode symbol costs + extra bits.
-fn compute_precode_cost(lens: &[u8], flags: PrecodeFlags) -> u32 {
+fn compute_precode_cost(lens: &[u8], flags: PrecodeFlags, scratch: &mut HuffmanScratch) -> u32 {
     let mut precode_freqs = [0u32; DEFLATE_NUM_PRECODE_SYMS as usize];
     let mut precode_items = [0u32; (DEFLATE_NUM_LITLEN_SYMS + DEFLATE_NUM_OFFSET_SYMS) as usize];
     compute_precode_items_flagged(lens, &mut precode_freqs, &mut precode_items, flags);
@@ -498,12 +518,13 @@ fn compute_precode_cost(lens: &[u8], flags: PrecodeFlags) -> u32 {
     // Build precode Huffman code for this combination
     let mut precode_lens = [0u8; DEFLATE_NUM_PRECODE_SYMS as usize];
     let mut precode_codewords = [0u32; DEFLATE_NUM_PRECODE_SYMS as usize];
-    make_huffman_code(
+    make_huffman_code_optimal(
         DEFLATE_NUM_PRECODE_SYMS as usize,
         DEFLATE_MAX_PRE_CODEWORD_LEN,
         &precode_freqs,
         &mut precode_lens,
         &mut precode_codewords,
+        scratch,
     );
     let _ = precode_codewords;
 
@@ -539,7 +560,10 @@ pub(crate) struct BestPrecodeResult {
 ///
 /// Tests up to 24 of 32 combinations (skipping fuse_7/fuse_8 without use_16).
 /// Returns the combination with the lowest total header bit cost.
-pub(crate) fn compute_precode_items_best(lens: &[u8]) -> BestPrecodeResult {
+pub(crate) fn compute_precode_items_best(
+    lens: &[u8],
+    scratch: &mut HuffmanScratch,
+) -> BestPrecodeResult {
     let mut best_cost = u32::MAX;
     let mut best_flags = PrecodeFlags::DEFAULT;
 
@@ -549,7 +573,7 @@ pub(crate) fn compute_precode_items_best(lens: &[u8]) -> BestPrecodeResult {
         if !flags.is_valid() {
             continue;
         }
-        let cost = compute_precode_cost(lens, flags);
+        let cost = compute_precode_cost(lens, flags, scratch);
         if cost < best_cost {
             best_cost = cost;
             best_flags = flags;
@@ -574,12 +598,13 @@ pub(crate) fn compute_precode_items_best(lens: &[u8]) -> BestPrecodeResult {
         best_flags,
     );
 
-    make_huffman_code(
+    make_huffman_code_optimal(
         DEFLATE_NUM_PRECODE_SYMS as usize,
         DEFLATE_MAX_PRE_CODEWORD_LEN,
         &result.precode_freqs,
         &mut result.precode_lens,
         &mut result.precode_codewords,
+        scratch,
     );
 
     result.num_explicit_lens = DEFLATE_NUM_PRECODE_SYMS as usize;
@@ -693,7 +718,8 @@ fn flush_block_inner(
     let num_explicit_lens;
 
     if use_best_precode {
-        let best = compute_precode_items_best(&combined_lens[..total_lens]);
+        let mut scratch = HuffmanScratch::new();
+        let best = compute_precode_items_best(&combined_lens[..total_lens], &mut scratch);
         precode_freqs = best.precode_freqs;
         precode_items = best.precode_items;
         num_precode_items = best.num_items;

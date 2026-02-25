@@ -7,6 +7,7 @@ pub(crate) mod block;
 pub(crate) mod block_split;
 pub(crate) mod full_optimal;
 pub(crate) mod huffman;
+pub(crate) mod katajainen;
 pub(crate) mod near_optimal;
 pub(crate) mod sequences;
 

@@ -16,7 +16,8 @@ use super::block::{
     BlockOutput, DeflateCodes, DeflateFreqs, LENGTH_SLOT, flush_block_best, get_offset_slot,
     make_huffman_codes_best,
 };
-use super::huffman::{make_huffman_code, optimize_huffman_for_rle};
+use super::huffman::{make_huffman_code_optimal, optimize_huffman_for_rle};
+use super::katajainen::HuffmanScratch;
 use super::sequences::Sequence;
 
 // ---- Constants ----
@@ -734,23 +735,23 @@ impl SymbolStats {
     }
 
     /// Build Huffman code lengths and use them as cost model.
-    fn calculate_huffman_costs(&mut self, beststats: &SymbolStats) {
+    fn calculate_huffman_costs(&mut self, beststats: &SymbolStats, scratch: &mut HuffmanScratch) {
         let mut ll_counts = beststats.litlens;
         let mut d_counts = beststats.dists;
         optimize_huffman_for_rle_usize(&mut ll_counts);
         optimize_huffman_for_rle_usize(&mut d_counts);
 
-        // Build code lengths via zenflate's make_huffman_code
+        // Build code lengths via katajainen's optimal bounded package merge
         let ll_freqs: Vec<u32> = ll_counts.iter().map(|&c| c as u32).collect();
         let d_freqs: Vec<u32> = d_counts.iter().map(|&c| c as u32).collect();
 
         let mut ll_lens = [0u8; NUM_LL];
         let mut ll_cw = [0u32; NUM_LL];
-        make_huffman_code(NUM_LL, 15, &ll_freqs, &mut ll_lens, &mut ll_cw);
+        make_huffman_code_optimal(NUM_LL, 15, &ll_freqs, &mut ll_lens, &mut ll_cw, scratch);
 
         let mut d_lens = [0u8; NUM_D];
         let mut d_cw = [0u32; NUM_D];
-        make_huffman_code(NUM_D, 15, &d_freqs, &mut d_lens, &mut d_cw);
+        make_huffman_code_optimal(NUM_D, 15, &d_freqs, &mut d_lens, &mut d_cw, scratch);
 
         for (i, &len) in ll_lens.iter().enumerate() {
             self.ll_symbols[i] = f64::from(len);
@@ -1000,7 +1001,12 @@ fn trace(size: usize, length_array: &[u16], dist_array: &[u16]) -> Vec<(u16, u16
 // ---- Block Cost Estimation ----
 
 /// Estimate dynamic block cost from LZ77 store histogram.
-fn calculate_block_size_dynamic(store: &Lz77Store, lstart: usize, lend: usize) -> f64 {
+fn calculate_block_size_dynamic(
+    store: &Lz77Store,
+    lstart: usize,
+    lend: usize,
+    scratch: &mut HuffmanScratch,
+) -> f64 {
     // Build histograms
     let mut ll_counts = [0u32; NUM_LL];
     let mut d_counts = [0u32; NUM_D];
@@ -1018,11 +1024,11 @@ fn calculate_block_size_dynamic(store: &Lz77Store, lstart: usize, lend: usize) -
     // Build Huffman codes
     let mut ll_lens = [0u8; NUM_LL];
     let mut ll_cw = [0u32; NUM_LL];
-    make_huffman_code(NUM_LL, 15, &ll_counts, &mut ll_lens, &mut ll_cw);
+    make_huffman_code_optimal(NUM_LL, 15, &ll_counts, &mut ll_lens, &mut ll_cw, scratch);
 
     let mut d_lens = [0u8; NUM_D];
     let mut d_cw = [0u32; NUM_D];
-    make_huffman_code(NUM_D, 15, &d_counts, &mut d_lens, &mut d_cw);
+    make_huffman_code_optimal(NUM_D, 15, &d_counts, &mut d_lens, &mut d_cw, scratch);
 
     // Calculate data cost
     let mut cost = 0u64;
@@ -1116,13 +1122,15 @@ fn blocksplit_lz77(lz77: &Lz77Store, maxblocks: u16, splitpoints: &mut Vec<usize
     while maxblocks != 0 && numblocks < u32::from(maxblocks) {
         let (llpos, splitcost) = find_minimum(
             |i| {
-                calculate_block_size_dynamic(lz77, lstart, i)
-                    + calculate_block_size_dynamic(lz77, i, lend)
+                let mut s = HuffmanScratch::new();
+                calculate_block_size_dynamic(lz77, lstart, i, &mut s)
+                    + calculate_block_size_dynamic(lz77, i, lend, &mut s)
             },
             lstart + 1,
             lend,
         );
-        let origcost = calculate_block_size_dynamic(lz77, lstart, lend);
+        let mut scratch = HuffmanScratch::new();
+        let origcost = calculate_block_size_dynamic(lz77, lstart, lend, &mut scratch);
 
         if splitcost > origcost || llpos == lstart + 1 || llpos == lend {
             done[lstart] = 1;
@@ -1224,6 +1232,7 @@ fn lz77_optimal(in_data: &[u8], instart: usize, inend: usize, iterations: u64) -
     let mut lmc = MatchCache::new(blocksize);
     let mut currentstore = Lz77Store::with_capacity(blocksize);
     let mut outputstore = Lz77Store::default();
+    let mut huff_scratch = HuffmanScratch::new();
 
     // Initial greedy seed
     currentstore.greedy(in_data, instart, inend);
@@ -1231,7 +1240,8 @@ fn lz77_optimal(in_data: &[u8], instart: usize, inend: usize, iterations: u64) -
     stats.get_statistics(&currentstore);
     outputstore.clone_from(&currentstore);
 
-    let mut bestcost = calculate_block_size_dynamic(&currentstore, 0, currentstore.size());
+    let mut bestcost =
+        calculate_block_size_dynamic(&currentstore, 0, currentstore.size(), &mut huff_scratch);
 
     let mut h = ZopfliHash::new();
     let mut costs = Vec::with_capacity(inend - instart + 1);
@@ -1258,7 +1268,7 @@ fn lz77_optimal(in_data: &[u8], instart: usize, inend: usize, iterations: u64) -
     loop {
         // Enhanced: milestone RLE at iteration 29
         if current_iteration == 29 {
-            stats.calculate_huffman_costs(&beststats);
+            stats.calculate_huffman_costs(&beststats, &mut huff_scratch);
         }
 
         currentstore.reset();
@@ -1276,7 +1286,8 @@ fn lz77_optimal(in_data: &[u8], instart: usize, inend: usize, iterations: u64) -
             &mut dist_array,
             &mut sublen,
         );
-        let cost = calculate_block_size_dynamic(&currentstore, 0, currentstore.size());
+        let cost =
+            calculate_block_size_dynamic(&currentstore, 0, currentstore.size(), &mut huff_scratch);
 
         if cost < bestcost {
             iterations_without_improvement = 0;
@@ -1299,7 +1310,7 @@ fn lz77_optimal(in_data: &[u8], instart: usize, inend: usize, iterations: u64) -
             // Ultra post-processing pass
             if current_iteration > 4 {
                 let mut ultra_stats = SymbolStats::default();
-                ultra_stats.calculate_huffman_costs(&beststats);
+                ultra_stats.calculate_huffman_costs(&beststats, &mut huff_scratch);
                 currentstore.reset();
                 let cost_model = CostModel::from_stats(&ultra_stats);
                 lz77_optimal_run(
@@ -1315,8 +1326,12 @@ fn lz77_optimal(in_data: &[u8], instart: usize, inend: usize, iterations: u64) -
                     &mut dist_array,
                     &mut sublen,
                 );
-                let ultra_cost =
-                    calculate_block_size_dynamic(&currentstore, 0, currentstore.size());
+                let ultra_cost = calculate_block_size_dynamic(
+                    &currentstore,
+                    0,
+                    currentstore.size(),
+                    &mut huff_scratch,
+                );
                 if ultra_cost < bestcost {
                     outputstore.clone_from(&currentstore);
                 }

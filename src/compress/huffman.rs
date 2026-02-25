@@ -374,6 +374,91 @@ pub(crate) fn make_huffman_code(
     gen_codewords(a, lens, &len_counts, max_codeword_len, num_syms);
 }
 
+/// Generate canonical Huffman codewords from pre-computed code lengths.
+///
+/// Given `lens[sym]` already filled in, builds `len_counts` and generates
+/// bit-reversed canonical codewords into `codewords`.
+fn canonical_codewords(num_syms: usize, lens: &[u8], codewords: &mut [u32], max_codeword_len: u32) {
+    let max_len = max_codeword_len as usize;
+
+    // Build len_counts from lens.
+    let mut len_counts = [0u32; DEFLATE_MAX_CODEWORD_LEN as usize + 1];
+    for &l in &lens[..num_syms] {
+        if l > 0 {
+            len_counts[l as usize] += 1;
+        }
+    }
+
+    // Generate canonical codewords.
+    let mut next_codewords = [0u32; DEFLATE_MAX_CODEWORD_LEN as usize + 1];
+    for len in 2..=max_len {
+        next_codewords[len] = (next_codewords[len - 1] + len_counts[len - 1]) << 1;
+    }
+
+    for sym in 0..num_syms {
+        let len = lens[sym];
+        if len > 0 {
+            codewords[sym] = reverse_codeword(next_codewords[len as usize], len);
+            next_codewords[len as usize] += 1;
+        } else {
+            codewords[sym] = 0;
+        }
+    }
+}
+
+/// Build an optimal length-limited canonical Huffman code using Katajainen's
+/// bounded package merge algorithm.
+///
+/// Given symbol frequencies, produces codewords and codeword lengths that are
+/// provably optimal (minimum weighted path length) subject to the max length constraint.
+/// Uses `scratch` to avoid repeated allocations.
+pub(crate) fn make_huffman_code_optimal(
+    num_syms: usize,
+    max_codeword_len: u32,
+    freqs: &[u32],
+    lens: &mut [u8],
+    codewords: &mut [u32],
+    scratch: &mut super::katajainen::HuffmanScratch,
+) {
+    // Compute optimal code lengths via bounded package merge.
+    super::katajainen::length_limited_code_lengths(
+        &freqs[..num_syms],
+        max_codeword_len as usize,
+        scratch,
+        &mut lens[..num_syms],
+    );
+
+    // Count used symbols to handle 0-1 edge cases (same as make_huffman_code).
+    let num_used = lens[..num_syms].iter().filter(|&&l| l > 0).count();
+    if num_used < 2 {
+        // Need at least 2 codewords for a complete Huffman code.
+        // Find the single used symbol (if any).
+        let sym = if num_used > 0 {
+            lens[..num_syms].iter().position(|&l| l > 0).unwrap()
+        } else {
+            0
+        };
+        let nonzero_idx = if sym != 0 { sym } else { 1 };
+
+        // Zero everything first
+        for cw in codewords[..num_syms].iter_mut() {
+            *cw = 0;
+        }
+        for l in lens[..num_syms].iter_mut() {
+            *l = 0;
+        }
+
+        codewords[0] = 0;
+        lens[0] = 1;
+        codewords[nonzero_idx] = 1;
+        lens[nonzero_idx] = 1;
+        return;
+    }
+
+    // Generate canonical codewords from the optimal lengths.
+    canonical_codewords(num_syms, lens, codewords, max_codeword_len);
+}
+
 /// Optimize Huffman frequency counts for better RLE encoding (Brotli-inspired).
 ///
 /// Smooths frequency arrays so that the resulting Huffman code lengths form

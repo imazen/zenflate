@@ -719,7 +719,8 @@ fn compute_true_cost_inner(
         .copy_from_slice(&codes.lens_offset[..num_offset_syms]);
 
     if use_best_precode {
-        let best = compute_precode_items_best(&combined_lens[..total_lens]);
+        let mut scratch = super::katajainen::HuffmanScratch::new();
+        let best = compute_precode_items_best(&combined_lens[..total_lens], &mut scratch);
         cost += best.cost;
     } else {
         // Compute precode with default flags
