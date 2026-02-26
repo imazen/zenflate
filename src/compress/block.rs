@@ -335,13 +335,12 @@ pub(crate) fn make_huffman_codes_best(orig_freqs: &DeflateFreqs, codes: &mut Def
 /// then sweeps max_bits 14..9 for each. Returns the minimum total cost in bits,
 /// plus 3 bits for the block header (bfinal + btype).
 pub(crate) fn block_cost_best(orig_freqs: &DeflateFreqs, scratch: &mut HuffmanScratch) -> u32 {
-    let mut best_cost = u32::MAX;
-
-    let mut try_strategy = |scratch: &mut HuffmanScratch,
-                            litlen_freqs: &[u32],
-                            offset_freqs: &[u32],
-                            max_litlen_bits: u32,
-                            max_offset_bits: u32| {
+    let try_strategy = |scratch: &mut HuffmanScratch,
+                        litlen_freqs: &[u32],
+                        offset_freqs: &[u32],
+                        max_litlen_bits: u32,
+                        max_offset_bits: u32|
+     -> u32 {
         let mut ll_lens = [0u8; DEFLATE_NUM_LITLEN_SYMS as usize];
         let mut ll_cw = [0u32; DEFLATE_NUM_LITLEN_SYMS as usize];
         make_huffman_code_optimal(
@@ -365,15 +364,11 @@ pub(crate) fn block_cost_best(orig_freqs: &DeflateFreqs, scratch: &mut HuffmanSc
 
         let data_cost = block_symbol_cost(orig_freqs, &ll_lens, &off_lens);
         let header_cost = tree_header_cost(&ll_lens, &off_lens, scratch);
-        let total_cost = data_cost + header_cost;
-
-        if total_cost < best_cost {
-            best_cost = total_cost;
-        }
+        data_cost + header_cost
     };
 
-    // Strategy C: raw frequencies
-    try_strategy(
+    // Strategy C: raw frequencies at max_bits=15
+    let cost_c = try_strategy(
         scratch,
         &orig_freqs.litlen,
         &orig_freqs.offset,
@@ -381,58 +376,60 @@ pub(crate) fn block_cost_best(orig_freqs: &DeflateFreqs, scratch: &mut HuffmanSc
         DEFLATE_MAX_OFFSET_CODEWORD_LEN,
     );
 
-    // Strategy A: Brotli-inspired RLE
-    {
-        let mut litlen = orig_freqs.litlen;
-        let mut offset = orig_freqs.offset;
-        optimize_huffman_for_rle(&mut litlen);
-        optimize_huffman_for_rle(&mut offset);
-        try_strategy(
-            scratch,
-            &litlen,
-            &offset,
-            DEFLATE_MAX_LITLEN_CODEWORD_LEN,
-            DEFLATE_MAX_OFFSET_CODEWORD_LEN,
-        );
-    }
+    // Strategy A: Brotli-inspired RLE at max_bits=15
+    let mut litlen_a = orig_freqs.litlen;
+    let mut offset_a = orig_freqs.offset;
+    optimize_huffman_for_rle(&mut litlen_a);
+    optimize_huffman_for_rle(&mut offset_a);
+    let cost_a = try_strategy(
+        scratch,
+        &litlen_a,
+        &offset_a,
+        DEFLATE_MAX_LITLEN_CODEWORD_LEN,
+        DEFLATE_MAX_OFFSET_CODEWORD_LEN,
+    );
 
-    // Strategy B: Zopfli-style RLE
-    {
-        let mut litlen = orig_freqs.litlen;
-        let mut offset = orig_freqs.offset;
-        optimize_huffman_for_rle_zop(&mut litlen);
-        optimize_huffman_for_rle_zop(&mut offset);
-        try_strategy(
-            scratch,
-            &litlen,
-            &offset,
-            DEFLATE_MAX_LITLEN_CODEWORD_LEN,
-            DEFLATE_MAX_OFFSET_CODEWORD_LEN,
-        );
-    }
+    // Strategy B: Zopfli-style RLE at max_bits=15
+    let mut litlen_b = orig_freqs.litlen;
+    let mut offset_b = orig_freqs.offset;
+    optimize_huffman_for_rle_zop(&mut litlen_b);
+    optimize_huffman_for_rle_zop(&mut offset_b);
+    let cost_b = try_strategy(
+        scratch,
+        &litlen_b,
+        &offset_b,
+        DEFLATE_MAX_LITLEN_CODEWORD_LEN,
+        DEFLATE_MAX_OFFSET_CODEWORD_LEN,
+    );
 
-    // Max-bits sweep (14 down to 9)
+    let mut best_cost = cost_c.min(cost_a).min(cost_b);
+
+    // Max-bits sweep: only sweep the best strategy's RLE'd counts.
+    // This avoids O(strategies × bits) work; instead O(bits) with early exit.
+    let (sweep_ll, sweep_off) = if best_cost == cost_a {
+        (&litlen_a[..], &offset_a[..])
+    } else if best_cost == cost_b {
+        (&litlen_b[..], &offset_b[..])
+    } else {
+        (&orig_freqs.litlen[..], &orig_freqs.offset[..])
+    };
+
+    let mut prev_cost = best_cost;
     for max_bits in (9..DEFLATE_MAX_LITLEN_CODEWORD_LEN).rev() {
-        try_strategy(
+        let cost = try_strategy(
             scratch,
-            &orig_freqs.litlen,
-            &orig_freqs.offset,
+            sweep_ll,
+            sweep_off,
             max_bits,
             DEFLATE_MAX_OFFSET_CODEWORD_LEN,
         );
-        {
-            let mut litlen = orig_freqs.litlen;
-            let mut offset = orig_freqs.offset;
-            optimize_huffman_for_rle(&mut litlen);
-            optimize_huffman_for_rle(&mut offset);
-            try_strategy(
-                scratch,
-                &litlen,
-                &offset,
-                max_bits,
-                DEFLATE_MAX_OFFSET_CODEWORD_LEN,
-            );
+        if cost < best_cost {
+            best_cost = cost;
         }
+        if cost > prev_cost {
+            break; // monotonicity failure — further reducing max_bits won't help
+        }
+        prev_cost = cost;
     }
 
     3 + best_cost
