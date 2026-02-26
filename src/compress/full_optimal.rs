@@ -14,8 +14,8 @@ use crate::constants::*;
 
 use super::bitstream::OutputBitstream;
 use super::block::{
-    BlockOutput, DeflateCodes, DeflateFreqs, LENGTH_SLOT, block_cost_best, flush_block_best,
-    get_offset_slot, make_huffman_codes_best,
+    BlockOutput, DeflateCodes, DeflateFreqs, LENGTH_SLOT, block_cost_best, block_cost_simple,
+    flush_block_best, get_offset_slot, make_huffman_codes_best,
 };
 use super::huffman::{make_huffman_code_optimal, optimize_huffman_for_rle};
 use super::katajainen::HuffmanScratch;
@@ -1064,30 +1064,136 @@ fn compute_frequencies_from_path(
 /// with exhaustive precode flag search for accurate tree header cost.
 /// This matches the quality of block encoding in `flush_block_best`, ensuring
 /// block split decisions use the same cost model as final output.
-fn calculate_block_size_dynamic(
-    store: &Lz77Store,
-    lstart: usize,
-    lend: usize,
-    scratch: &mut HuffmanScratch,
-) -> f64 {
-    // Build histograms
-    let mut freqs = DeflateFreqs::default();
-    for &litlen in &store.litlens[lstart..lend] {
-        match litlen {
-            LitLen::Literal(lit) => freqs.litlen[lit as usize] += 1,
-            LitLen::LengthDist(len, dist) => {
-                freqs.litlen[get_length_symbol(len as usize)] += 1;
-                freqs.offset[get_dist_symbol(dist)] += 1;
-            }
-        }
-    }
-    freqs.litlen[256] += 1; // end symbol
+// ---- Block Splitter ----
 
-    // Use the same multi-strategy cost evaluation as final block encoding
-    f64::from(block_cost_best(&freqs, scratch))
+/// Precomputed symbol arrays and chunked prefix-sum histograms for fast range queries.
+struct SplitHistograms {
+    /// Litlen symbol for each LZ77 entry.
+    ll_sym: Vec<u16>,
+    /// Offset symbol for each LZ77 entry (0 for literals).
+    d_sym: Vec<u16>,
+    /// Chunked cumulative litlen histograms. Each chunk of NUM_LL u32 values
+    /// covers CHUNK_SIZE entries. `ll_prefix[c * NUM_LL + s]` = count of symbol
+    /// `s` in entries `0 .. c * CHUNK_SIZE`.
+    ll_prefix: Vec<u32>,
+    /// Chunked cumulative offset histograms.
+    d_prefix: Vec<u32>,
 }
 
-// ---- Block Splitter ----
+const SPLIT_CHUNK: usize = 64;
+
+impl SplitHistograms {
+    fn build(store: &Lz77Store) -> Self {
+        let n = store.size();
+        let mut ll_sym = Vec::with_capacity(n);
+        let mut d_sym = Vec::with_capacity(n);
+
+        // Sentinel: u16::MAX means "literal, no offset symbol".
+        const NO_DIST: u16 = u16::MAX;
+        for &litlen in &store.litlens {
+            match litlen {
+                LitLen::Literal(lit) => {
+                    ll_sym.push(lit);
+                    d_sym.push(NO_DIST);
+                }
+                LitLen::LengthDist(len, dist) => {
+                    ll_sym.push(get_length_symbol(len as usize) as u16);
+                    d_sym.push(get_dist_symbol(dist) as u16);
+                }
+            }
+        }
+
+        // Build prefix-sum histograms at every SPLIT_CHUNK boundary.
+        // Entry [c] represents cumulative counts for entries 0..c*SPLIT_CHUNK.
+        let num_chunks = n / SPLIT_CHUNK + 1; // +1 for the final partial chunk
+        let mut ll_prefix = vec![0u32; (num_chunks + 1) * NUM_LL];
+        let mut d_prefix = vec![0u32; (num_chunks + 1) * NUM_D];
+
+        let mut ll_running = [0u32; NUM_LL];
+        let mut d_running = [0u32; NUM_D];
+
+        for c in 0..num_chunks {
+            let start = c * SPLIT_CHUNK;
+            let end = core::cmp::min(start + SPLIT_CHUNK, n);
+            for i in start..end {
+                ll_running[ll_sym[i] as usize] += 1;
+                if d_sym[i] != NO_DIST {
+                    d_running[d_sym[i] as usize] += 1;
+                }
+            }
+            let offset_ll = (c + 1) * NUM_LL;
+            ll_prefix[offset_ll..offset_ll + NUM_LL].copy_from_slice(&ll_running);
+            let offset_d = (c + 1) * NUM_D;
+            d_prefix[offset_d..offset_d + NUM_D].copy_from_slice(&d_running);
+        }
+
+        Self {
+            ll_sym,
+            d_sym,
+            ll_prefix,
+            d_prefix,
+        }
+    }
+
+    /// Get the histogram for range [lstart, lend).
+    fn histogram(&self, lstart: usize, lend: usize, freqs: &mut DeflateFreqs) {
+        const NO_DIST: u16 = u16::MAX;
+        freqs.litlen.fill(0);
+        freqs.offset.fill(0);
+
+        // Find chunk boundaries
+        let chunk_start = (lstart + SPLIT_CHUNK - 1) / SPLIT_CHUNK; // first full chunk >= lstart
+        let chunk_end = lend / SPLIT_CHUNK; // last full chunk < lend
+
+        if chunk_start <= chunk_end {
+            // Bulk: subtract prefix sums
+            let cs = chunk_start * NUM_LL;
+            let ce = chunk_end * NUM_LL;
+            for s in 0..NUM_LL {
+                freqs.litlen[s] = self.ll_prefix[ce + s] - self.ll_prefix[cs + s];
+            }
+            let ds = chunk_start * NUM_D;
+            let de = chunk_end * NUM_D;
+            for s in 0..NUM_D {
+                freqs.offset[s] = self.d_prefix[de + s] - self.d_prefix[ds + s];
+            }
+
+            // Add partial entries before first chunk boundary
+            for i in lstart..core::cmp::min(chunk_start * SPLIT_CHUNK, lend) {
+                freqs.litlen[self.ll_sym[i] as usize] += 1;
+                let d = self.d_sym[i];
+                if d != NO_DIST {
+                    freqs.offset[d as usize] += 1;
+                }
+            }
+
+            // Add partial entries after last chunk boundary
+            for i in (chunk_end * SPLIT_CHUNK)..lend {
+                freqs.litlen[self.ll_sym[i] as usize] += 1;
+                let d = self.d_sym[i];
+                if d != NO_DIST {
+                    freqs.offset[d as usize] += 1;
+                }
+            }
+        } else {
+            // Range is smaller than one chunk — just iterate
+            for i in lstart..lend {
+                freqs.litlen[self.ll_sym[i] as usize] += 1;
+                let d = self.d_sym[i];
+                if d != NO_DIST {
+                    freqs.offset[d as usize] += 1;
+                }
+            }
+        }
+
+        freqs.litlen[256] += 1; // end symbol
+    }
+
+    fn block_cost(&self, lstart: usize, lend: usize, freqs: &mut DeflateFreqs, scratch: &mut HuffmanScratch) -> f64 {
+        self.histogram(lstart, lend, freqs);
+        f64::from(block_cost_simple(freqs, scratch))
+    }
+}
 
 fn find_minimum<F: FnMut(usize) -> f64>(mut f: F, start: usize, end: usize) -> (usize, f64) {
     if end - start < 1024 {
@@ -1138,6 +1244,11 @@ fn blocksplit_lz77(lz77: &Lz77Store, maxblocks: u16, splitpoints: &mut Vec<usize
     if lz77.size() < 10 {
         return;
     }
+
+    // Precompute symbol arrays and chunked prefix histograms for O(CHUNK) range queries.
+    let histograms = SplitHistograms::build(lz77);
+    let mut freqs = DeflateFreqs::default();
+
     let mut numblocks = 1u32;
     let mut done = vec![0u8; lz77.size()];
     let mut lstart = 0;
@@ -1147,13 +1258,13 @@ fn blocksplit_lz77(lz77: &Lz77Store, maxblocks: u16, splitpoints: &mut Vec<usize
     while maxblocks != 0 && numblocks < u32::from(maxblocks) {
         let (llpos, splitcost) = find_minimum(
             |i| {
-                calculate_block_size_dynamic(lz77, lstart, i, &mut scratch)
-                    + calculate_block_size_dynamic(lz77, i, lend, &mut scratch)
+                histograms.block_cost(lstart, i, &mut freqs, &mut scratch)
+                    + histograms.block_cost(i, lend, &mut freqs, &mut scratch)
             },
             lstart + 1,
             lend,
         );
-        let origcost = calculate_block_size_dynamic(lz77, lstart, lend, &mut scratch);
+        let origcost = histograms.block_cost(lstart, lend, &mut freqs, &mut scratch);
 
         if splitcost > origcost || llpos == lstart + 1 || llpos == lend {
             done[lstart] = 1;
@@ -1239,8 +1350,20 @@ fn lz77_optimal(
     stats.get_statistics(&currentstore);
     outputstore.clone_from(&currentstore);
 
-    let mut bestcost =
-        calculate_block_size_dynamic(&currentstore, 0, currentstore.size(), &mut huff_scratch);
+    let mut bestcost = {
+        let mut freqs = DeflateFreqs::default();
+        for &litlen in &currentstore.litlens {
+            match litlen {
+                LitLen::Literal(lit) => freqs.litlen[lit as usize] += 1,
+                LitLen::LengthDist(len, dist) => {
+                    freqs.litlen[get_length_symbol(len as usize)] += 1;
+                    freqs.offset[get_dist_symbol(dist)] += 1;
+                }
+            }
+        }
+        freqs.litlen[256] += 1;
+        f64::from(block_cost_best(&freqs, &mut huff_scratch))
+    };
 
     let mut h = ZopfliHash::new();
     let mut costs = Vec::with_capacity(inend - instart + 1);
@@ -1519,13 +1642,15 @@ fn calculate_split_cost(
     splitpoints: &[usize],
     scratch: &mut HuffmanScratch,
 ) -> f64 {
+    let histograms = SplitHistograms::build(lz77);
+    let mut freqs = DeflateFreqs::default();
     let mut cost = 0.0;
     let mut last = 0;
     for &sp in splitpoints {
-        cost += calculate_block_size_dynamic(lz77, last, sp, scratch);
+        cost += histograms.block_cost(last, sp, &mut freqs, scratch);
         last = sp;
     }
-    cost += calculate_block_size_dynamic(lz77, last, lz77.size(), scratch);
+    cost += histograms.block_cost(last, lz77.size(), &mut freqs, scratch);
     cost
 }
 
