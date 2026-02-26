@@ -173,7 +173,7 @@ impl CompressionLevel {
     ///
     /// Higher effort = better compression ratio but slower.
     /// Effort 31+ uses the Zopfli-style full-optimal parser, where
-    /// `iterations = (effort - 16) * 2` (e.g., effort 31 = 30 iterations, 46 = 60).
+    /// `iterations = effort - 16` (e.g., effort 31 = 15 iterations, 46 = 30).
     pub fn new(effort: u32) -> Self {
         let effort = effort.min(200);
         Self {
@@ -673,8 +673,8 @@ impl Compressor {
                 None
             },
             full_optimal: if strategy == InternalStrategy::FullOptimal {
-                // iterations = (effort - 16) * 2 (effort 31 → 30i, 46 → 60i, 76 → 120i)
-                let iterations = (level.effort().saturating_sub(16) * 2) as u64;
+                // iterations = effort - 16 (effort 31 → 15i, 46 → 30i, 76 → 60i)
+                let iterations = level.effort().saturating_sub(16) as u64;
                 Some(full_optimal::FullOptimalState::new(iterations.max(1)))
             } else {
                 None
