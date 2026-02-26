@@ -328,6 +328,43 @@ pub(crate) fn make_huffman_codes_best(orig_freqs: &DeflateFreqs, codes: &mut Def
     *codes = best_codes;
 }
 
+/// Lightweight block cost estimate for block splitting.
+///
+/// Single-strategy evaluation: Brotli-RLE + max_bits=15. Much cheaper than
+/// `block_cost_best` (1 evaluation vs 5-8), sufficient for finding good split
+/// points where relative cost comparison matters more than absolute accuracy.
+pub(crate) fn block_cost_simple(orig_freqs: &DeflateFreqs, scratch: &mut HuffmanScratch) -> u32 {
+    let mut litlen_freqs = orig_freqs.litlen;
+    let mut offset_freqs = orig_freqs.offset;
+    optimize_huffman_for_rle(&mut litlen_freqs);
+    optimize_huffman_for_rle(&mut offset_freqs);
+
+    let mut ll_lens = [0u8; DEFLATE_NUM_LITLEN_SYMS as usize];
+    let mut ll_cw = [0u32; DEFLATE_NUM_LITLEN_SYMS as usize];
+    make_huffman_code_optimal(
+        DEFLATE_NUM_LITLEN_SYMS as usize,
+        DEFLATE_MAX_LITLEN_CODEWORD_LEN,
+        &litlen_freqs,
+        &mut ll_lens,
+        &mut ll_cw,
+        scratch,
+    );
+    let mut off_lens = [0u8; DEFLATE_NUM_OFFSET_SYMS as usize];
+    let mut off_cw = [0u32; DEFLATE_NUM_OFFSET_SYMS as usize];
+    make_huffman_code_optimal(
+        DEFLATE_NUM_OFFSET_SYMS as usize,
+        DEFLATE_MAX_OFFSET_CODEWORD_LEN,
+        &offset_freqs,
+        &mut off_lens,
+        &mut off_cw,
+        scratch,
+    );
+
+    let data_cost = block_symbol_cost(orig_freqs, &ll_lens, &off_lens);
+    let header_cost = tree_header_cost(&ll_lens, &off_lens, scratch);
+    3 + data_cost + header_cost
+}
+
 /// Compute the minimum encoding cost (data + tree header, in bits) for given frequencies
 /// using the same multi-strategy optimization as `make_huffman_codes_best`.
 ///
