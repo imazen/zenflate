@@ -42,6 +42,9 @@ crc32fast = "1"
 simd-adler32 = "0.3"
 codec-corpus = "1"
 
+[profile.release]
+debug = true
+
 [[bench]]
 name = "throughput"
 harness = false
