@@ -200,6 +200,10 @@ struct MatchCache {
     length: Vec<u16>,
     dist: Vec<u16>,
     sublen: Vec<u8>,
+    /// True if all positions have complete sublen data in the cache.
+    /// When true, subsequent iterations never need `find_longest_match_loop`
+    /// and can safely skip hash chain updates.
+    sublen_complete: bool,
 }
 
 impl MatchCache {
@@ -208,7 +212,12 @@ impl MatchCache {
             length: vec![1; blocksize],
             dist: vec![0; blocksize],
             sublen: vec![0; CACHE_LENGTH * blocksize * 3],
+            sublen_complete: true, // Assumed true until a store_sublen overflows
         }
+    }
+
+    fn is_sublen_complete(&self) -> bool {
+        self.sublen_complete
     }
 
     fn max_sublen(&self, pos: usize) -> u32 {
@@ -242,6 +251,8 @@ impl MatchCache {
         }
         if j < CACHE_LENGTH {
             self.sublen[start + ((CACHE_LENGTH - 1) * 3)] = (bestlength - 3) as u8;
+        } else {
+            self.sublen_complete = false;
         }
     }
 
@@ -312,7 +323,7 @@ impl MatchCache {
     fn store(
         &mut self,
         pos: usize,
-        limit: usize,
+        _limit: usize,
         sublen: &mut Option<&mut [u16]>,
         distance: u16,
         length: u16,
@@ -321,7 +332,7 @@ impl MatchCache {
         if let Some(ref mut subl) = *sublen {
             let lmcpos = pos - blockstart;
             let cache_available = self.length[lmcpos] == 0 || self.dist[lmcpos] != 0;
-            if limit == MAX_MATCH && !cache_available {
+            if !cache_available {
                 if length < MIN_MATCH as u16 {
                     self.dist[lmcpos] = 0;
                     self.length[lmcpos] = 0;
@@ -624,7 +635,7 @@ impl Lz77Store {
         }
     }
 
-    fn store_from_path(&mut self, in_data: &[u8], instart: usize, path: Vec<(u16, u16)>) {
+    fn store_from_path(&mut self, in_data: &[u8], instart: usize, path: &[(u16, u16)]) {
         let mut pos = instart;
         for &(length, dist) in path.iter().rev() {
             if length >= MIN_MATCH as u16 {
@@ -727,9 +738,12 @@ impl SymbolStats {
         calculate_and_store(&self.dists, &mut self.d_symbols);
     }
 
-    fn clear_freqs(&mut self) {
-        self.litlens = [0; NUM_LL];
-        self.dists = [0; NUM_D];
+    /// Set frequencies from pre-computed counts and calculate entropy.
+    fn set_frequencies(&mut self, ll_counts: &[usize; NUM_LL], d_counts: &[usize; NUM_D]) {
+        self.litlens = *ll_counts;
+        self.dists = *d_counts;
+        self.litlens[256] = 1; // End symbol
+        self.calculate_entropy();
     }
 
     fn randomize_stat_freqs(&mut self, state: &mut RanState) {
@@ -904,6 +918,7 @@ fn get_best_lengths(
     length_array: &mut Vec<u16>,
     dist_array: &mut Vec<u16>,
     sublen: &mut Vec<u16>,
+    skip_hash: bool,
 ) -> f64 {
     let blocksize = inend - instart;
     length_array.clear();
@@ -915,11 +930,16 @@ fn get_best_lengths(
     }
     let windowstart = instart.saturating_sub(WINDOW_SIZE);
 
-    h.reset();
     let arr = &in_data[..inend];
-    h.warmup(arr, windowstart, inend);
-    for i in windowstart..instart {
-        h.update(arr, i);
+    if !skip_hash {
+        // Only iteration 0 needs full hash chain setup.
+        // On cached iterations (skip_hash=true), all match lookups return from
+        // cache — neither hash chains nor the `same` array are needed.
+        h.reset();
+        h.warmup(arr, windowstart, inend);
+        for i in windowstart..instart {
+            h.update(arr, i);
+        }
     }
 
     costs.resize(blocksize + 1, 0.0);
@@ -934,10 +954,14 @@ fn get_best_lengths(
 
     while i < inend {
         let mut j = i - instart;
-        h.update(arr, i);
+        if !skip_hash {
+            h.update(arr, i);
+        }
 
         // Skip optimization for long repetitions.
-        if h.same[i & WINDOW_MASK] > MAX_MATCH as u16 * 2
+        // Skip this shortcut on cached iterations — `same` is not maintained.
+        if !skip_hash
+            && h.same[i & WINDOW_MASK] > MAX_MATCH as u16 * 2
             && i > instart + MAX_MATCH + 1
             && i + MAX_MATCH * 2 + 1 < inend
             && h.same[(i - MAX_MATCH) & WINDOW_MASK] > MAX_MATCH as u16
@@ -996,19 +1020,40 @@ fn get_best_lengths(
     f64::from(costs[blocksize])
 }
 
-fn trace(size: usize, length_array: &[u16], dist_array: &[u16]) -> Vec<(u16, u16)> {
-    let mut index = size;
+fn trace(size: usize, length_array: &[u16], dist_array: &[u16], path: &mut Vec<(u16, u16)>) {
+    path.clear();
     if size == 0 {
-        return vec![];
+        return;
     }
-    let mut path = Vec::with_capacity(index);
+    let mut index = size;
     while index > 0 {
         let lai = length_array[index];
         let dai = dist_array[index];
         path.push((lai, dai));
         index -= lai as usize;
     }
-    path
+}
+
+/// Compute symbol frequencies directly from a trace path, without building an Lz77Store.
+/// The path is in reverse order (end to start).
+fn compute_frequencies_from_path(
+    in_data: &[u8],
+    instart: usize,
+    path: &[(u16, u16)],
+) -> DeflateFreqs {
+    let mut freqs = DeflateFreqs::default();
+    let mut pos = instart;
+    for &(length, dist) in path.iter().rev() {
+        if length >= MIN_MATCH as u16 {
+            freqs.litlen[get_length_symbol(length as usize)] += 1;
+            freqs.offset[get_dist_symbol(dist)] += 1;
+        } else {
+            freqs.litlen[in_data[pos] as usize] += 1;
+        }
+        pos += length as usize;
+    }
+    freqs.litlen[256] += 1; // End symbol
+    freqs
 }
 
 // ---- Block Cost Estimation ----
@@ -1175,36 +1220,6 @@ fn blocksplit(
 
 // ---- Squeeze Loop ----
 
-#[allow(clippy::too_many_arguments)]
-fn lz77_optimal_run(
-    lmc: &mut MatchCache,
-    in_data: &[u8],
-    instart: usize,
-    inend: usize,
-    cost_model: &CostModel,
-    store: &mut Lz77Store,
-    h: &mut ZopfliHash,
-    costs: &mut Vec<f32>,
-    length_array: &mut Vec<u16>,
-    dist_array: &mut Vec<u16>,
-    sublen: &mut Vec<u16>,
-) {
-    get_best_lengths(
-        lmc,
-        in_data,
-        instart,
-        inend,
-        cost_model,
-        h,
-        costs,
-        length_array,
-        dist_array,
-        sublen,
-    );
-    let path = trace(inend - instart, length_array, dist_array);
-    store.store_from_path(in_data, instart, path);
-}
-
 fn lz77_optimal(
     in_data: &[u8],
     instart: usize,
@@ -1232,6 +1247,7 @@ fn lz77_optimal(
     let mut length_array = Vec::new();
     let mut dist_array = Vec::new();
     let mut sublen = Vec::new();
+    let mut path_buf = Vec::new();
 
     let mut beststats = SymbolStats::default();
     let mut lastcost = 0.0;
@@ -1267,27 +1283,34 @@ fn lz77_optimal(
             stats.calculate_huffman_costs(&beststats, &mut huff_scratch);
         }
 
-        currentstore.reset();
         let cost_model = CostModel::from_stats(&stats);
-        lz77_optimal_run(
+        // After the first iteration populates the match cache, skip hash chain
+        // updates on subsequent iterations if the cache has complete sublen data.
+        let skip_hash = current_iteration > 0 && lmc.is_sublen_complete();
+        // Run DP forward pass + trace without building an Lz77Store.
+        // Frequencies and block cost are computed directly from the path.
+        get_best_lengths(
             &mut lmc,
             in_data,
             instart,
             inend,
             &cost_model,
-            &mut currentstore,
             &mut h,
             &mut costs,
             &mut length_array,
             &mut dist_array,
             &mut sublen,
+            skip_hash,
         );
-        let cost =
-            calculate_block_size_dynamic(&currentstore, 0, currentstore.size(), &mut huff_scratch);
+        trace(inend - instart, &length_array, &dist_array, &mut path_buf);
+        let freqs = compute_frequencies_from_path(in_data, instart, &path_buf);
+        let cost = f64::from(block_cost_best(&freqs, &mut huff_scratch));
 
         if cost < bestcost {
             iterations_without_improvement = 0;
-            outputstore.clone_from(&currentstore);
+            // Build full store only on improvement (needed for block splitting later)
+            outputstore.reset();
+            outputstore.store_from_path(in_data, instart, &path_buf);
             beststats = stats;
             bestcost = cost;
 
@@ -1307,37 +1330,43 @@ fn lz77_optimal(
             if current_iteration > 4 {
                 let mut ultra_stats = SymbolStats::default();
                 ultra_stats.calculate_huffman_costs(&beststats, &mut huff_scratch);
-                currentstore.reset();
                 let cost_model = CostModel::from_stats(&ultra_stats);
-                lz77_optimal_run(
+                let ultra_skip_hash = lmc.is_sublen_complete();
+                get_best_lengths(
                     &mut lmc,
                     in_data,
                     instart,
                     inend,
                     &cost_model,
-                    &mut currentstore,
                     &mut h,
                     &mut costs,
                     &mut length_array,
                     &mut dist_array,
                     &mut sublen,
+                    ultra_skip_hash,
                 );
-                let ultra_cost = calculate_block_size_dynamic(
-                    &currentstore,
-                    0,
-                    currentstore.size(),
-                    &mut huff_scratch,
-                );
+                trace(inend - instart, &length_array, &dist_array, &mut path_buf);
+                let ultra_freqs = compute_frequencies_from_path(in_data, instart, &path_buf);
+                let ultra_cost = f64::from(block_cost_best(&ultra_freqs, &mut huff_scratch));
                 if ultra_cost < bestcost {
-                    outputstore.clone_from(&currentstore);
+                    outputstore.reset();
+                    outputstore.store_from_path(in_data, instart, &path_buf);
                 }
             }
             break;
         }
 
         let laststats = stats;
-        stats.clear_freqs();
-        stats.get_statistics(&currentstore);
+        // Convert DeflateFreqs (u32) to SymbolStats (usize) frequencies
+        let mut ll_counts = [0usize; NUM_LL];
+        let mut d_counts = [0usize; NUM_D];
+        for (i, &c) in freqs.litlen.iter().enumerate() {
+            ll_counts[i] = c as usize;
+        }
+        for (i, &c) in freqs.offset.iter().enumerate() {
+            d_counts[i] = c as usize;
+        }
+        stats.set_frequencies(&ll_counts, &d_counts);
 
         if lastrandomstep != u64::MAX {
             stats = add_weighed_stat_freqs(&stats, 1.0, &laststats, 0.5);
@@ -1450,16 +1479,8 @@ pub(crate) fn compress_full_optimal(
 
         // Compare costs of both splits
         let mut scratch = HuffmanScratch::new();
-        let cost1 = calculate_split_cost(
-            &combined_lz77,
-            &lz77_splitpoints,
-            &mut scratch,
-        );
-        let cost2 = calculate_split_cost(
-            &combined_lz77,
-            &splitpoints2,
-            &mut scratch,
-        );
+        let cost1 = calculate_split_cost(&combined_lz77, &lz77_splitpoints, &mut scratch);
+        let cost2 = calculate_split_cost(&combined_lz77, &splitpoints2, &mut scratch);
 
         if cost2 < cost1 {
             lz77_splitpoints = splitpoints2;
