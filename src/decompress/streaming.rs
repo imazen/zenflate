@@ -6,7 +6,7 @@
 //!
 //! # Cancellation
 //!
-//! Unlike the whole-buffer [`Decompressor`](super::Decompressor), the streaming
+//! Unlike the whole-buffer [`Decompressor`], the streaming
 //! API doesn't take a `Stop` parameter — the caller controls the loop and can
 //! check cancellation between `fill()` calls. Each `fill()` call is bounded by
 //! the output capacity, so it completes quickly.
@@ -67,6 +67,7 @@ impl InputSource for &[u8] {
 
 /// Wraps a [`std::io::BufRead`] as an [`InputSource`].
 #[cfg(feature = "std")]
+#[derive(Debug)]
 pub struct BufReadSource<R>(pub R);
 
 #[cfg(feature = "std")]
@@ -216,6 +217,17 @@ pub struct StreamDecompressor<S> {
     checksum_matched: Option<bool>,
 }
 
+impl<S: core::fmt::Debug> core::fmt::Debug for StreamDecompressor<S> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("StreamDecompressor")
+            .field("source", &self.source)
+            .field("capacity", &self.capacity)
+            .field("state", &self.state)
+            .field("is_done", &(self.state == StreamState::Done))
+            .finish_non_exhaustive()
+    }
+}
+
 impl<S> StreamDecompressor<S> {
     /// Consume the decompressor and return the underlying input source.
     pub fn into_inner(self) -> S {
@@ -244,6 +256,7 @@ impl<S> StreamDecompressor<S> {
     /// - `None` — footer not yet processed (raw DEFLATE or stream not finished)
     /// - `Some(true)` — checksum matched
     /// - `Some(false)` — checksum mismatch (only possible when `skip_checksum` is set)
+    #[must_use]
     pub fn checksum_matched(&self) -> Option<bool> {
         self.checksum_matched
     }
@@ -325,6 +338,7 @@ impl<S: InputSource> StreamDecompressor<S> {
 
     /// Borrow all available decompressed output. Zero-copy.
     #[inline]
+    #[must_use]
     pub fn peek(&self) -> &[u8] {
         &self.buffer[self.read_pos..self.write_pos]
     }
@@ -346,6 +360,7 @@ impl<S: InputSource> StreamDecompressor<S> {
 
     /// Returns `true` when the stream is fully decompressed and checksums verified.
     #[inline]
+    #[must_use]
     pub fn is_done(&self) -> bool {
         self.state == StreamState::Done
     }

@@ -59,7 +59,7 @@ const FAST_SOFT_MAX_BLOCK_LENGTH: usize = 65535;
 const FAST_SEQ_STORE_LENGTH: usize = 8192;
 
 /// Internal compression strategy.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum InternalStrategy {
     /// No compression — store blocks only.
     Store,
@@ -160,7 +160,7 @@ pub(crate) struct CompressionParams {
 /// let compat = CompressionLevel::libdeflate(6);
 /// assert_eq!(compat.level(), 6);
 /// ```
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct CompressionLevel {
     effort: u32,
     strategy: InternalStrategy,
@@ -174,6 +174,7 @@ impl CompressionLevel {
     /// Higher effort = better compression ratio but slower.
     /// Effort 31+ uses the Zopfli-style full-optimal parser, where
     /// `iterations = effort - 16` (e.g., effort 31 = 15 iterations, 46 = 30).
+    #[must_use]
     pub fn new(effort: u32) -> Self {
         let effort = effort.min(200);
         Self {
@@ -185,6 +186,7 @@ impl CompressionLevel {
 
     /// Create a compression level that produces byte-identical output with
     /// C libdeflate at the given level (0-12). Clamps to 0-12.
+    #[must_use]
     pub fn libdeflate(level: u32) -> Self {
         let level = level.min(12);
         let (strategy, effort) = match level {
@@ -210,6 +212,7 @@ impl CompressionLevel {
     }
 
     /// Get the effort level (0-200).
+    #[must_use]
     pub fn effort(self) -> u32 {
         self.effort
     }
@@ -224,6 +227,7 @@ impl CompressionLevel {
     ///
     /// For levels created with [`libdeflate()`](Self::libdeflate), returns the
     /// exact libdeflate level. For effort-based levels, returns an approximation.
+    #[must_use]
     pub fn level(self) -> u32 {
         if let Some(ld) = self.libdeflate_level {
             return ld as u32;
@@ -249,33 +253,39 @@ impl CompressionLevel {
     }
 
     /// Effort 0: no compression. Wraps input in uncompressed DEFLATE blocks.
+    #[must_use]
     pub fn none() -> Self {
         Self::new(0)
     }
 
     /// Effort 1: fastest compression. Turbo matchfinder with dynamic Huffman.
+    #[must_use]
     pub fn fastest() -> Self {
         Self::new(1)
     }
 
     /// Effort 10: fast compression. Greedy hash-chain matchfinder.
+    #[must_use]
     pub fn fast() -> Self {
         Self::new(10)
     }
 
     /// Effort 15: balanced compression. Lazy hash-chain matchfinder.
     /// This is the default.
+    #[must_use]
     pub fn balanced() -> Self {
         Self::new(15)
     }
 
     /// Effort 22: high compression. Double-lazy hash-chain matchfinder.
     /// Best ratio before the much slower near-optimal parser.
+    #[must_use]
     pub fn high() -> Self {
         Self::new(22)
     }
 
     /// Effort 30: maximum compression. Near-optimal parser with multiple passes.
+    #[must_use]
     pub fn best() -> Self {
         Self::new(30)
     }
@@ -309,6 +319,7 @@ impl CompressionLevel {
     /// This does NOT cover within-strategy butterfly effects (small,
     /// typically <0.01% of input size). For absolute monotonicity,
     /// callers should track the running minimum across all effort levels.
+    #[must_use]
     pub fn monotonicity_fallback(&self) -> Option<CompressionLevel> {
         if self.libdeflate_level.is_some() {
             return None;
@@ -553,6 +564,17 @@ pub struct CompressorSnapshot {
     incremental_base_offset: usize,
 }
 
+impl core::fmt::Debug for CompressorSnapshot {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("CompressorSnapshot")
+            .field("incremental_pos", &self.incremental_pos)
+            .field("incremental_base_offset", &self.incremental_base_offset)
+            .field("has_ht_mf", &self.ht_mf.is_some())
+            .field("has_hc_mf", &self.hc_mf.is_some())
+            .finish()
+    }
+}
+
 impl Clone for CompressorSnapshot {
     fn clone(&self) -> Self {
         Self {
@@ -592,6 +614,14 @@ impl Clone for Compressor {
             incremental_pos: self.incremental_pos,
             incremental_base_offset: self.incremental_base_offset,
         }
+    }
+}
+
+impl core::fmt::Debug for Compressor {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Compressor")
+            .field("level", &self.level)
+            .finish_non_exhaustive()
     }
 }
 
@@ -694,6 +724,7 @@ impl Compressor {
     /// static codes, and the sequence buffer.
     ///
     /// Only meaningful for incremental compression (HtGreedy, Greedy, Lazy, Lazy2).
+    #[must_use]
     pub fn snapshot(&self) -> CompressorSnapshot {
         CompressorSnapshot {
             freqs: self.freqs.clone(),
@@ -867,6 +898,7 @@ impl Compressor {
     }
 
     /// Compute the maximum compressed size for raw DEFLATE output.
+    #[must_use]
     pub fn deflate_compress_bound(input_len: usize) -> usize {
         let max_blocks = (input_len + MIN_BLOCK_LENGTH - 1)
             .checked_div(MIN_BLOCK_LENGTH)
@@ -878,11 +910,13 @@ impl Compressor {
     }
 
     /// Compute the maximum compressed size for zlib output.
+    #[must_use]
     pub fn zlib_compress_bound(input_len: usize) -> usize {
         Self::deflate_compress_bound(input_len) + 2 + 4 // header + adler32
     }
 
     /// Compute the maximum compressed size for gzip output.
+    #[must_use]
     pub fn gzip_compress_bound(input_len: usize) -> usize {
         Self::deflate_compress_bound(input_len) + 10 + 8 // header + crc32 + isize
     }

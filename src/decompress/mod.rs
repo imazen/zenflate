@@ -176,8 +176,9 @@ pub(crate) static OFFSET_DECODE_RESULTS: [u32; DEFLATE_NUM_OFFSET_SYMS] =
 const LENS_SIZE: usize =
     DEFLATE_NUM_LITLEN_SYMS + DEFLATE_NUM_OFFSET_SYMS + DEFLATE_MAX_LENS_OVERRUN;
 
-/// Result of [`Decompressor::deflate_decompress_ex`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Result of a decompression operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub struct DecompressOutcome {
     /// How many bytes of the input slice were consumed by the DEFLATE stream.
     pub input_consumed: usize,
@@ -219,6 +220,16 @@ pub struct Decompressor {
     checksum_matched: Option<bool>,
 }
 
+impl core::fmt::Debug for Decompressor {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Decompressor")
+            .field("static_codes_loaded", &self.static_codes_loaded)
+            .field("skip_checksum", &self.skip_checksum)
+            .field("checksum_matched", &self.checksum_matched)
+            .finish_non_exhaustive()
+    }
+}
+
 impl Default for Decompressor {
     fn default() -> Self {
         Self::new()
@@ -258,6 +269,7 @@ impl Decompressor {
     /// - `None` — footer not yet processed (raw DEFLATE or not yet decompressed)
     /// - `Some(true)` — checksum matched
     /// - `Some(false)` — checksum mismatch (only possible when `skip_checksum` is set)
+    #[must_use]
     pub fn checksum_matched(&self) -> Option<bool> {
         self.checksum_matched
     }

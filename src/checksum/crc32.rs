@@ -26,6 +26,7 @@ use super::tables::CRC32_SLICE8_TABLE;
 /// // Continue with more data:
 /// let checksum = crc32(checksum, b" World");
 /// ```
+#[must_use]
 #[allow(unexpected_cfgs)]
 pub fn crc32(crc: u32, data: &[u8]) -> u32 {
     if data.is_empty() {
@@ -50,6 +51,7 @@ pub fn crc32(crc: u32, data: &[u8]) -> u32 {
 /// Algorithm from zlib: CRC-32 is linear over GF(2), so
 /// `crc(A||B) = crc(A) * x^(8*len(B)) + crc(B)` in the CRC polynomial ring.
 /// The multiplication by `x^n mod G(x)` is computed via matrix repeated squaring.
+#[must_use]
 pub fn crc32_combine(crc1: u32, crc2: u32, len2: usize) -> u32 {
     if len2 == 0 {
         return crc1;
@@ -720,6 +722,7 @@ impl Crc32Hasher {
     }
 
     /// One-shot CRC-32. Matches `crc32fast::hash()`.
+    #[must_use]
     pub fn hash(data: &[u8]) -> u32 {
         crc32(0, data)
     }
@@ -731,6 +734,7 @@ impl Crc32Hasher {
     }
 
     /// Return the current CRC (non-consuming).
+    #[must_use]
     pub fn finalize(&self) -> u32 {
         self.crc
     }

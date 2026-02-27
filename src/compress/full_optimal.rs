@@ -1065,7 +1065,6 @@ fn compute_frequencies_from_path(
 /// This matches the quality of block encoding in `flush_block_best`, ensuring
 /// block split decisions use the same cost model as final output.
 // ---- Block Splitter ----
-
 /// Precomputed symbol arrays and chunked prefix-sum histograms for fast range queries.
 struct SplitHistograms {
     /// Litlen symbol for each LZ77 entry.
@@ -1142,7 +1141,7 @@ impl SplitHistograms {
         freqs.offset.fill(0);
 
         // Find chunk boundaries
-        let chunk_start = (lstart + SPLIT_CHUNK - 1) / SPLIT_CHUNK; // first full chunk >= lstart
+        let chunk_start = lstart.div_ceil(SPLIT_CHUNK); // first full chunk >= lstart
         let chunk_end = lend / SPLIT_CHUNK; // last full chunk < lend
 
         if chunk_start <= chunk_end {

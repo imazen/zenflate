@@ -65,6 +65,7 @@ impl From<enough::StopReason> for DecompressionError {
 /// is uninhabited and the compiler eliminates it entirely.
 #[cfg(feature = "alloc")]
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum StreamError<E> {
     /// The compressed data is invalid or corrupt.
     Decompress(DecompressionError),
