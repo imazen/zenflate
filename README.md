@@ -1,5 +1,11 @@
 # zenflate
 
+[![CI](https://github.com/imazen/zenflate/actions/workflows/ci.yml/badge.svg)](https://github.com/imazen/zenflate/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/crates/v/zenflate.svg)](https://crates.io/crates/zenflate)
+[![docs.rs](https://docs.rs/zenflate/badge.svg)](https://docs.rs/zenflate)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![MSRV: 1.89](https://img.shields.io/badge/MSRV-1.89-blue.svg)](https://blog.rust-lang.org/)
+
 Pure Rust DEFLATE/zlib/gzip compression and decompression, ported from [libdeflate](https://github.com/ebiggers/libdeflate).
 
 `no_std` compatible (`alloc` required for compression and streaming decompression; decompression is fully stack-allocated).
@@ -266,6 +272,14 @@ zenflate extends libdeflate with:
 The C original is faster — zenflate runs at roughly 0.8-0.9x the speed of libdeflate depending on level and data. The gap comes from register pressure differences and bounds checking. The `unchecked` feature closes some of this gap.
 
 SIMD acceleration for checksums (AVX2/AVX-512/PCLMULQDQ on x86, NEON/PMULL on aarch64, simd128 on WASM). Runtime feature detection via [archmage](https://crates.io/crates/archmage) with zero `unsafe`.
+
+## MSRV
+
+The minimum supported Rust version is **1.89**.
+
+## AI-Generated Code Notice
+
+Developed with Claude (Anthropic). Not all code manually reviewed. Review critical paths before production use.
 
 ## License
 
