@@ -28,7 +28,7 @@ unchecked = []
 [dependencies]
 archmage = { version = "0.8.6", default-features = false, features = ["macros", "safe_unaligned_simd"] }
 enough = { version = "0.4", default-features = false }
-safe_unaligned_simd = { version = "0.2", default-features = false }
+safe_unaligned_simd = { version = "0.2.5", default-features = false }
 
 [dev-dependencies]
 criterion = { version = "0.5", default-features = false }
