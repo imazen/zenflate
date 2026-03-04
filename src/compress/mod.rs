@@ -4365,11 +4365,15 @@ mod tests {
     #[ignore] // requires corpus file
     #[cfg(not(miri))]
     fn test_bitstream_overflow_adaptive_filtered_png() {
-        let path = "/home/lilith/work/codec-corpus/clic2025-1024/\
-                     0d154749c7771f58e89ad343653ec4e20d6f037da829f47f5598e5d0a4ab61f0.png";
+        let corpus = std::env::var("CODEC_CORPUS_DIR")
+            .unwrap_or_else(|_| "/home/lilith/work/codec-corpus".to_string());
+        let path = format!(
+            "{corpus}/clic2025-1024/\
+             0d154749c7771f58e89ad343653ec4e20d6f037da829f47f5598e5d0a4ab61f0.png"
+        );
 
         // Decode the PNG
-        let file = std::fs::File::open(path)
+        let file = std::fs::File::open(&path)
             .unwrap_or_else(|e| panic!("failed to open corpus file {path}: {e}"));
         let decoder = png::Decoder::new(file);
         let mut reader = decoder.read_info().unwrap();
