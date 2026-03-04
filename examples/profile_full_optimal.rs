@@ -5,7 +5,9 @@
 /// Without arguments, compresses zenzop's profile_squeeze test data (real PNG).
 
 fn main() {
-    let path = std::env::args().nth(1);
+    let arg1 = std::env::args().nth(1);
+    // If arg1 is a pure number, it's the effort level, not a path
+    let path = arg1.filter(|s| s.parse::<u32>().is_err());
 
     let data = if let Some(p) = path {
         std::fs::read(&p).unwrap()
@@ -19,14 +21,22 @@ fn main() {
 
     eprintln!("Input: {} bytes", data.len());
 
-    let mut compressor = zenflate::Compressor::new(zenflate::CompressionLevel::new(31));
+    // effort = iterations + 16 (E31=15i, E76=60i)
+    // Use last numeric arg, or default to 31
+    let effort: u32 = std::env::args()
+        .skip(1)
+        .filter_map(|s| s.parse::<u32>().ok())
+        .last()
+        .unwrap_or(31);
+
+    let mut compressor = zenflate::Compressor::new(zenflate::CompressionLevel::new(effort));
     let bound = zenflate::Compressor::zlib_compress_bound(data.len());
     let mut output = vec![0u8; bound];
     let len = compressor
         .zlib_compress(&data, &mut output, &zenflate::Unstoppable)
         .unwrap();
 
-    eprintln!("Output: {} bytes", len);
+    eprintln!("Effort {effort} ({}i): {} bytes", effort - 16, len);
 }
 
 fn extract_idat(png: &[u8]) -> Vec<u8> {

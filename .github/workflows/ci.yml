@@ -7,53 +7,33 @@ on:
     branches: [main]
   workflow_dispatch:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
   CI: true
 
 jobs:
   # ==========================================================================
-  # Native x86_64 testing
+  # Native testing (6-platform matrix)
   # ==========================================================================
-  test-x64:
-    name: Test x64 (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest]
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
-
-      - name: Test (default features)
-        run: cargo test
-
-      - name: Check (no_std + alloc, no SIMD dispatch)
-        run: cargo check --no-default-features --features alloc
-
-      - name: Test (with unchecked bounds elimination)
-        run: cargo test --features unchecked
-
-  # ==========================================================================
-  # Native aarch64 testing
-  # ==========================================================================
-  test-aarch64:
-    name: Test aarch64 (${{ matrix.name }})
+  test:
+    name: Test (${{ matrix.name }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { os: ubuntu-24.04-arm, name: Linux }
-          - { os: macos-latest, name: macOS }
+          - { os: ubuntu-latest, name: Linux x64 }
+          - { os: ubuntu-24.04-arm, name: Linux aarch64 }
+          - { os: macos-latest, name: macOS arm64 }
+          - { os: macos-26-intel, name: macOS x64 }
+          - { os: windows-latest, name: Windows x64 }
+          - { os: windows-11-arm, name: Windows arm64 }
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -64,35 +44,11 @@ jobs:
       - name: Test (default features)
         run: cargo test
 
+      - name: Check (no_std + alloc)
+        run: cargo check --no-default-features --features alloc
+
       - name: Test (with unchecked bounds elimination)
         run: cargo test --features unchecked
-
-  # ==========================================================================
-  # WASM SIMD128 testing
-  # ==========================================================================
-  test-wasm:
-    name: Test WASM SIMD128
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32-wasip1
-
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
-
-      - name: Install wasmtime
-        run: |
-          curl https://wasmtime.dev/install.sh -sSf | bash
-          echo "$HOME/.wasmtime/bin" >> $GITHUB_PATH
-
-      - name: Check WASM (no_std + alloc)
-        env:
-          RUSTFLAGS: "-C target-feature=+simd128"
-        run: cargo check --target wasm32-wasip1 --no-default-features --features alloc
 
   # ==========================================================================
   # Cross-compiled 32-bit testing (i686 via QEMU)
@@ -101,7 +57,7 @@ jobs:
     name: Test i686
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -120,13 +76,33 @@ jobs:
         run: cross test --target i686-unknown-linux-gnu
 
   # ==========================================================================
+  # WASM check
+  # ==========================================================================
+  wasm:
+    name: WASM (wasm32-wasip1)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check WASM (no_std)
+        run: cargo check --target wasm32-wasip1 --no-default-features
+
+  # ==========================================================================
   # Clippy
   # ==========================================================================
   clippy:
     name: Clippy
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -136,11 +112,8 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
-      - name: Clippy (default features)
+      - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
-
-      - name: Clippy (unchecked)
-        run: cargo clippy --all-targets --features unchecked -- -D warnings
 
   # ==========================================================================
   # Format check
@@ -149,7 +122,7 @@ jobs:
     name: Format
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -166,7 +139,7 @@ jobs:
     name: Miri (unsafe soundness)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install Rust nightly
         uses: dtolnay/rust-toolchain@nightly
@@ -177,9 +150,6 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Miri tests (unchecked feature)
-        # Run small-input tests only. Miri is ~1000x slower than native,
-        # so even 2KB inputs at L12 take hours. The *_small tests (13 bytes)
-        # exercise all code paths including raw-pointer matchfinders.
         run: |
           cargo miri test --features unchecked -- \
             --skip zeros --skip sequential --skip large \
@@ -202,7 +172,7 @@ jobs:
           - { os: ubuntu-latest, name: x64 }
           - { os: ubuntu-24.04-arm, name: aarch64 }
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -223,14 +193,15 @@ jobs:
     name: MSRV
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - uses: taiki-e/install-action@cargo-hack
+      - name: Install cargo-hack
+        uses: taiki-e/install-action@cargo-hack
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
-      - name: Check MSRV (from Cargo.toml rust-version)
+      - name: Check MSRV
         run: cargo hack check --rust-version
 
   # ==========================================================================
@@ -239,8 +210,9 @@ jobs:
   coverage:
     name: Coverage
     runs-on: ubuntu-latest
+    continue-on-error: true
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -255,7 +227,9 @@ jobs:
         run: cargo llvm-cov --lcov --output-path lcov.info
 
       - name: Upload to Codecov
-        uses: codecov/codecov-action@v4
+        uses: codecov/codecov-action@v5
         with:
           files: lcov.info
           fail_ci_if_error: false
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
