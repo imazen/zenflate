@@ -13,8 +13,15 @@ fn main() {
         std::fs::read(&p).unwrap()
     } else {
         // Use the same real PNG data that zenzop's profile_squeeze uses
-        let png_path = "/home/lilith/work/codec-corpus/clic2025-1024/0d154749c7771f58e89ad343653ec4e20d6f037da829f47f5598e5d0a4ab61f0.png";
-        let png = std::fs::read(png_path).unwrap();
+        let corpus = std::env::var("CODEC_CORPUS_DIR").unwrap_or_else(|_| {
+            let parent = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+            parent.join("codec-corpus").to_string_lossy().into_owned()
+        });
+        let png_path = format!(
+            "{corpus}/clic2025-1024/0d154749c7771f58e89ad343653ec4e20d6f037da829f47f5598e5d0a4ab61f0.png"
+        );
+        let png = std::fs::read(&png_path)
+            .unwrap_or_else(|e| panic!("Failed to read {png_path}: {e}. Set CODEC_CORPUS_DIR."));
         let idat = extract_idat(&png);
         decompress_zlib(&idat)
     };
