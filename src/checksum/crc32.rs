@@ -193,8 +193,6 @@ macro_rules! barrett_reduce {
 #[arcane]
 #[allow(clippy::incompatible_msrv)] // avx512 feature requires rustc 1.89+
 fn crc32_impl_v4x(_token: X64V4xToken, crc: u32, data: &[u8]) -> u32 {
-    use safe_unaligned_simd::x86_64::{_mm_loadu_si128, _mm256_loadu_si256, _mm512_loadu_si512};
-
     let len = data.len();
 
     // Need at least 64 bytes for 512-bit path
@@ -400,8 +398,6 @@ fn crc32_impl_v4x(_token: X64V4xToken, crc: u32, data: &[u8]) -> u32 {
 #[cfg(target_arch = "x86_64")]
 #[arcane]
 fn crc32_impl_x64_crypto(_token: X64CryptoToken, crc: u32, data: &[u8]) -> u32 {
-    use safe_unaligned_simd::x86_64::_mm_loadu_si128;
-
     let len = data.len();
 
     // PCLMULQDQ needs at least 16 bytes
@@ -563,8 +559,6 @@ macro_rules! neon_barrett_reduce {
 #[cfg(target_arch = "aarch64")]
 #[arcane]
 fn crc32_impl_neon_aes(_token: NeonAesToken, crc: u32, data: &[u8]) -> u32 {
-    use safe_unaligned_simd::aarch64::{vld1q_u8, vld1q_u64};
-
     let len = data.len();
 
     // Need at least 16 bytes for PMULL path

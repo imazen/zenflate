@@ -45,6 +45,7 @@
 - Bumped `safe_unaligned_simd` minimum to 0.2.5
 - Updated archmage/magetypes to 0.9
 - Added `libm` dependency for `no_std` floating-point math
+- Removed `safe_unaligned_simd` direct dependency (use archmage prelude re-exports)
 
 ## 0.2.1
 

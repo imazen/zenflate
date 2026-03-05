@@ -79,8 +79,6 @@ pub fn adler32_combine(adler1: u32, adler2: u32, len2: usize) -> u32 {
 #[arcane]
 #[allow(clippy::incompatible_msrv)]
 fn adler32_impl_v4x(_token: X64V4xToken, adler: u32, data: &[u8]) -> u32 {
-    use safe_unaligned_simd::x86_64::_mm512_loadu_si512;
-
     const VL: usize = 64;
     // Round down to multiple of 4*VL = 256
     const MAX_SIMD_CHUNK: usize = MAX_CHUNK_LEN & !(4 * VL - 1);
@@ -235,8 +233,6 @@ fn adler32_impl_v4x(_token: X64V4xToken, adler: u32, data: &[u8]) -> u32 {
 #[arcane]
 #[allow(clippy::incompatible_msrv)]
 fn adler32_impl_v4(_token: X64V4Token, adler: u32, data: &[u8]) -> u32 {
-    use safe_unaligned_simd::x86_64::_mm512_loadu_si512;
-
     const VL: usize = 64;
     // Limit 16-bit byte_sums counters to i16::MAX:
     // 2*VL*(i16::MAX/u8::MAX) = 128*128 = 16384. min(16384, 5552) & !127 = 5504
@@ -388,8 +384,6 @@ fn adler32_impl_v4(_token: X64V4Token, adler: u32, data: &[u8]) -> u32 {
 #[cfg(target_arch = "x86_64")]
 #[arcane]
 fn adler32_impl_v3(_token: Desktop64, adler: u32, data: &[u8]) -> u32 {
-    use safe_unaligned_simd::x86_64::_mm256_loadu_si256;
-
     const VL: usize = 32;
     // Max chunk: limit 16-bit byte_sums counters to i16::MAX
     // 2*VL*(i16::MAX/u8::MAX) = 64*128 = 8192. min(8192, 5552) & !63 = 5504
@@ -528,8 +522,6 @@ fn adler32_impl_v3(_token: Desktop64, adler: u32, data: &[u8]) -> u32 {
 #[cfg(target_arch = "aarch64")]
 #[arcane]
 fn adler32_impl_neon(_token: NeonToken, adler: u32, data: &[u8]) -> u32 {
-    use safe_unaligned_simd::aarch64::{vld1q_u8, vld1q_u16};
-
     // Weight tables for s2: position weights [64, 63, ..., 1] split into 8 u16x8 vectors.
     // Within each 64-byte block, byte at position i contributes weight (64 - i) to s2.
     static MULTS_A: [u16; 8] = [64, 63, 62, 61, 60, 59, 58, 57];
@@ -658,8 +650,6 @@ fn adler32_impl_neon(_token: NeonToken, adler: u32, data: &[u8]) -> u32 {
 #[cfg(target_arch = "wasm32")]
 #[arcane]
 fn adler32_impl_wasm128(_token: Wasm128Token, adler: u32, data: &[u8]) -> u32 {
-    use safe_unaligned_simd::wasm32::v128_load;
-
     const VL: usize = 16;
     // Limit 16-bit byte_sums counters to i16::MAX:
     // 2*VL*(i16::MAX/u8::MAX) = 32*128 = 4096. min(4096, 5552) & !31 = 4096
