@@ -3,7 +3,7 @@
 [![CI](https://github.com/imazen/zenflate/actions/workflows/ci.yml/badge.svg)](https://github.com/imazen/zenflate/actions/workflows/ci.yml)
 [![crates.io](https://img.shields.io/crates/v/zenflate.svg)](https://crates.io/crates/zenflate)
 [![docs.rs](https://docs.rs/zenflate/badge.svg)](https://docs.rs/zenflate)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-blue.svg)](LICENSE)
 [![MSRV: 1.89](https://img.shields.io/badge/MSRV-1.89-blue.svg)](https://blog.rust-lang.org/)
 
 Pure Rust DEFLATE/zlib/gzip compression and decompression.
@@ -354,4 +354,8 @@ Developed with Claude (Anthropic). Not all code manually reviewed. Review critic
 
 ## License
 
-MIT
+Sustainable, large-scale open source work requires a funding model, and I have been doing this full-time for 15 years. If you are using this for closed-source development AND make over $1 million per year, you'll need to buy a commercial license at https://www.imazen.io/pricing
+
+Commercial licenses are similar to the Apache 2 license but company-specific, and on a sliding scale. You can also use this under the AGPL v3.
+
+Portions derived from [libdeflate](https://github.com/ebiggers/libdeflate) (MIT, Copyright 2016 Eric Biggers / 2024 Google LLC) and [Zopfli](https://github.com/google/zopfli) (Apache-2.0, Google). See [Acknowledgments](#acknowledgments) for full attribution.
