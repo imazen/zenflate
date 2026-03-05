@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.0
 
 ### Added
 - **FullOptimal compression** (Zopfli-style iterative optimization)
@@ -32,6 +32,8 @@
 - Swap (dist, length) -> (length, dist) return order from match loop
 - `fuse_7` precode encoding counted 8 positions instead of 7
 - ECT optimizations suppressed in libdeflate compat mode
+- `no_std + alloc` compilation: `f64::log2()` in full-optimal replaced with
+  `libm::log2`, unused imports removed
 
 ### Changed
 - Project description updated: no longer described as "a port of libdeflate"
@@ -42,6 +44,7 @@
 - Edition 2024, MSRV 1.89
 - Bumped `safe_unaligned_simd` minimum to 0.2.5
 - Updated archmage/magetypes to 0.9
+- Added `libm` dependency for `no_std` floating-point math
 
 ## 0.2.1
 

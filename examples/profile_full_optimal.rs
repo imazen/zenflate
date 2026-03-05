@@ -3,7 +3,6 @@
 /// Usage: cargo run --release --example profile_full_optimal [-- /path/to/filtered_data.bin]
 ///
 /// Without arguments, compresses zenzop's profile_squeeze test data (real PNG).
-
 fn main() {
     let arg1 = std::env::args().nth(1);
     // If arg1 is a pure number, it's the effort level, not a path
@@ -35,14 +34,14 @@ fn main() {
     let effort: u32 = std::env::args()
         .skip(1)
         .filter_map(|s| s.parse::<u32>().ok())
-        .last()
+        .next_back()
         .unwrap_or(31);
 
     let mut compressor = zenflate::Compressor::new(zenflate::CompressionLevel::new(effort));
     let bound = zenflate::Compressor::zlib_compress_bound(data.len());
     let mut output = vec![0u8; bound];
     let len = compressor
-        .zlib_compress(&data, &mut output, &zenflate::Unstoppable)
+        .zlib_compress(&data, &mut output, zenflate::Unstoppable)
         .unwrap();
 
     eprintln!("Effort {effort} ({}i): {} bytes", effort - 16, len);
@@ -66,7 +65,7 @@ fn decompress_zlib(data: &[u8]) -> Vec<u8> {
     let mut d = zenflate::Decompressor::new();
     let mut out = vec![0u8; data.len() * 10];
     loop {
-        match d.zlib_decompress(data, &mut out, &zenflate::Unstoppable) {
+        match d.zlib_decompress(data, &mut out, zenflate::Unstoppable) {
             Ok(o) => {
                 out.truncate(o.output_written);
                 return out;
