@@ -1,6 +1,5 @@
-//! CRC-32 checksum for gzip. Scalar and folding algorithms ported from
-//! libdeflate's crc32.c; SIMD implementations extended with additional
-//! targets (VPCLMULQDQ 512-bit, aarch64 PMULL) via archmage.
+//! CRC-32 checksum for gzip. Scalar slice-by-8 and SIMD folding
+//! implementations via archmage.
 //!
 //! Uses SIMD acceleration when available via archmage:
 //! - VPCLMULQDQ 512-bit folding (x86_64-v4x: AVX-512 + VPCLMULQDQ)
@@ -50,7 +49,7 @@ pub fn crc32(crc: u32, data: &[u8]) -> u32 {
 /// `crc32(0, data1 || data2)` in O(log(len2)) time without needing the
 /// original data. Used for parallel checksum computation.
 ///
-/// Algorithm from zlib: CRC-32 is linear over GF(2), so
+/// CRC-32 is linear over GF(2), so
 /// `crc(A||B) = crc(A) * x^(8*len(B)) + crc(B)` in the CRC polynomial ring.
 /// The multiplication by `x^n mod G(x)` is computed via matrix repeated squaring.
 #[must_use]

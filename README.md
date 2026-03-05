@@ -3,7 +3,7 @@
 [![CI](https://github.com/imazen/zenflate/actions/workflows/ci.yml/badge.svg)](https://github.com/imazen/zenflate/actions/workflows/ci.yml)
 [![crates.io](https://img.shields.io/crates/v/zenflate.svg)](https://crates.io/crates/zenflate)
 [![docs.rs](https://docs.rs/zenflate/badge.svg)](https://docs.rs/zenflate)
-[![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-blue.svg)](LICENSE)
+[![License: AGPL-3.0 or Commercial](https://img.shields.io/badge/license-AGPL--3.0%20%2F%20Commercial-blue.svg)](LICENSE)
 [![MSRV: 1.89](https://img.shields.io/badge/MSRV-1.89-blue.svg)](https://blog.rust-lang.org/)
 
 Pure Rust DEFLATE/zlib/gzip compression and decompression.
@@ -354,8 +354,18 @@ Developed with Claude (Anthropic). Not all code manually reviewed. Review critic
 
 ## License
 
-Sustainable, large-scale open source work requires a funding model, and I have been doing this full-time for 15 years. If you are using this for closed-source development AND make over $1 million per year, you'll need to buy a commercial license at https://www.imazen.io/pricing
+Dual-licensed: [AGPL-3.0](LICENSE) or a [commercial license](https://www.imazen.io/pricing).
 
-Commercial licenses are similar to the Apache 2 license but company-specific, and on a sliding scale. You can also use this under the AGPL v3.
+Sustainable, large-scale open source work requires a funding model, and I've
+been doing this full-time for 15 years. If you use zenflate in closed-source
+software AND your company makes over $1M/year in revenue, you need a commercial
+license. Commercial licenses are company-specific, on a sliding scale, and
+similar to Apache 2.0 in what they permit. Everyone else can use this under
+the AGPL v3.
 
-Portions derived from [libdeflate](https://github.com/ebiggers/libdeflate) (MIT, Copyright 2016 Eric Biggers / 2024 Google LLC) and [Zopfli](https://github.com/google/zopfli) (Apache-2.0, Google). See [Acknowledgments](#acknowledgments) for full attribution.
+zenflate is an independent Rust implementation drawing on algorithms from
+several permissively-licensed projects. No original C/C++ code was copied.
+See [LICENSE](LICENSE) for detailed provenance of every component and the
+full text of all upstream licenses (libdeflate MIT, Zopfli Apache-2.0,
+Brotli MIT, pigz zlib). See [Acknowledgments](#acknowledgments) for links
+to the upstream projects.
