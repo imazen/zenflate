@@ -16,7 +16,7 @@ pub(crate) mod near_optimal;
 pub(crate) mod sequences;
 
 #[cfg(not(feature = "std"))]
-use alloc::{boxed::Box, vec, vec::Vec};
+use alloc::{boxed::Box, vec::Vec};
 
 use crate::checksum::{adler32, crc32};
 use crate::constants::*;

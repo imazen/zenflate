@@ -12,7 +12,7 @@
 //! but requires nearly twice as much memory.
 
 #[cfg(not(feature = "std"))]
-use alloc::{boxed::Box, vec, vec::Vec};
+use alloc::vec::Vec;
 
 #[cfg(not(feature = "unchecked"))]
 use super::lz_extend;

@@ -725,12 +725,12 @@ impl SymbolStats {
         fn calculate_and_store(count: &[usize], bitlengths: &mut [f64]) {
             let n = count.len();
             let sum: usize = count.iter().sum();
-            let log2sum = (if sum == 0 { n } else { sum } as f64).log2();
+            let log2sum = libm::log2(if sum == 0 { n } else { sum } as f64);
             for i in 0..n {
                 if count[i] == 0 {
                     bitlengths[i] = log2sum;
                 } else {
-                    bitlengths[i] = log2sum - (count[i] as f64).log2();
+                    bitlengths[i] = log2sum - libm::log2(count[i] as f64);
                 }
             }
         }

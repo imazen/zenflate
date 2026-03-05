@@ -10,7 +10,7 @@
 //! from the resulting Huffman codes.
 
 #[cfg(not(feature = "std"))]
-use alloc::{boxed::Box, vec, vec::Vec};
+use alloc::{boxed::Box, vec::Vec};
 
 use crate::constants::*;
 use crate::matchfinder::bt::{BtMatchfinder, LzMatch};
