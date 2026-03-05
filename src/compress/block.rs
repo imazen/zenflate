@@ -1,7 +1,9 @@
 //! Block flushing: choose best block type and encode it.
 //!
-//! Ported from libdeflate's `deflate_flush_block()`, `deflate_precompute_huffman_header()`,
-//! `deflate_compute_precode_items()`, `deflate_compute_full_len_codewords()`.
+//! Core block type selection and precode encoding ported from libdeflate's
+//! `deflate_flush_block()` and related functions. Extended with multi-strategy
+//! Huffman optimization (Brotli-inspired and Zopfli-style frequency smoothing,
+//! max-bits sweep, exhaustive precode search).
 
 use crate::constants::*;
 

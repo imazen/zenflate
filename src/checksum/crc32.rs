@@ -1,4 +1,6 @@
-//! CRC-32 checksum for gzip, ported from libdeflate's crc32.c.
+//! CRC-32 checksum for gzip. Scalar and folding algorithms ported from
+//! libdeflate's crc32.c; SIMD implementations extended with additional
+//! targets (VPCLMULQDQ 512-bit, aarch64 PMULL) via archmage.
 //!
 //! Uses SIMD acceleration when available via archmage:
 //! - VPCLMULQDQ 512-bit folding (x86_64-v4x: AVX-512 + VPCLMULQDQ)

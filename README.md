@@ -6,7 +6,7 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![MSRV: 1.89](https://img.shields.io/badge/MSRV-1.89-blue.svg)](https://blog.rust-lang.org/)
 
-Pure Rust DEFLATE/zlib/gzip compression and decompression, ported from [libdeflate](https://github.com/ebiggers/libdeflate).
+Pure Rust DEFLATE/zlib/gzip compression and decompression.
 
 `no_std` compatible (`alloc` required for compression and streaming decompression; decompression is fully stack-allocated).
 
@@ -262,16 +262,87 @@ zenflate and libdeflate produce **byte-identical output** at every level
 
 ## How it works
 
-A line-by-line port of Eric Biggers' [libdeflate](https://github.com/ebiggers/libdeflate) to safe Rust (`#![forbid(unsafe_code)]` by default). Same matchfinders (hash table, hash chains, binary trees), same Huffman construction, same block splitting heuristics, same near-optimal parser.
+zenflate started as a port of Eric Biggers'
+[libdeflate](https://github.com/ebiggers/libdeflate) and has grown into its
+own implementation. The core decompressor, matchfinders, Huffman construction,
+and block splitting trace back to libdeflate. On top of that foundation,
+zenflate pulls in techniques from several other projects and adds original work:
 
-zenflate extends libdeflate with:
-- **Effort-based compression (0-30)** with additional strategies (turbo, fast HT) and finer-grained parameter tuning between libdeflate's 13 fixed levels.
-- **Parallel gzip compression** using pigz-style chunking with 32KB dictionary overlap and combined CRC-32.
+- **Effort-based compression (0-30)** with six strategies and named presets,
+  replacing libdeflate's fixed 0-12 levels. Includes two original matchfinder
+  designs (turbo, fast HT) for the low-effort range.
+- **Full-optimal compression** (Zopfli-style iterative squeeze), ported from
+  [zenzop](https://github.com/imazen/zenzop) with Katajainen bounded
+  package-merge for optimal length-limited Huffman codes.
+- **Multi-strategy Huffman optimization** combining Brotli-inspired frequency
+  smoothing, Zopfli-style RLE optimization, and max-bits sweeps to find the
+  smallest encoding per block.
+- **Parallel gzip compression** using pigz-style chunking with 32KB dictionary
+  overlap and combined CRC-32 via GF(2) matrix.
 - **Streaming decompression** via a pull-based API that works in `no_std + alloc`.
+- **Snapshot/restore** (`CompressorSnapshot`) for branching compression state —
+  try different inputs from the same point and pick the best result (designed
+  for PNG filter selection).
+- **Cancellation** via the `Stop` trait for cooperative interruption.
 
-The C original is faster — zenflate runs at roughly 0.8-0.9x the speed of libdeflate depending on level and data. The gap comes from register pressure differences and bounds checking. The `unchecked` feature closes some of this gap.
+Safe Rust throughout (`#![forbid(unsafe_code)]` by default), with an opt-in
+`unchecked` feature for bounds-check elimination in compression hot paths.
+SIMD acceleration for checksums (AVX2/AVX-512/PCLMULQDQ on x86, NEON/PMULL on
+aarch64, simd128 on WASM) via [archmage](https://crates.io/crates/archmage)
+with zero `unsafe`.
 
-SIMD acceleration for checksums (AVX2/AVX-512/PCLMULQDQ on x86, NEON/PMULL on aarch64, simd128 on WASM). Runtime feature detection via [archmage](https://crates.io/crates/archmage) with zero `unsafe`.
+zenflate can produce byte-identical output to libdeflate at every level (via
+`CompressionLevel::libdeflate(n)`), and runs at roughly 0.8-0.9x the speed
+of the C original depending on level and data. The gap comes from register
+pressure differences and bounds checking.
+
+### Acknowledgments
+
+- [libdeflate](https://github.com/ebiggers/libdeflate) by Eric Biggers —
+  decompressor, matchfinders (hash table, hash chains, binary trees), Huffman
+  construction, block splitting, near-optimal parser, checksum implementations
+- [Zopfli](https://github.com/google/zopfli) by Lode Vandevenne and
+  Jyrki Rissanen (Google) — full-optimal parsing concept, iterative cost
+  refinement, `optimize_huffman_for_rle` (Zopfli-style variant)
+- [zenzop](https://github.com/imazen/zenzop) — Rust Zopfli port used as the
+  source for katajainen, squeeze, and block splitter modules
+- [Brotli](https://github.com/google/brotli) (Google) — frequency smoothing
+  algorithm for Huffman RLE encoding
+- [pigz](https://zlib.net/pigz/) by Mark Adler — parallel gzip chunking
+  strategy with dictionary overlap
+
+### What's different from libdeflate
+
+`CompressionLevel::libdeflate(n)` produces byte-identical output to C. The
+recommended effort-based API (`CompressionLevel::new(n)`) uses different
+algorithms and tuning at every level:
+
+| Effort | Strategy | Matchfinder | Encoding | vs libdeflate |
+|--------|----------|-------------|----------|---------------|
+| 0 | Store | — | — | Same |
+| 1-4 | Turbo | Single-entry hash, limited skip updates | Standard | **Original** matchfinder, not in libdeflate |
+| 5-9 | FastHt | 2-entry hash, limited skip updates | Standard | **Original** matchfinder, not in libdeflate |
+| 10 | Greedy | Hash chains | Standard | `good_match` early-exit (libdeflate: disabled) |
+| 11-17 | Lazy | Hash chains | Standard | `good_match`/`max_lazy` tuning curves (libdeflate: disabled) |
+| 18-22 | Lazy2 | Hash chains | Standard | `good_match`/`max_lazy` tuning (libdeflate: disabled) |
+| 23-25 | NearOptimal | Binary trees | Exhaustive precode search | Multi-strategy precode flag search |
+| 26-27 | NearOptimal | Binary trees | + multi-strategy Huffman | + Brotli/Zopfli RLE smoothing, reduced max_bits sweep |
+| 28-30 | NearOptimal | Binary trees | + diversified optimization | + randomized cost model, 20-30 passes (libdeflate: 2-10) |
+| 31+ | FullOptimal | Zopfli hash chains | Katajainen package-merge | **Entirely different** algorithm (from zenzop) |
+
+At effort 10-22, the core matching algorithms are the same as libdeflate
+(greedy, lazy, double-lazy with hash chains), but zenflate adds `good_match`
+and `max_lazy` early-exit thresholds that libdeflate leaves disabled. These
+let the compressor skip deep chain searches and lazy evaluations when it
+already has a good enough match, trading a small amount of compression ratio
+for speed at lower effort levels.
+
+At effort 23+, the near-optimal parser is the same backward DP as
+libdeflate, but the block encoding pipeline diverges: multi-strategy
+Huffman code construction tries Brotli-inspired and Zopfli-style frequency
+smoothing with max-bits sweeps to find smaller encodings. At effort 28+,
+the optimizer runs 20-30 passes with randomized cost diversification
+instead of libdeflate's fixed 2-10 passes.
 
 ## MSRV
 

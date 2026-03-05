@@ -1,4 +1,5 @@
-//! Adler-32 checksum, ported from libdeflate's adler32.c.
+//! Adler-32 checksum. Scalar algorithm ported from libdeflate's adler32.c;
+//! SIMD implementations are original work using archmage for runtime dispatch.
 //!
 //! Uses SIMD acceleration when available via archmage:
 //! - AVX-512 VNNI 512-bit (x86_64-v4x): `vpdpbusd zmm` for single-instruction dot products

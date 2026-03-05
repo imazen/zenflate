@@ -1,6 +1,10 @@
 //! DEFLATE/zlib/gzip compression.
 //!
-//! Ported from libdeflate's `deflate_compress.c`, `zlib_compress.c`, `gzip_compress.c`.
+//! Core compression loop, block flushing, and matchfinder integration originally
+//! ported from libdeflate's `deflate_compress.c`, `zlib_compress.c`,
+//! `gzip_compress.c`. Extended with effort-based levels (0-30), turbo and
+//! fast HT matchfinder strategies, parallel gzip, snapshot/restore, and
+//! full-optimal (Zopfli-style) compression.
 
 pub(crate) mod bitstream;
 pub(crate) mod block;
@@ -828,14 +832,19 @@ impl Compressor {
         output: &mut [u8],
         stop: impl enough::Stop,
     ) -> Result<usize, CompressionError> {
-        // zlib header: CMF=0x78, FLG depends on level
-        let flg = match self.level.level() {
-            0..=1 => 0x01u8,  // fastest
-            2..=5 => 0x5Eu8,  // fast
-            6 => 0x9Cu8,      // default
-            7..=12 => 0xDAu8, // best
-            _ => 0x9Cu8,
+        // zlib header: CMF=0x78, FLG level hint depends on compression level.
+        // Matches C libdeflate's mapping: <2 fastest, <6 fast, <8 default, >=8 slowest.
+        let level = self.level.level();
+        let level_hint: u8 = if level < 2 {
+            0 // ZLIB_FASTEST_COMPRESSION
+        } else if level < 6 {
+            1 // ZLIB_FAST_COMPRESSION
+        } else if level < 8 {
+            2 // ZLIB_DEFAULT_COMPRESSION
+        } else {
+            3 // ZLIB_SLOWEST_COMPRESSION
         };
+        let flg = level_hint << 6;
         // CMF = 0x78 (deflate, window size 32K)
         let cmf = 0x78u8;
         // Adjust FLG so (CMF*256 + FLG) % 31 == 0
@@ -880,7 +889,15 @@ impl Compressor {
         output[2] = 0x08; // CM = deflate
         output[3] = 0x00; // FLG = none
         output[4..8].copy_from_slice(&[0, 0, 0, 0]); // MTIME
-        output[8] = 0x00; // XFL
+        // XFL: matches C libdeflate — <2 fastest (0x04), >=8 slowest (0x02), else 0
+        let level = self.level.level();
+        output[8] = if level < 2 {
+            0x04
+        } else if level >= 8 {
+            0x02
+        } else {
+            0x00
+        };
         output[9] = 0xFF; // OS = unknown
 
         let compressed_size = self.deflate_compress(input, &mut output[10..], stop)?;
@@ -1691,6 +1708,9 @@ impl Compressor {
             );
         }
 
+        // next_hash persists across blocks (matches C's behavior)
+        let mut next_hash = 0u32;
+
         while in_next < in_end && !os.overflow {
             stop.check()?;
             let in_block_begin = in_next;
@@ -1700,16 +1720,6 @@ impl Compressor {
 
             self.freqs.reset();
             self.sequences[0].litrunlen_and_length = 0;
-
-            // Precompute first hash for this block
-            let mut next_hash = if in_next + 4 <= in_end {
-                lz_hash(
-                    crate::fast_bytes::load_u32_le(input, in_next),
-                    HT_MATCHFINDER_HASH_ORDER,
-                )
-            } else {
-                0
-            };
 
             while in_next < in_max_block_end && seq_idx < FAST_SEQ_STORE_LENGTH {
                 let remaining = in_end - in_next;
@@ -3195,7 +3205,14 @@ impl Compressor {
         output[2] = 0x08; // CM = deflate
         output[3] = 0x00; // FLG = none
         output[4..8].copy_from_slice(&[0, 0, 0, 0]); // MTIME
-        output[8] = 0x00; // XFL
+        let level = self.level.level();
+        output[8] = if level < 2 {
+            0x04
+        } else if level >= 8 {
+            0x02
+        } else {
+            0x00
+        };
         output[9] = 0xFF; // OS = unknown
 
         // Concatenate DEFLATE chunks.
@@ -3947,6 +3964,159 @@ mod tests {
         }
     }
 
+    /// Helper: compare zenflate vs C libdeflate compressed output byte-for-byte.
+    /// Collects all failures and reports them at the end.
+    fn assert_byte_identical_deflate(data: &[u8], levels: core::ops::RangeInclusive<i32>) {
+        let mut failures = alloc::vec::Vec::new();
+        for level in levels {
+            let mut zc = Compressor::new(CompressionLevel::libdeflate(level as u32));
+            let bound = Compressor::deflate_compress_bound(data.len());
+            let mut z_compressed = alloc::vec![0u8; bound];
+            let z_csize = zc
+                .deflate_compress(data, &mut z_compressed, enough::Unstoppable)
+                .unwrap_or_else(|e| panic!("libdeflate({level}): zenflate compress failed: {e}"));
+
+            let mut lc =
+                libdeflater::Compressor::new(libdeflater::CompressionLvl::new(level).unwrap());
+            let c_bound = lc.deflate_compress_bound(data.len());
+            let mut c_compressed = alloc::vec![0u8; c_bound];
+            let c_csize = lc.deflate_compress(data, &mut c_compressed).unwrap();
+
+            if z_csize != c_csize {
+                failures.push(alloc::format!(
+                    "L{level} deflate: size mismatch zenflate={z_csize} C={c_csize}"
+                ));
+            } else if z_compressed[..z_csize] != c_compressed[..c_csize] {
+                // Find first differing byte
+                let pos = z_compressed[..z_csize]
+                    .iter()
+                    .zip(&c_compressed[..c_csize])
+                    .position(|(a, b)| a != b)
+                    .unwrap();
+                failures.push(alloc::format!(
+                    "L{level} deflate: bytes differ at offset {pos}/{z_csize}"
+                ));
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "byte-identical failures:\n{}",
+            failures.join("\n")
+        );
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn test_libdeflate_byte_identical_sequential() {
+        let data: Vec<u8> = (0..=255u8).cycle().take(50_000).collect();
+        assert_byte_identical_deflate(&data, 0..=12);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn test_libdeflate_byte_identical_mixed() {
+        let mut data = Vec::with_capacity(100_000);
+        for i in 0..100_000u32 {
+            data.push(match i % 100 {
+                0..20 => 0u8,
+                20..40 => (i % 256) as u8,
+                40..60 => ((i * 7 + 13) % 256) as u8,
+                60..80 => b'A' + (i % 26) as u8,
+                _ => 0xFF,
+            });
+        }
+        assert_byte_identical_deflate(&data, 0..=12);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn test_libdeflate_byte_identical_zeros() {
+        let data = vec![0u8; 100_000];
+        assert_byte_identical_deflate(&data, 0..=12);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn test_libdeflate_byte_identical_gzip() {
+        let data: Vec<u8> = (0..=255u8).cycle().take(50_000).collect();
+        let mut failures = alloc::vec::Vec::new();
+        for level in 1..=12i32 {
+            let mut zc = Compressor::new(CompressionLevel::libdeflate(level as u32));
+            let bound = Compressor::gzip_compress_bound(data.len());
+            let mut z_compressed = vec![0u8; bound];
+            let z_csize = zc
+                .gzip_compress(&data, &mut z_compressed, enough::Unstoppable)
+                .unwrap();
+
+            let mut lc =
+                libdeflater::Compressor::new(libdeflater::CompressionLvl::new(level).unwrap());
+            let c_bound = lc.gzip_compress_bound(data.len());
+            let mut c_compressed = vec![0u8; c_bound];
+            let c_csize = lc.gzip_compress(&data, &mut c_compressed).unwrap();
+
+            if z_csize != c_csize {
+                failures.push(alloc::format!(
+                    "L{level} gzip: size mismatch zenflate={z_csize} C={c_csize}"
+                ));
+            } else if z_compressed[..z_csize] != c_compressed[..c_csize] {
+                let pos = z_compressed[..z_csize]
+                    .iter()
+                    .zip(&c_compressed[..c_csize])
+                    .position(|(a, b)| a != b)
+                    .unwrap();
+                failures.push(alloc::format!(
+                    "L{level} gzip: bytes differ at offset {pos}/{z_csize}"
+                ));
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "byte-identical failures:\n{}",
+            failures.join("\n")
+        );
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn test_libdeflate_byte_identical_zlib() {
+        let data: Vec<u8> = (0..=255u8).cycle().take(50_000).collect();
+        let mut failures = alloc::vec::Vec::new();
+        for level in 1..=12i32 {
+            let mut zc = Compressor::new(CompressionLevel::libdeflate(level as u32));
+            let bound = Compressor::zlib_compress_bound(data.len());
+            let mut z_compressed = vec![0u8; bound];
+            let z_csize = zc
+                .zlib_compress(&data, &mut z_compressed, enough::Unstoppable)
+                .unwrap();
+
+            let mut lc =
+                libdeflater::Compressor::new(libdeflater::CompressionLvl::new(level).unwrap());
+            let c_bound = lc.zlib_compress_bound(data.len());
+            let mut c_compressed = vec![0u8; c_bound];
+            let c_csize = lc.zlib_compress(&data, &mut c_compressed).unwrap();
+
+            if z_csize != c_csize {
+                failures.push(alloc::format!(
+                    "L{level} zlib: size mismatch zenflate={z_csize} C={c_csize}"
+                ));
+            } else if z_compressed[..z_csize] != c_compressed[..c_csize] {
+                let pos = z_compressed[..z_csize]
+                    .iter()
+                    .zip(&c_compressed[..c_csize])
+                    .position(|(a, b)| a != b)
+                    .unwrap();
+                failures.push(alloc::format!(
+                    "L{level} zlib: bytes differ at offset {pos}/{z_csize}"
+                ));
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "byte-identical failures:\n{}",
+            failures.join("\n")
+        );
+    }
+
     #[test]
     fn test_compression_improves_with_level() {
         // Higher levels should generally compress at least as well (or better)
@@ -4366,7 +4536,9 @@ mod tests {
     #[cfg(not(miri))]
     fn test_bitstream_overflow_adaptive_filtered_png() {
         let corpus = std::env::var("CODEC_CORPUS_DIR").unwrap_or_else(|_| {
-            let parent = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+            let parent = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .unwrap();
             parent.join("codec-corpus").to_string_lossy().into_owned()
         });
         let path = format!(

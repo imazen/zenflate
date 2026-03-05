@@ -1,6 +1,8 @@
 //! zenflate: Pure Rust DEFLATE/zlib/gzip compression and decompression.
 //!
-//! A port of [libdeflate](https://github.com/ebiggers/libdeflate) to safe Rust.
+//! Built on techniques from [libdeflate](https://github.com/ebiggers/libdeflate),
+//! [Zopfli](https://github.com/google/zopfli), and
+//! [Brotli](https://github.com/google/brotli).
 //!
 //! - **Compression** ([`Compressor`]) — buffer-to-buffer. Effort 0-30 with named
 //!   presets ([`CompressionLevel::balanced()`], etc.). Parallel gzip via

@@ -1,5 +1,6 @@
-//! DEFLATE decompression, ported from libdeflate's deflate_decompress.c and
-//! decompress_template.h.
+//! DEFLATE decompression. Core decode tables and fastloop ported from
+//! libdeflate's deflate_decompress.c and decompress_template.h. gzip/zlib
+//! wrapper handling and error types are Rust-specific.
 
 #[cfg(feature = "alloc")]
 pub mod streaming;

@@ -1188,7 +1188,13 @@ impl SplitHistograms {
         freqs.litlen[256] += 1; // end symbol
     }
 
-    fn block_cost(&self, lstart: usize, lend: usize, freqs: &mut DeflateFreqs, scratch: &mut HuffmanScratch) -> f64 {
+    fn block_cost(
+        &self,
+        lstart: usize,
+        lend: usize,
+        freqs: &mut DeflateFreqs,
+        scratch: &mut HuffmanScratch,
+    ) -> f64 {
         self.histogram(lstart, lend, freqs);
         f64::from(block_cost_simple(freqs, scratch))
     }

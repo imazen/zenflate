@@ -1,9 +1,10 @@
 # zenflate
 
-Pure Rust port of libdeflate. DEFLATE/zlib/gzip compression and decompression.
+Pure Rust DEFLATE/zlib/gzip compression and decompression.
 
 ## Architecture
-- Port of libdeflate (~14,500 lines C) to safe Rust (forbid(unsafe_code) by default)
+- Built on libdeflate's core algorithms, extended with Zopfli-style optimal parsing, multi-strategy Huffman optimization, and original matchfinder designs
+- Safe Rust (forbid(unsafe_code) by default)
 - Opt-in `unchecked` feature flag for bounds-check elimination in hot paths
 - SIMD via archmage/magetypes
 - Side-by-side testing against C via `libdeflater` crate

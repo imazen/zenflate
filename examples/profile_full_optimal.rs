@@ -14,7 +14,9 @@ fn main() {
     } else {
         // Use the same real PNG data that zenzop's profile_squeeze uses
         let corpus = std::env::var("CODEC_CORPUS_DIR").unwrap_or_else(|_| {
-            let parent = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+            let parent = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .unwrap();
             parent.join("codec-corpus").to_string_lossy().into_owned()
         });
         let png_path = format!(
@@ -50,8 +52,7 @@ fn extract_idat(png: &[u8]) -> Vec<u8> {
     let mut idat = Vec::new();
     let mut pos = 8;
     while pos + 12 <= png.len() {
-        let len =
-            u32::from_be_bytes([png[pos], png[pos + 1], png[pos + 2], png[pos + 3]]) as usize;
+        let len = u32::from_be_bytes([png[pos], png[pos + 1], png[pos + 2], png[pos + 3]]) as usize;
         let chunk_type = &png[pos + 4..pos + 8];
         if chunk_type == b"IDAT" {
             idat.extend_from_slice(&png[pos + 8..pos + 8 + len]);

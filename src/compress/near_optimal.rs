@@ -1,6 +1,8 @@
 //! Near-optimal DEFLATE compression (levels 10-12).
 //!
-//! Ported from libdeflate's near-optimal parsing code in `deflate_compress.c`.
+//! Originally ported from libdeflate's near-optimal parsing code in
+//! `deflate_compress.c`. Extended with diversified cost model initialization,
+//! inter-block cost blending, and multi-pass Huffman refinement.
 //!
 //! Uses a binary tree matchfinder to find all matches at each position,
 //! caches them, then runs iterative backward DP to find the minimum-cost
