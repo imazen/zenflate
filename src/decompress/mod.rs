@@ -1195,7 +1195,14 @@ impl Decompressor {
             // --- Generic decode loop (handles remainder after fastloop) ---
             if !block_done {
                 stop.check()?;
+                // Periodic stop check interval (output bytes). 16KB at 600+ MiB/s ≈ <0.03ms.
+                const DECOMPRESS_STOP_INTERVAL: usize = 16384;
+                let mut next_stop_check = out_pos + DECOMPRESS_STOP_INTERVAL;
                 loop {
+                    if out_pos >= next_stop_check {
+                        stop.check()?;
+                        next_stop_check = out_pos + DECOMPRESS_STOP_INTERVAL;
+                    }
                     refill_bits(
                         &mut bitbuf,
                         &mut bitsleft,

@@ -62,6 +62,11 @@ const FAST_SOFT_MAX_BLOCK_LENGTH: usize = 65535;
 /// Maximum number of sequences for the fastest strategy.
 const FAST_SEQ_STORE_LENGTH: usize = 8192;
 
+/// Interval (in input bytes) between cooperative stop checks within a block.
+/// At ~33 MiB/s (slowest strategy), 16KB ≈ 0.5ms — well under the 10ms target.
+/// With `Unstoppable`, these checks compile to nothing.
+const STOP_CHECK_INTERVAL: usize = 16384;
+
 /// Internal compression strategy.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum InternalStrategy {
@@ -1388,7 +1393,13 @@ impl Compressor {
                 0
             };
 
+            let mut next_stop_check = in_next + STOP_CHECK_INTERVAL;
             while in_next < in_end && seq_idx < FAST_SEQ_STORE_LENGTH {
+                if in_next >= next_stop_check {
+                    stop.check()?;
+                    next_stop_check = in_next + STOP_CHECK_INTERVAL;
+                }
+
                 let remaining = in_end - in_next;
                 let max_len = remaining.min(DEFLATE_MAX_MATCH_LEN as usize) as u32;
                 let nice_len = max_len.min(self.nice_match_length);
@@ -1495,12 +1506,17 @@ impl Compressor {
                 max_search_depth,
             );
 
+            let mut next_stop_check = in_next + STOP_CHECK_INTERVAL;
             if matches!(
                 self.level.strategy(),
                 InternalStrategy::Lazy | InternalStrategy::Lazy2
             ) {
                 // Lazy/lazy2 path
                 loop {
+                    if in_next >= next_stop_check {
+                        stop.check()?;
+                        next_stop_check = in_next + STOP_CHECK_INTERVAL;
+                    }
                     adjust_max_and_nice_len(&mut max_len, &mut nice_len, in_end - in_next);
                     let (mut cur_len, mut cur_offset) = mf.longest_match(
                         input,
@@ -1611,6 +1627,10 @@ impl Compressor {
             } else {
                 // Greedy path (L2-L4)
                 loop {
+                    if in_next >= next_stop_check {
+                        stop.check()?;
+                        next_stop_check = in_next + STOP_CHECK_INTERVAL;
+                    }
                     adjust_max_and_nice_len(&mut max_len, &mut nice_len, in_end - in_next);
                     let (length, offset) = mf.longest_match(
                         input,
@@ -1894,7 +1914,16 @@ impl Compressor {
                 0
             };
 
+            let mut next_stop_check = in_next + STOP_CHECK_INTERVAL;
             while in_next < in_max_block_end && !os.overflow {
+                if in_next >= next_stop_check {
+                    // Sync locals back before checking (stop may return Err)
+                    os.bitbuf = bitbuf;
+                    os.bitcount = bitcount;
+                    stop.check()?;
+                    next_stop_check = in_next + STOP_CHECK_INTERVAL;
+                }
+
                 let remaining = in_end - in_next;
                 let max_len = remaining.min(DEFLATE_MAX_MATCH_LEN as usize) as u32;
                 let nice = max_len.min(nice_len);
@@ -2064,7 +2093,13 @@ impl Compressor {
                 0
             };
 
+            let mut next_stop_check = in_next + STOP_CHECK_INTERVAL;
             while in_next < in_max_block_end && seq_idx < FAST_SEQ_STORE_LENGTH {
+                if in_next >= next_stop_check {
+                    stop.check()?;
+                    next_stop_check = in_next + STOP_CHECK_INTERVAL;
+                }
+
                 let remaining = in_end - in_next;
                 let max_len = remaining.min(DEFLATE_MAX_MATCH_LEN as usize) as u32;
                 let nice_len = max_len.min(self.nice_match_length);
@@ -2179,7 +2214,13 @@ impl Compressor {
                 0
             };
 
+            let mut next_stop_check = in_next + STOP_CHECK_INTERVAL;
             while in_next < in_max_block_end && seq_idx < FAST_SEQ_STORE_LENGTH {
+                if in_next >= next_stop_check {
+                    stop.check()?;
+                    next_stop_check = in_next + STOP_CHECK_INTERVAL;
+                }
+
                 let remaining = in_end - in_next;
                 let max_len = remaining.min(DEFLATE_MAX_MATCH_LEN as usize) as u32;
                 let nice_len = max_len.min(self.nice_match_length);
@@ -2289,7 +2330,13 @@ impl Compressor {
             let min_len =
                 calculate_min_match_len(&input[in_next..in_max_block_end], max_search_depth);
 
+            let mut next_stop_check = in_next + STOP_CHECK_INTERVAL;
             loop {
+                if in_next >= next_stop_check {
+                    stop.check()?;
+                    next_stop_check = in_next + STOP_CHECK_INTERVAL;
+                }
+
                 adjust_max_and_nice_len(&mut max_len, &mut nice_len, in_end - in_next);
 
                 let (length, offset) = mf.longest_match(
@@ -2411,7 +2458,12 @@ impl Compressor {
             let mut min_len =
                 calculate_min_match_len(&input[in_next..in_max_block_end], max_search_depth);
 
+            let mut next_stop_check = in_next + STOP_CHECK_INTERVAL;
             loop {
+                if in_next >= next_stop_check {
+                    stop.check()?;
+                    next_stop_check = in_next + STOP_CHECK_INTERVAL;
+                }
                 // Recalculate min_len periodically based on actual frequency distribution
                 if in_next >= next_recalc_min_len {
                     min_len = recalculate_min_match_len(&self.freqs, max_search_depth);
@@ -2699,7 +2751,13 @@ impl Compressor {
             };
 
             // Find matches until we decide to end the block
+            let mut next_stop_check = in_next + STOP_CHECK_INTERVAL;
             loop {
+                if in_next >= next_stop_check {
+                    stop.check()?;
+                    next_stop_check = in_next + STOP_CHECK_INTERVAL;
+                }
+
                 let remaining = in_end - in_next;
 
                 // Slide the window forward if needed
@@ -4795,5 +4853,90 @@ mod tests {
 
         assert_eq!(size1, size2);
         assert_eq!(&out1[..size1], &out2[..size2]);
+    }
+
+    /// A Stop implementation that counts check() calls.
+    struct CountingStop {
+        count: core::sync::atomic::AtomicU32,
+    }
+    impl CountingStop {
+        fn new() -> Self {
+            Self {
+                count: core::sync::atomic::AtomicU32::new(0),
+            }
+        }
+        fn count(&self) -> u32 {
+            self.count.load(core::sync::atomic::Ordering::Relaxed)
+        }
+    }
+    impl enough::Stop for CountingStop {
+        fn check(&self) -> Result<(), enough::StopReason> {
+            self.count
+                .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            Ok(())
+        }
+    }
+
+    /// Verify that stop checks happen at sub-block granularity (every ~16KB),
+    /// not just at block boundaries (~65-300KB).
+    #[test]
+    fn test_stop_check_granularity() {
+        // 256KB of data — should produce ~1 block at SOFT_MAX_BLOCK_LENGTH.
+        // Without sub-block checks, we'd see ~1-2 stop calls.
+        // With 16KB interval, we expect ~16+ calls.
+        let data: Vec<u8> = (0..256 * 1024).map(|i| (i % 251) as u8).collect();
+        let bound = Compressor::deflate_compress_bound(data.len());
+
+        for level in [
+            CompressionLevel::fastest(),
+            CompressionLevel::balanced(),
+            CompressionLevel::high(),
+        ] {
+            let stop = CountingStop::new();
+            let mut c = Compressor::new(level);
+            let mut output = vec![0u8; bound];
+            let size = c.deflate_compress(&data, &mut output, &stop).unwrap();
+            assert!(size > 0);
+            // With 16KB interval on 256KB data, expect at least 10 checks
+            let checks = stop.count();
+            assert!(
+                checks >= 10,
+                "level {:?}: only {} stop checks on 256KB — expected sub-block granularity",
+                level,
+                checks
+            );
+        }
+    }
+
+    /// Verify that decompression checks stop at block boundaries and within
+    /// the generic decode loop. Decompression is fast enough (~600 MiB/s)
+    /// that per-block checks already give <1ms granularity.
+    #[test]
+    fn test_decompress_stop_check_granularity() {
+        // Compress 1MB, then decompress with counting stop.
+        // At balanced level, 1MB typically produces several blocks.
+        let data: Vec<u8> = (0..1024 * 1024).map(|i| (i % 251) as u8).collect();
+        let mut c = Compressor::new(CompressionLevel::balanced());
+        let bound = Compressor::deflate_compress_bound(data.len());
+        let mut compressed = vec![0u8; bound];
+        let csize = c
+            .deflate_compress(&data, &mut compressed, enough::Unstoppable)
+            .unwrap();
+
+        let stop = CountingStop::new();
+        let mut d = crate::Decompressor::new();
+        let mut output = vec![0u8; data.len()];
+        let result = d
+            .deflate_decompress(&compressed[..csize], &mut output, &stop)
+            .unwrap();
+        assert_eq!(result.output_written, data.len());
+        // Decompression checks at block boundaries + within generic loop.
+        // 1MB with ~300KB blocks = ~3-4 blocks, plus generic loop checks.
+        let checks = stop.count();
+        assert!(
+            checks >= 3,
+            "decompress: only {} stop checks on 1MB output — expected periodic checks",
+            checks
+        );
     }
 }
