@@ -59,15 +59,14 @@ Aggregate throughput across all files in each corpus.
 | Canterbury | L1 | 355 MiB/s | 431 MiB/s | 381 MiB/s | **1.13x** | 0.98x |
 | Canterbury | L6 | 295 MiB/s | 347 MiB/s | 131 MiB/s | **2.66x** | **3.21x** |
 | Canterbury | L12 | 134 MiB/s | 147 MiB/s | 8 MiB/s | **19.6x** | **9.69x** |
-| Silesia | L1 | ~310 MiB/s | 365 MiB/s | 319 MiB/s | **1.14x** | 0.97x |
-| Silesia | L6 | ~250 MiB/s | 289 MiB/s | 128 MiB/s | **2.25x** | **3.00x** |
-| Silesia | L12 | ~130 MiB/s | 146 MiB/s | 7 MiB/s | **19.7x** | **3.09x** |
+| Silesia | L1 | — | 365 MiB/s | 319 MiB/s | **1.14x** | 0.97x |
+| Silesia | L6 | — | 289 MiB/s | 128 MiB/s | **2.25x** | **3.00x** |
+| Silesia | L12 | — | 146 MiB/s | 7 MiB/s | **19.7x** | **3.09x** |
 | Photos (RGB) | L1 | 202 MiB/s | 222 MiB/s | 193 MiB/s | **1.15x** | **1.24x** |
 | Photos (RGB) | L6 | 162 MiB/s | 162 MiB/s | 114 MiB/s | **1.42x** | **2.31x** |
 | Photos (RGB) | L12 | 93 MiB/s | 99 MiB/s | 18 MiB/s | **5.53x** | **2.23x** |
 
-Silesia safe values estimated from unchecked (thermal throttling affected the long safe run).
-Canterbury and photos safe values measured directly.
+Silesia safe not measured (thermal throttling invalidated the long run).
 
 Note: flate2 uses zlib-rs backend. At L1, flate2 uses static Huffman + 4K hash table
 (faster but worse ratio than zenflate's dynamic Huffman). zenflate L6 is 2-3x faster
