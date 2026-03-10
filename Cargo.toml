@@ -49,3 +49,7 @@ debug = true
 [[bench]]
 name = "throughput"
 harness = false
+
+[[bench]]
+name = "corpus"
+harness = false
