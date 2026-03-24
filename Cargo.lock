@@ -31,9 +31,9 @@ checksum = "5192cca8006f1fd4f7237516f40fa183bb07f8fbdfedaa0036de5ea9b0b45e78"
 
 [[package]]
 name = "archmage"
-version = "0.9.7"
+version = "0.9.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e20a9c00edc89f5478d067f41eb135388b2067896d2291c97864739aca2131a5"
+checksum = "190d7f48ee2a9410a6c4eb1f4f268328d774075dbea3e6231f9f4fe18d660cc3"
 dependencies = [
  "archmage-macros",
  "safe_unaligned_simd",
@@ -41,9 +41,9 @@ dependencies = [
 
 [[package]]
 name = "archmage-macros"
-version = "0.9.7"
+version = "0.9.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3df1f5a2e5d693e207b55399591dcf14567c149ed7a02aa28d6a7f6f059254b9"
+checksum = "5c0f4cdba9645e977808c940df6780159ecd75753c97f4c6d373f849cdfbc75f"
 dependencies = [
  "proc-macro2",
  "quote",
