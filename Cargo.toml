@@ -32,11 +32,11 @@ libm = "0.2"
 
 
 [dev-dependencies]
-criterion = { version = "0.5", default-features = false }
+criterion = { version = "0.8", default-features = false }
 libdeflater = "1.25"
 flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"] }
-miniz_oxide = "0.8"
-png = "0.17"
+miniz_oxide = "0.9"
+png = "0.18"
 fdeflate = "0.3"
 zlib-rs = "0.6"
 crc32fast = "1"
