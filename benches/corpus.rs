@@ -59,9 +59,9 @@ fn load_silesia(name: &str) -> Option<Vec<u8>> {
 fn load_gb82_rgb(name: &str) -> Option<Vec<u8>> {
     let path = codec_corpus_dir().join("gb82").join(name);
     let file = std::fs::File::open(&path).ok()?;
-    let decoder = png::Decoder::new(file);
+    let decoder = png::Decoder::new(std::io::BufReader::new(file));
     let mut reader = decoder.read_info().ok()?;
-    let mut buf = vec![0u8; reader.output_buffer_size()];
+    let mut buf = vec![0u8; reader.output_buffer_size()?];
     let info = reader.next_frame(&mut buf).ok()?;
     buf.truncate(info.buffer_size());
     Some(buf)

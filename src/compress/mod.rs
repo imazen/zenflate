@@ -4607,7 +4607,7 @@ mod tests {
         // Decode the PNG
         let file = std::fs::File::open(&path)
             .unwrap_or_else(|e| panic!("failed to open corpus file {path}: {e}"));
-        let decoder = png::Decoder::new(file);
+        let decoder = png::Decoder::new(std::io::BufReader::new(file));
         let mut reader = decoder.read_info().unwrap();
         let info = reader.info();
         let width = info.width as usize;
