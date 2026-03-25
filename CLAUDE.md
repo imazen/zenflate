@@ -46,7 +46,7 @@ Pure Rust DEFLATE/zlib/gzip compression and decompression.
 ## Compression Speed
 
 All benchmarks: safe = default `forbid(unsafe_code)`, unchecked = `--features unchecked`.
-`unchecked` eliminates bounds checks in hot compression loops (+5-12% at L1, +0-6% at L6+).
+`unchecked` eliminates bounds checks in hot compression loops (+0-12% at L1, +0-6% at L6+).
 It does NOT help decompression (safe bounds checks give LLVM information for better codegen).
 
 ### Standard Corpus Compression
