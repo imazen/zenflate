@@ -24,7 +24,7 @@ issue trackers, checked against zenflate's codebase. Audit performed 2026-02-21.
 | #44 | 4GB size overflow | **Safe** | Rust uses `usize` |
 | #86 | Level 0 stored blocks | **Tested** | `empty_stored_block_final`, `compress_bound_exact_buffer_all_levels` |
 | #106 | Incomplete streams rejected | **Tested** | `sync_flush_nonfinal_block_rejected` |
-| #420 | Bytes consumed alignment | **Gap** | We don't report `input_consumed` yet |
+| #420 | Bytes consumed alignment | **Fixed** | `DecompressOutcome` has `input_consumed`; tests assert on it for all three formats |
 
 ## miniz_oxide
 
@@ -38,7 +38,7 @@ issue trackers, checked against zenflate's codebase. Audit performed 2026-02-21.
 | #174 | Short garbage silently accepted | **Tested** | `reject_single_byte_all_formats` + `two_byte_deflate_no_panic` |
 | #188 | Stack overflow (large struct on WASM) | **Safe** | Compressor 2.5KB, Decompressor 12.5KB, large buffers Box'd |
 | #110 | Exact-size output buffer edge case | **Tested** | `decompress_into_zero_length_output` + compress_bound tests |
-| #158 | Over-reported bytes consumed | **Gap** | We don't report `input_consumed` yet |
+| #158 | Over-reported bytes consumed | **Fixed** | `DecompressOutcome` has `input_consumed`; tests assert on it for all three formats |
 | #119 | decompress_to_vec fails at exact limit | **N/A** | We don't have a growing-buffer API |
 
 ## zlib-rs
