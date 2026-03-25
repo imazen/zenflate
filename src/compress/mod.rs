@@ -4939,4 +4939,34 @@ mod tests {
             checks
         );
     }
+
+    /// Cloning a NearOptimal compressor must produce identical output.
+    ///
+    /// With `unchecked`, NearOptimalState is ~9MB of fixed arrays.
+    /// clone_boxed() copies heap-to-heap to avoid placing it on the stack.
+    /// This test verifies the clone is correct (identical compression output).
+    ///
+    /// The stack overflow regression test lives in zenpng's filter tests,
+    /// which exercises the real call chain at opt-level=2 where the compiler
+    /// inlines the clone into a single large stack frame.
+    #[test]
+    fn clone_near_optimal_compressor_produces_identical_output() {
+        let compressor = Compressor::new(CompressionLevel::new(12));
+        let cloned = compressor.clone();
+        let data = b"test data for near-optimal clone verification";
+        let bound = Compressor::deflate_compress_bound(data.len());
+        let mut out1 = vec![0u8; bound];
+        let mut out2 = vec![0u8; bound];
+        let mut c1 = compressor;
+        let mut c2 = cloned;
+        let len1 = c1
+            .deflate_compress(data, &mut out1, enough::Unstoppable)
+            .unwrap();
+        let len2 = c2
+            .deflate_compress(data, &mut out2, enough::Unstoppable)
+            .unwrap();
+        assert_eq!(len1, len2, "clone produced different length output");
+        assert_eq!(out1[..len1], out2[..len2], "clone produced different output");
+    }
 }
+

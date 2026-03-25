@@ -73,26 +73,13 @@ const OFFSET_SLOT_FULL_SIZE: usize = DEFLATE_MAX_MATCH_OFFSET as usize + 1;
 /// Size of the match length frequency tables.
 const MATCH_LEN_FREQ_SIZE: usize = DEFLATE_MAX_MATCH_LEN as usize + 1;
 
-// Storage types: fixed arrays when `unchecked` (single allocation via Box),
-// Vec when safe (separate heap allocations per field).
-#[cfg(feature = "unchecked")]
-type MatchCacheTab = [LzMatch; MATCH_CACHE_ALLOC_SIZE];
-#[cfg(not(feature = "unchecked"))]
+// Always use Vec for large tables. The `unchecked` feature controls access
+// patterns (get_unchecked, raw pointers) not storage layout. Vec data is
+// contiguous per-field, which is what matters — the hot loops access one
+// table at a time, not across tables.
 type MatchCacheTab = Vec<LzMatch>;
-
-#[cfg(feature = "unchecked")]
-type OptimumNodesTab = [OptimumNode; OPTIMUM_NODES_SIZE];
-#[cfg(not(feature = "unchecked"))]
 type OptimumNodesTab = Vec<OptimumNode>;
-
-#[cfg(feature = "unchecked")]
-type OffsetSlotFullTab = [u8; OFFSET_SLOT_FULL_SIZE];
-#[cfg(not(feature = "unchecked"))]
 type OffsetSlotFullTab = Vec<u8>;
-
-#[cfg(feature = "unchecked")]
-type MatchLenFreqTab = [u32; MATCH_LEN_FREQ_SIZE];
-#[cfg(not(feature = "unchecked"))]
 type MatchLenFreqTab = Vec<u32>;
 
 // ---- Data structures ----
@@ -170,9 +157,7 @@ impl MwcRng {
 /// is a single heap allocation (~9MB), matching libdeflate C's single malloc.
 /// Without `unchecked`, fields use Vec (separate allocations per field).
 ///
-/// Clone is available for the forking compressor use case (fork-per-row BF).
-/// For L10-12 with `unchecked`, cloning puts ~9MB on the stack temporarily;
-/// this is acceptable for the forking BF prototype which primarily targets L1-L4.
+/// Clone is derived — all large fields are Vec (~4.5KB on the stack, data on heap).
 #[derive(Clone)]
 pub(crate) struct NearOptimalState {
     /// Binary tree matchfinder.
@@ -207,11 +192,6 @@ pub(crate) struct NearOptimalState {
 
 impl NearOptimalState {
     /// Create a new NearOptimalState with the given parameters.
-    ///
-    /// Returns `Box<Self>` to avoid stack overflow (struct is ~9MB).
-    /// With `unchecked`, this is a single heap allocation matching C's pattern.
-    /// Without `unchecked`, each Vec field is a separate allocation.
-    #[cfg(not(feature = "unchecked"))]
     pub fn new(
         max_optim_passes: u32,
         min_improvement_to_continue: u32,
@@ -236,68 +216,6 @@ impl NearOptimalState {
         });
         init_offset_slot_full(&mut s.offset_slot_full);
         s
-    }
-
-    /// Create a new NearOptimalState as a single heap allocation.
-    ///
-    /// Uses `Box::new_uninit()` to allocate ~9MB on the heap, then
-    /// initializes each field through pointers (no stack copies).
-    #[cfg(feature = "unchecked")]
-    pub fn new(
-        max_optim_passes: u32,
-        min_improvement_to_continue: u32,
-        min_bits_to_use_nonfinal_path: u32,
-        max_len_to_optimize_static_block: u32,
-    ) -> Box<Self> {
-        use core::ptr;
-
-        let mut boxed = Box::<Self>::new_uninit();
-        let p = boxed.as_mut_ptr();
-
-        // SAFETY: `p` points to a fresh heap allocation of size_of::<Self>().
-        // We initialize every field before calling assume_init().
-        unsafe {
-            // BtMatchfinder tables
-            BtMatchfinder::init_at(ptr::addr_of_mut!((*p).bt_mf));
-
-            // match_cache — zero-init (LzMatch is two u16 zeros)
-            let mc = ptr::addr_of_mut!((*p).match_cache) as *mut u8;
-            core::ptr::write_bytes(mc, 0, core::mem::size_of::<MatchCacheTab>());
-
-            // optimum_nodes — zero-init (OptimumNode is two u32 zeros)
-            let on = ptr::addr_of_mut!((*p).optimum_nodes) as *mut u8;
-            core::ptr::write_bytes(on, 0, core::mem::size_of::<OptimumNodesTab>());
-
-            // offset_slot_full — init via helper
-            let osf = ptr::addr_of_mut!((*p).offset_slot_full) as *mut u8;
-            let osf_slice = core::slice::from_raw_parts_mut(osf, OFFSET_SLOT_FULL_SIZE);
-            osf_slice.fill(0);
-            init_offset_slot_full(osf_slice);
-
-            // costs + costs_saved
-            ptr::addr_of_mut!((*p).costs).write(DeflateCosts::default());
-            ptr::addr_of_mut!((*p).costs_saved).write(DeflateCosts::default());
-
-            // Scalar fields
-            ptr::addr_of_mut!((*p).prev_observations).write([0; NUM_OBSERVATION_TYPES]);
-            ptr::addr_of_mut!((*p).prev_num_observations).write(0);
-
-            // Frequency tables — zero-init
-            let nmlf = ptr::addr_of_mut!((*p).new_match_len_freqs) as *mut u8;
-            core::ptr::write_bytes(nmlf, 0, core::mem::size_of::<MatchLenFreqTab>());
-            let mlf = ptr::addr_of_mut!((*p).match_len_freqs) as *mut u8;
-            core::ptr::write_bytes(mlf, 0, core::mem::size_of::<MatchLenFreqTab>());
-
-            // Config scalars
-            ptr::addr_of_mut!((*p).max_optim_passes).write(max_optim_passes);
-            ptr::addr_of_mut!((*p).min_improvement_to_continue).write(min_improvement_to_continue);
-            ptr::addr_of_mut!((*p).min_bits_to_use_nonfinal_path)
-                .write(min_bits_to_use_nonfinal_path);
-            ptr::addr_of_mut!((*p).max_len_to_optimize_static_block)
-                .write(max_len_to_optimize_static_block);
-
-            boxed.assume_init()
-        }
     }
 }
 
