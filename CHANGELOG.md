@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.3.1 (unreleased)
+## 0.3.1 (2026-03-25)
 
 ### Fixed
 - Cooperative `Stop` checking granularity improved to <10ms in all compression strategy inner loops (was unbounded)
