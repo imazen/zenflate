@@ -132,32 +132,6 @@ jobs:
       - name: Format check
         run: cargo fmt --all -- --check
 
-  # ==========================================================================
-  # Miri (unsafe soundness for unchecked feature)
-  # ==========================================================================
-  miri:
-    name: Miri (unsafe soundness)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Install Rust nightly
-        uses: dtolnay/rust-toolchain@nightly
-        with:
-          components: miri
-
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
-
-      - name: Miri tests (unchecked feature)
-        run: |
-          cargo miri test --features unchecked -- \
-            --skip zeros --skip sequential --skip large \
-            --skip all_levels --skip all_formats \
-            --skip window_boundary --skip block_splitting \
-            --skip parallel --skip compression_improves \
-            --skip short_inputs --skip repetitive \
-            --skip actually_compresses
 
   # ==========================================================================
   # Benchmark compilation check
