@@ -4966,7 +4966,10 @@ mod tests {
             .deflate_compress(data, &mut out2, enough::Unstoppable)
             .unwrap();
         assert_eq!(len1, len2, "clone produced different length output");
-        assert_eq!(out1[..len1], out2[..len2], "clone produced different output");
+        assert_eq!(
+            out1[..len1],
+            out2[..len2],
+            "clone produced different output"
+        );
     }
 }
-
