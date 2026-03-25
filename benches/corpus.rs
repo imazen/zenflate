@@ -94,18 +94,18 @@ fn canterbury_files() -> Vec<(&'static str, Vec<u8>)> {
 /// Select representative Silesia files (text, binary, structured, image).
 fn silesia_files() -> Vec<(&'static str, Vec<u8>)> {
     let names = [
-        "dickens",  // English literature (10 MB)
-        "mozilla",  // tar archive (51 MB) — skip in bench, too large
-        "mr",       // medical image (10 MB)
-        "nci",      // chemistry database (33 MB)
-        "ooffice",  // office binary (6 MB)
-        "osdb",     // database (10 MB)
-        "reymont",  // Polish text (6.6 MB)
-        "samba",    // C source code (21 MB)
-        "sao",      // star catalog binary (7 MB)
-        "webster",  // English dictionary (41 MB)
-        "xml",      // XML data (5.3 MB)
-        "x-ray",    // medical x-ray (8.5 MB)
+        "dickens", // English literature (10 MB)
+        "mozilla", // tar archive (51 MB) — skip in bench, too large
+        "mr",      // medical image (10 MB)
+        "nci",     // chemistry database (33 MB)
+        "ooffice", // office binary (6 MB)
+        "osdb",    // database (10 MB)
+        "reymont", // Polish text (6.6 MB)
+        "samba",   // C source code (21 MB)
+        "sao",     // star catalog binary (7 MB)
+        "webster", // English dictionary (41 MB)
+        "xml",     // XML data (5.3 MB)
+        "x-ray",   // medical x-ray (8.5 MB)
     ];
     let mut files = Vec::new();
     for name in &names {
@@ -251,11 +251,7 @@ fn bench_corpus_compress(
 // Decompress corpus files (compressed at L6) across all libraries
 // ---------------------------------------------------------------------------
 
-fn bench_corpus_decompress(
-    c: &mut Criterion,
-    corpus_name: &str,
-    files: &[(&str, Vec<u8>)],
-) {
+fn bench_corpus_decompress(c: &mut Criterion, corpus_name: &str, files: &[(&str, Vec<u8>)]) {
     if files.is_empty() {
         return;
     }
@@ -408,9 +404,8 @@ fn bench_corpus_aggregate(
                 let mut compressor = libdeflater::Compressor::new(
                     libdeflater::CompressionLvl::new(level as i32).unwrap(),
                 );
-                let bound = compressor.deflate_compress_bound(
-                    files.iter().map(|(_, d)| d.len()).max().unwrap_or(0),
-                );
+                let bound = compressor
+                    .deflate_compress_bound(files.iter().map(|(_, d)| d.len()).max().unwrap_or(0));
                 let mut out = vec![0u8; bound];
                 b.iter(|| {
                     let mut total_out = 0usize;

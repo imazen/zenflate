@@ -409,7 +409,9 @@ fn decode_png_to_raw(path: &std::path::Path) -> Vec<u8> {
         std::fs::File::open(path).unwrap_or_else(|e| panic!("can't open {}: {e}", path.display()));
     let decoder = png::Decoder::new(std::io::BufReader::new(file));
     let mut reader = decoder.read_info().expect("can't read PNG info");
-    let buf_size = reader.output_buffer_size().expect("output_buffer_size unknown");
+    let buf_size = reader
+        .output_buffer_size()
+        .expect("output_buffer_size unknown");
     let mut buf = vec![0u8; buf_size];
     let output_info = reader.next_frame(&mut buf).expect("can't decode frame");
     buf.truncate(output_info.buffer_size());

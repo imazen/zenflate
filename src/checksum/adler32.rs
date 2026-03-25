@@ -35,11 +35,14 @@ const MAX_CHUNK_LEN: usize = 5552;
 pub fn adler32(adler: u32, data: &[u8]) -> u32 {
     #[cfg(feature = "avx512")]
     {
-        incant!(adler32_impl(adler, data), [v4x, v4, v3, neon, wasm128])
+        incant!(
+            adler32_impl(adler, data),
+            [v4x, v4, v3, neon, wasm128, scalar]
+        )
     }
     #[cfg(not(feature = "avx512"))]
     {
-        incant!(adler32_impl(adler, data), [v3, neon, wasm128])
+        incant!(adler32_impl(adler, data), [v3, neon, wasm128, scalar])
     }
 }
 

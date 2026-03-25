@@ -35,11 +35,11 @@ pub fn crc32(crc: u32, data: &[u8]) -> u32 {
     }
     #[cfg(feature = "avx512")]
     {
-        !incant!(crc32_impl(!crc, data), [v4x, x64_crypto, neon_aes])
+        !incant!(crc32_impl(!crc, data), [v4x, x64_crypto, neon_aes, scalar])
     }
     #[cfg(not(feature = "avx512"))]
     {
-        !incant!(crc32_impl(!crc, data), [x64_crypto, neon_aes])
+        !incant!(crc32_impl(!crc, data), [x64_crypto, neon_aes, scalar])
     }
 }
 
