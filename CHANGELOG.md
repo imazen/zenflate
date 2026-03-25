@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.3.1 (unreleased)
+
+### Fixed
+- Cooperative `Stop` checking granularity improved to <10ms in all compression strategy inner loops (was unbounded)
+- Added `scalar` fallback tier to `incant!` dispatch in Adler-32 and CRC-32, fixing archmage deprecation warnings
+
+### Changed
+- Bumped `archmage` 0.9.9 → 0.9.12
+- Bumped `enough` 0.4 → 0.4.2
+- Bumped `libm` 0.2 → 0.2.16
+
+### Added
+- Corpus benchmarks (Canterbury, Silesia, photos) with fresh measurements and safe-mode columns
+
 ## 0.3.0
 
 ### Added
