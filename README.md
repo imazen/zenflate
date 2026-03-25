@@ -212,7 +212,7 @@ the loop and can stop between `fill()` calls.
 | `std` | yes | `std::error::Error` impls, `BufReadSource`, parallel gzip |
 | `alloc` | yes (via `std`) | Compression, streaming decompression |
 | `avx512` | yes | AVX-512 SIMD for checksums on supported CPUs |
-| `unchecked` | no | Elide bounds checks in hot paths (+10-25% compression speed) |
+| `unchecked` | no | Elide bounds checks in hot paths (+0-12% compression speed) |
 
 Decompression works in `no_std` without `alloc`; all state is stack-allocated.
 
