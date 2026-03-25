@@ -218,7 +218,9 @@ Decompression works in `no_std` without `alloc`; all state is stack-allocated.
 
 ## Performance
 
-Benchmarked on x86_64 with AVX-512 (Intel), `--features unchecked`.
+Benchmarked on x86_64 with AVX-512 (Intel), `--features unchecked` (v0.3.1).
+As of v0.3.2, `NearOptimalState` uses `Vec` instead of fixed arrays; benchmarks
+should be re-run to confirm performance at levels 10-12 and 30.
 
 **Compression** (3 MiB photo bitmap, reproducible via `examples/ratio_bench.rs`):
 

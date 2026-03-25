@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.2 (2026-03-25)
+
+### Fixed
+- **Stack overflow in `Compressor::clone()` with `unchecked` feature.** `NearOptimalState` (~9MB of fixed arrays) was placed on the stack by the derived `Clone`, overflowing the default 8MB thread stack. Downstream crates (zenpng) hit this in beam search filter evaluation.
+
+### Changed
+- `NearOptimalState` and `BtMatchfinder` now use `Vec` for large tables regardless of feature flags. The `unchecked` feature controls access patterns (`get_unchecked`, raw pointers), not storage layout. This eliminates the `Box::new_uninit()` construction path and all associated unsafe code.
+- Performance benchmarks in the README were measured with 0.3.1. The Vec-based layout may show different performance characteristics at NearOptimal levels (10-12) and should be re-benchmarked.
+
 ## 0.3.1 (2026-03-25)
 
 ### Fixed
