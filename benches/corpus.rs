@@ -10,7 +10,8 @@
 //!
 //! Run with: `cargo bench --bench corpus`
 
-use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use zenbench::criterion_compat::*;
+use zenbench::{criterion_group, criterion_main};
 use std::path::PathBuf;
 
 // ---------------------------------------------------------------------------
@@ -477,12 +478,5 @@ fn bench_photos(c: &mut Criterion) {
 // Harness
 // ---------------------------------------------------------------------------
 
-criterion_group! {
-    name = corpus_benches;
-    config = Criterion::default()
-        .sample_size(20)
-        .warm_up_time(std::time::Duration::from_secs(1))
-        .measurement_time(std::time::Duration::from_secs(3));
-    targets = bench_canterbury, bench_silesia, bench_photos
-}
+criterion_group!(corpus_benches, bench_canterbury, bench_silesia, bench_photos);
 criterion_main!(corpus_benches);

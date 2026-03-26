@@ -5,7 +5,8 @@
 //!
 //! Run with: `cargo bench --release`
 
-use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use zenbench::criterion_compat::*;
+use zenbench::{criterion_group, criterion_main};
 
 // ---------------------------------------------------------------------------
 // Test data generators
