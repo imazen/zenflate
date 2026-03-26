@@ -3,7 +3,7 @@
 [![CI](https://github.com/imazen/zenflate/actions/workflows/ci.yml/badge.svg)](https://github.com/imazen/zenflate/actions/workflows/ci.yml)
 [![crates.io](https://img.shields.io/crates/v/zenflate.svg)](https://crates.io/crates/zenflate)
 [![docs.rs](https://docs.rs/zenflate/badge.svg)](https://docs.rs/zenflate)
-[![License: AGPL-3.0 or Commercial](https://img.shields.io/badge/license-AGPL--3.0%20%2F%20Commercial-blue.svg)](LICENSE)
+[![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0%20%2F%20Commercial-blue.svg?style=for-the-badge)](LICENSE-AGPL3)
 [![MSRV: 1.89](https://img.shields.io/badge/MSRV-1.89-blue.svg)](https://blog.rust-lang.org/)
 
 Pure Rust DEFLATE/zlib/gzip compression and decompression.
@@ -356,18 +356,34 @@ Developed with Claude (Anthropic). Not all code manually reviewed. Review critic
 
 ## License
 
-Dual-licensed: [AGPL-3.0](LICENSE) or a [commercial license](https://www.imazen.io/pricing).
+Dual-licensed: [AGPL-3.0](LICENSE-AGPL3) or [commercial](LICENSE-COMMERCIAL).
 
-Sustainable, large-scale open source work requires a funding model, and I've
-been doing this full-time for 15 years. If you use zenflate in closed-source
-software AND your company makes over $1M/year in revenue, you need a commercial
-license. Commercial licenses are company-specific, on a sliding scale, and
-similar to Apache 2.0 in what they permit. Everyone else can use this under
-the AGPL v3.
+I've maintained and developed open-source image server software — and the 40+
+library ecosystem it depends on — full-time since 2011. Fifteen years of
+continual maintenance, backwards compatibility, support, and the (very rare)
+security patch. That kind of stability requires sustainable funding, and
+dual-licensing is how we make it work without venture capital or rug-pulls.
+Support sustainable and secure software; swap patch tuesday for patch leap-year.
 
-zenflate is an independent Rust implementation drawing on algorithms from
-several permissively-licensed projects. No original C/C++ code was copied.
-See [LICENSE](LICENSE) for detailed provenance of every component and the
-full text of all upstream licenses (libdeflate MIT, Zopfli Apache-2.0,
-Brotli MIT, pigz zlib). See [Acknowledgments](#acknowledgments) for links
-to the upstream projects.
+[Our open-source products](https://www.imazen.io/open-source)
+
+**Your options:**
+
+- **Startup license** — $1 if your company has under $1M revenue and fewer
+  than 5 employees. [Get a key →](https://www.imazen.io/pricing)
+- **Commercial subscription** — Governed by the Imazen Site-wide Subscription
+  License v1.1 or later. Apache 2.0-like terms, no source-sharing requirement.
+  Sliding scale by company size.
+  [Pricing & 60-day free trial →](https://www.imazen.io/pricing)
+- **AGPL v3** — Free and open. Share your source if you distribute.
+
+See [LICENSE-COMMERCIAL](LICENSE-COMMERCIAL) for details.
+
+Upstream code from [ebiggers/libdeflate](https://github.com/ebiggers/libdeflate) is licensed under MIT.
+Our additions and improvements are dual-licensed (AGPL-3.0 or commercial) as above.
+
+### Upstream Contribution
+
+We are willing to release our improvements under the original MIT
+license if upstream takes over maintenance of those improvements. We'd rather
+contribute back than maintain a parallel codebase. Open an issue or reach out.
