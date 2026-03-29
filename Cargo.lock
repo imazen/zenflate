@@ -60,9 +60,9 @@ dependencies = [
 
 [[package]]
 name = "archmage"
-version = "0.9.12"
+version = "0.9.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b31252c47e70c7056709e9f98842aef4f709056c2b3a4f666c584f8cc37f7ca0"
+checksum = "2c62208fadf5c29826211a799472057dd164956fe3ae3ce63f62c267ca7cd123"
 dependencies = [
  "archmage-macros",
  "safe_unaligned_simd",
@@ -70,9 +70,9 @@ dependencies = [
 
 [[package]]
 name = "archmage-macros"
-version = "0.9.12"
+version = "0.9.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3a97189db9dffc2e13364c6f56461085d65743ff4d17890d6b80744203aae92b"
+checksum = "2673bdcd233efb45ba8f8bd8e915acdb2fa413140a01a18296e4b198ff6eae1f"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -800,9 +800,9 @@ checksum = "589f6da84c646204747d1270a2a5661ea66ed1cced2631d546fdfb155959f9ec"
 
 [[package]]
 name = "zenbench"
-version = "0.1.1"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fd13383ee045c949969f4d29996fc3e55e202d52702e597c09a97a28af2ef6ff"
+checksum = "608aa467d997f62def7d8a8f206c9fc1754ec61e159423c7d374eb4db1c5b01e"
 dependencies = [
  "clap",
  "fs4",
