@@ -10,9 +10,9 @@
 //!
 //! Run with: `cargo bench --bench corpus`
 
+use std::path::PathBuf;
 use zenbench::criterion_compat::*;
 use zenbench::{criterion_group, criterion_main};
-use std::path::PathBuf;
 
 // ---------------------------------------------------------------------------
 // Corpus loading
@@ -478,5 +478,10 @@ fn bench_photos(c: &mut Criterion) {
 // Harness
 // ---------------------------------------------------------------------------
 
-criterion_group!(corpus_benches, bench_canterbury, bench_silesia, bench_photos);
+criterion_group!(
+    corpus_benches,
+    bench_canterbury,
+    bench_silesia,
+    bench_photos
+);
 criterion_main!(corpus_benches);
