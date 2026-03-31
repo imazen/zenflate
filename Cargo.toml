@@ -26,8 +26,8 @@ avx512 = ["archmage/avx512"]
 unchecked = []
 
 [dependencies]
-archmage = { version = "0.9.14", default-features = false, features = ["macros"] }
-enough = { version = "0.4.2", default-features = false }
+archmage = { version = "0.9.15", default-features = false, features = ["macros"] }
+enough = { version = "0.4.3", default-features = false }
 libm = "0.2.16"
 
 
