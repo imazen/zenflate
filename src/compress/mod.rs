@@ -3004,6 +3004,7 @@ impl Compressor {
     ///
     /// If `is_last_chunk` is false, a sync flush (empty stored block) is appended
     /// to byte-align the output for concatenation with subsequent chunks.
+    #[cfg(feature = "std")]
     fn deflate_compress_chunk(
         &mut self,
         input: &[u8],
@@ -3338,6 +3339,7 @@ fn deflate_compress_none(input: &[u8], output: &mut [u8]) -> Result<usize, Compr
 }
 
 /// Level 0 chunk variant: output uncompressed blocks with BFINAL control.
+#[cfg(feature = "std")]
 fn deflate_compress_none_chunk(
     input: &[u8],
     output: &mut [u8],
