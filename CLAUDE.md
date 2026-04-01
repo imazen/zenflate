@@ -228,6 +228,32 @@ Cachegrind: D1 cache misses nearly identical. Gap is pure instruction count.
 - Only x86-specific decompression opt in C is BMI2 BZHI for bit extraction
 - Decompression gap vs C is from register pressure / instruction count, not SIMD
 
+### WASM simd128 audit (2026-04-01)
+Verified all hot paths auto-vectorize correctly on wasm32 with simd128:
+
+**Already working well:**
+- `matchfinder_rebase`: `#[autoversion]` produces `i16x8.add_sat_s` with 4x unrolled loop (64 bytes/iter)
+- `matchfinder_init`: `#[autoversion]` produces `v128.store` with 4x unrolled loop
+- Adler-32: Explicit `#[arcane]` wasm128 path using `i16x8_extend`/`i32x4_dot_i16x8`/`i32x4_extadd_pairwise`
+- `DeflateFreqs::reset`: Compiles to `memory.fill` (WASM bulk memory)
+- All slide_window/init functions produce zero-warning, zero-fallback SIMD code
+
+**Added in this audit:**
+- `lz_extend`: wasm128 path using `i8x16_ne` + `i8x16_bitmask` for 16-byte match comparison
+  (up from 8-byte u64 XOR). Benefits longer matches in image data.
+
+**Not SIMD-amenable (confirmed):**
+- CRC-32: No carryless multiply on WASM. Falls back to slice-by-8 (8KB table). No faster
+  approach exists without `clmul`-equivalent hardware.
+- Hash computation (`lz_hash`): Single-cycle scalar multiply, inherently serial
+- Huffman coding/bitstream writing: Bit-serial, data-dependent
+- DP backward pass (`find_min_cost_path`): Serial dependency chain
+- Frequency counting: Scatter-add pattern, not vectorizable
+
+**Build verification:**
+- `RUSTFLAGS="-C target-feature=+simd128" cargo check --target wasm32-unknown-unknown --no-default-features --features alloc` — zero warnings
+- All CRC-32 fold constants/macros properly cfg-gated to x86_64/aarch64
+
 ## Known Bugs
 
 (none currently)
