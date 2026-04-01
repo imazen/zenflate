@@ -219,6 +219,7 @@ pub struct Decompressor {
     pub(crate) litlen_tablebits: u32,
     skip_checksum: bool,
     checksum_matched: Option<bool>,
+    max_output_size: Option<usize>,
 }
 
 impl core::fmt::Debug for Decompressor {
@@ -227,6 +228,7 @@ impl core::fmt::Debug for Decompressor {
             .field("static_codes_loaded", &self.static_codes_loaded)
             .field("skip_checksum", &self.skip_checksum)
             .field("checksum_matched", &self.checksum_matched)
+            .field("max_output_size", &self.max_output_size)
             .finish_non_exhaustive()
     }
 }
@@ -251,7 +253,32 @@ impl Decompressor {
             litlen_tablebits: 0,
             skip_checksum: false,
             checksum_matched: None,
+            max_output_size: None,
         }
+    }
+
+    /// Set a maximum output size limit for decompression.
+    ///
+    /// When set, decompression will return
+    /// [`OutputLimitExceeded`](DecompressionError::OutputLimitExceeded) if the
+    /// decompressed data would exceed this many bytes. This defends against
+    /// decompression bombs — small compressed inputs that expand to enormous
+    /// output.
+    ///
+    /// `None` (the default) means unlimited — output is bounded only by the
+    /// caller-provided buffer size.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use zenflate::Decompressor;
+    ///
+    /// let d = Decompressor::new().with_max_output_size(Some(1024 * 1024)); // 1 MiB limit
+    /// ```
+    #[must_use]
+    pub fn with_max_output_size(mut self, max: Option<usize>) -> Self {
+        self.max_output_size = max;
+        self
     }
 
     /// When true, checksum mismatches in zlib/gzip wrappers are recorded
@@ -787,7 +814,14 @@ impl Decompressor {
         let mut overread_count: usize = 0;
 
         let bad = DecompressionError::BadData;
-        let no_space = DecompressionError::InsufficientSpace;
+
+        // When max_output_size is set and is smaller than the output buffer,
+        // use OutputLimitExceeded instead of InsufficientSpace. The effective
+        // output limit is the smaller of the buffer and the policy limit.
+        let (out_limit, no_space) = match self.max_output_size {
+            Some(max) if max < output.len() => (max, DecompressionError::OutputLimitExceeded),
+            _ => (output.len(), DecompressionError::InsufficientSpace),
+        };
 
         loop {
             // Cooperative cancellation check at each block boundary.
@@ -969,7 +1003,7 @@ impl Decompressor {
                 if len != (!nlen) as usize {
                     return Err(bad);
                 }
-                if len > output.len() - out_pos {
+                if len > out_limit - out_pos {
                     return Err(no_space);
                 }
                 if len > input.len() - in_pos {
@@ -1042,7 +1076,7 @@ impl Decompressor {
             // --- Fastloop + generic decode loop (literals and matches) ---
             let litlen_tablemask = bitmask(self.litlen_tablebits);
             let in_fastloop_end = input.len().saturating_sub(FASTLOOP_MAX_BYTES_READ);
-            let out_fastloop_end = output.len().saturating_sub(FASTLOOP_MAX_BYTES_WRITTEN);
+            let out_fastloop_end = out_limit.saturating_sub(FASTLOOP_MAX_BYTES_WRITTEN);
 
             // The fastloop processes the bulk of data without per-item bounds
             // checks. It exits when input/output margins are exhausted or
@@ -1232,7 +1266,7 @@ impl Decompressor {
 
                     // Literal?
                     if entry & HUFFDEC_LITERAL != 0 {
-                        if out_pos >= output.len() {
+                        if out_pos >= out_limit {
                             return Err(no_space);
                         }
                         output[out_pos] = value as u8;
@@ -1250,7 +1284,7 @@ impl Decompressor {
                         + (extract_varbits8(saved_bitbuf, entry) >> ((entry >> 8) as u8 as u64))
                             as usize;
 
-                    if length > output.len() - out_pos {
+                    if length > out_limit - out_pos {
                         return Err(no_space);
                     }
 
@@ -2568,5 +2602,100 @@ mod tests {
             assert_eq!(result.input_consumed, csize, "L{level} gzip");
             assert_eq!(result.output_written, data.len(), "L{level} gzip");
         }
+    }
+
+    #[test]
+    fn max_output_size_allows_within_limit() {
+        // Data that decompresses to 1000 bytes should succeed with limit >= 1000
+        let data: Vec<u8> = (0..=255).cycle().take(1000).collect();
+        let mut c = crate::Compressor::new(crate::CompressionLevel::fastest());
+        let bound = crate::Compressor::deflate_compress_bound(data.len());
+        let mut compressed = vec![0u8; bound];
+        let csize = c
+            .deflate_compress(&data, &mut compressed, enough::Unstoppable)
+            .unwrap();
+
+        let mut d = Decompressor::new().with_max_output_size(Some(1000));
+        let mut output = vec![0u8; 2000];
+        let result = d
+            .deflate_decompress(&compressed[..csize], &mut output, enough::Unstoppable)
+            .unwrap();
+        assert_eq!(result.output_written, 1000);
+    }
+
+    #[test]
+    fn max_output_size_rejects_over_limit() {
+        // Data that decompresses to 1000 bytes should fail with limit < 1000
+        let data: Vec<u8> = (0..=255).cycle().take(1000).collect();
+        let mut c = crate::Compressor::new(crate::CompressionLevel::fastest());
+        let bound = crate::Compressor::deflate_compress_bound(data.len());
+        let mut compressed = vec![0u8; bound];
+        let csize = c
+            .deflate_compress(&data, &mut compressed, enough::Unstoppable)
+            .unwrap();
+
+        let mut d = Decompressor::new().with_max_output_size(Some(500));
+        let mut output = vec![0u8; 2000];
+        let err = d
+            .deflate_decompress(&compressed[..csize], &mut output, enough::Unstoppable)
+            .unwrap_err();
+        assert_eq!(err, DecompressionError::OutputLimitExceeded);
+    }
+
+    #[test]
+    fn max_output_size_none_is_unlimited() {
+        // Default (None) should behave exactly like before
+        let data: Vec<u8> = vec![0u8; 65536];
+        let mut c = crate::Compressor::new(crate::CompressionLevel::fastest());
+        let bound = crate::Compressor::deflate_compress_bound(data.len());
+        let mut compressed = vec![0u8; bound];
+        let csize = c
+            .deflate_compress(&data, &mut compressed, enough::Unstoppable)
+            .unwrap();
+
+        let mut d = Decompressor::new(); // no limit set
+        let mut output = vec![0u8; 65536];
+        let result = d
+            .deflate_decompress(&compressed[..csize], &mut output, enough::Unstoppable)
+            .unwrap();
+        assert_eq!(result.output_written, 65536);
+    }
+
+    #[test]
+    fn max_output_size_works_with_zlib_wrapper() {
+        let data: Vec<u8> = (0..=255).cycle().take(1000).collect();
+        let mut c = crate::Compressor::new(crate::CompressionLevel::fastest());
+        let bound = crate::Compressor::zlib_compress_bound(data.len());
+        let mut compressed = vec![0u8; bound];
+        let csize = c
+            .zlib_compress(&data, &mut compressed, enough::Unstoppable)
+            .unwrap();
+
+        // Should fail: limit is too small
+        let mut d = Decompressor::new().with_max_output_size(Some(500));
+        let mut output = vec![0u8; 2000];
+        let err = d
+            .zlib_decompress(&compressed[..csize], &mut output, enough::Unstoppable)
+            .unwrap_err();
+        assert_eq!(err, DecompressionError::OutputLimitExceeded);
+    }
+
+    #[test]
+    fn max_output_size_exact_boundary() {
+        // Limit exactly equals output size should succeed
+        let data: Vec<u8> = (0..100).collect();
+        let mut c = crate::Compressor::new(crate::CompressionLevel::fastest());
+        let bound = crate::Compressor::deflate_compress_bound(data.len());
+        let mut compressed = vec![0u8; bound];
+        let csize = c
+            .deflate_compress(&data, &mut compressed, enough::Unstoppable)
+            .unwrap();
+
+        let mut d = Decompressor::new().with_max_output_size(Some(100));
+        let mut output = vec![0u8; 200];
+        let result = d
+            .deflate_decompress(&compressed[..csize], &mut output, enough::Unstoppable)
+            .unwrap();
+        assert_eq!(result.output_written, 100);
     }
 }

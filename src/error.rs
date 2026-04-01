@@ -22,6 +22,16 @@ pub enum DecompressionError {
     ChecksumMismatch,
     /// The output buffer is too small for the decompressed data.
     InsufficientSpace,
+    /// Decompressed output exceeded the configured maximum size limit.
+    ///
+    /// Returned when [`Decompressor::with_max_output_size`] or
+    /// [`StreamDecompressor::with_max_output_size`] is set and the
+    /// decompressed data exceeds that limit. This defends against
+    /// decompression bombs (small inputs that expand to enormous output).
+    OutputLimitExceeded,
+    /// The stream processed too many blocks without producing output,
+    /// indicating a potential denial-of-service via crafted empty blocks.
+    StallLimitExceeded,
     /// The operation was stopped by a cooperative cancellation signal.
     Stopped(enough::StopReason),
 }
@@ -48,6 +58,12 @@ impl core::fmt::Display for DecompressionError {
             Self::InvalidHeader => write!(f, "invalid zlib or gzip header"),
             Self::ChecksumMismatch => write!(f, "checksum mismatch"),
             Self::InsufficientSpace => write!(f, "output buffer too small for decompressed data"),
+            Self::OutputLimitExceeded => {
+                write!(f, "decompressed output exceeded configured maximum size")
+            }
+            Self::StallLimitExceeded => {
+                write!(f, "too many blocks processed without output progress")
+            }
             Self::Stopped(reason) => write!(f, "{reason}"),
         }
     }
