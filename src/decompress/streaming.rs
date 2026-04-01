@@ -144,6 +144,14 @@ const LOOKBACK_SIZE: usize = 32 * 1024;
 /// (e.g. PNG), use `2 * row_stride` instead.
 pub const DEFAULT_CAPACITY: usize = 64 * 1024;
 
+/// Maximum number of DEFLATE blocks that can be processed without producing
+/// any output. Exceeding this returns
+/// [`StallLimitExceeded`](DecompressionError::StallLimitExceeded).
+///
+/// 1,000,000 empty blocks at 3 bits each = ~366 KB of input, which is far
+/// beyond any legitimate use while still catching malicious stall attacks.
+const MAX_BLOCKS_WITHOUT_OUTPUT: u64 = 1_000_000;
+
 // ---------------------------------------------------------------------------
 // StreamDecompressor
 // ---------------------------------------------------------------------------
@@ -215,6 +223,14 @@ pub struct StreamDecompressor<S> {
     // Checksum leniency
     skip_checksum: bool,
     checksum_matched: Option<bool>,
+
+    // Output size limit (decompression bomb defense)
+    max_output_size: Option<usize>,
+    // Total bytes decompressed (across all fill/compact cycles), for limit checking
+    total_decompressed: u64,
+
+    // Stall detection: blocks processed without output progress
+    blocks_without_output: u64,
 }
 
 impl<S: core::fmt::Debug> core::fmt::Debug for StreamDecompressor<S> {
@@ -260,6 +276,21 @@ impl<S> StreamDecompressor<S> {
     pub fn checksum_matched(&self) -> Option<bool> {
         self.checksum_matched
     }
+
+    /// Set a maximum output size limit for decompression.
+    ///
+    /// When set, decompression will return
+    /// [`OutputLimitExceeded`](DecompressionError::OutputLimitExceeded) if the
+    /// total decompressed output would exceed this many bytes. This defends
+    /// against decompression bombs — small compressed inputs that expand to
+    /// enormous output.
+    ///
+    /// `None` (the default) means unlimited.
+    #[must_use]
+    pub fn with_max_output_size(mut self, max: Option<usize>) -> Self {
+        self.max_output_size = max;
+        self
+    }
 }
 
 impl<S: InputSource> StreamDecompressor<S> {
@@ -298,6 +329,9 @@ impl<S: InputSource> StreamDecompressor<S> {
             checksum_watermark: LOOKBACK_SIZE,
             skip_checksum: false,
             checksum_matched: None,
+            max_output_size: None,
+            total_decompressed: 0,
+            blocks_without_output: 0,
         }
     }
 
@@ -396,8 +430,10 @@ impl<S: InputSource> StreamDecompressor<S> {
         self.checksum = checksum_init;
         self.total_output = 0;
         self.checksum_watermark = LOOKBACK_SIZE;
-        // Preserve skip_checksum across reset; clear result
+        // Preserve skip_checksum and max_output_size across reset; clear result
         self.checksum_matched = None;
+        self.total_decompressed = 0;
+        self.blocks_without_output = 0;
     }
 
     // -----------------------------------------------------------------------
@@ -552,6 +588,30 @@ impl<S: InputSource> StreamDecompressor<S> {
                 }
                 StreamState::Done => {
                     return Ok(self.peek());
+                }
+            }
+
+            // Track output progress for limit and stall checks
+            let output_delta = self.write_pos - prev_write_pos;
+            if output_delta > 0 {
+                self.total_decompressed += output_delta as u64;
+                self.blocks_without_output = 0;
+
+                // Check output size limit
+                if let Some(max) = self.max_output_size
+                    && self.total_decompressed > max as u64
+                {
+                    return Err(StreamError::Decompress(
+                        DecompressionError::OutputLimitExceeded,
+                    ));
+                }
+            } else if self.state == StreamState::BlockHeader || self.state == StreamState::Done {
+                // A block completed without producing output
+                self.blocks_without_output += 1;
+                if self.blocks_without_output > MAX_BLOCKS_WITHOUT_OUTPUT {
+                    return Err(StreamError::Decompress(
+                        DecompressionError::StallLimitExceeded,
+                    ));
                 }
             }
 
@@ -2030,5 +2090,56 @@ mod tests {
         let output = stream_decompress_all(&mut dec).unwrap();
         assert_eq!(&output, data);
         assert_eq!(dec.checksum_matched(), None);
+    }
+
+    #[test]
+    fn stream_max_output_size_allows_within_limit() {
+        let data: Vec<u8> = (0..=255).cycle().take(1000).collect();
+        let mut c = crate::Compressor::new(crate::CompressionLevel::fastest());
+        let bound = crate::Compressor::deflate_compress_bound(data.len());
+        let mut compressed = vec![0u8; bound];
+        let csize = c
+            .deflate_compress(&data, &mut compressed, enough::Unstoppable)
+            .unwrap();
+
+        let mut dec = StreamDecompressor::deflate(&compressed[..csize], DEFAULT_CAPACITY)
+            .with_max_output_size(Some(1000));
+        let output = stream_decompress_all(&mut dec).unwrap();
+        assert_eq!(output.len(), 1000);
+        assert_eq!(output, data);
+    }
+
+    #[test]
+    fn stream_max_output_size_rejects_over_limit() {
+        let data: Vec<u8> = (0..=255).cycle().take(1000).collect();
+        let mut c = crate::Compressor::new(crate::CompressionLevel::fastest());
+        let bound = crate::Compressor::deflate_compress_bound(data.len());
+        let mut compressed = vec![0u8; bound];
+        let csize = c
+            .deflate_compress(&data, &mut compressed, enough::Unstoppable)
+            .unwrap();
+
+        let mut dec = StreamDecompressor::deflate(&compressed[..csize], DEFAULT_CAPACITY)
+            .with_max_output_size(Some(500));
+        let err = stream_decompress_all(&mut dec).unwrap_err();
+        match err {
+            StreamError::Decompress(DecompressionError::OutputLimitExceeded) => {}
+            other => panic!("expected OutputLimitExceeded, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stream_max_output_size_none_is_unlimited() {
+        let data: Vec<u8> = vec![0u8; 65536];
+        let mut c = crate::Compressor::new(crate::CompressionLevel::fastest());
+        let bound = crate::Compressor::deflate_compress_bound(data.len());
+        let mut compressed = vec![0u8; bound];
+        let csize = c
+            .deflate_compress(&data, &mut compressed, enough::Unstoppable)
+            .unwrap();
+
+        let mut dec = StreamDecompressor::deflate(&compressed[..csize], DEFAULT_CAPACITY);
+        let output = stream_decompress_all(&mut dec).unwrap();
+        assert_eq!(output.len(), 65536);
     }
 }
