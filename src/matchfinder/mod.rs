@@ -34,8 +34,77 @@ pub(crate) fn lz_hash(seq: u32, num_bits: u32) -> u32 {
 ///
 /// Compares bytes at `strptr[start_len..]` and `matchptr[start_len..]` using
 /// word-at-a-time XOR for speed.
+///
+/// On WASM with simd128, uses 16-byte v128 comparisons to process twice as
+/// many bytes per iteration. This helps with longer matches common in image
+/// data (PNG filtered rows, repeated patterns).
 #[inline(always)]
 pub(crate) fn lz_extend(strptr: &[u8], matchptr: &[u8], start_len: u32, max_len: u32) -> u32 {
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    {
+        lz_extend_wasm128(strptr, matchptr, start_len, max_len)
+    }
+    #[cfg(not(all(target_arch = "wasm32", target_feature = "simd128")))]
+    {
+        lz_extend_word(strptr, matchptr, start_len, max_len)
+    }
+}
+
+/// WASM simd128 match extension: compares 16 bytes at a time using v128.
+///
+/// Uses `i8x16_ne` to find the first differing byte position via `i8x16_bitmask`
+/// + `trailing_zeros`. Falls back to u64 word-at-a-time for the 8-15 byte
+/// remainder and byte-at-a-time for the final 0-7 bytes.
+#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+#[inline(always)]
+fn lz_extend_wasm128(strptr: &[u8], matchptr: &[u8], start_len: u32, max_len: u32) -> u32 {
+    // Use archmage's prelude which re-exports safe v128_load from safe_unaligned_simd
+    use archmage::prelude::*;
+
+    let mut len = start_len;
+    let max = max_len as usize;
+
+    // 16-byte SIMD comparison loop
+    while (len as usize) + 16 <= max {
+        let off = len as usize;
+        let sa: &[u8; 16] = strptr[off..off + 16].try_into().unwrap();
+        let ma: &[u8; 16] = matchptr[off..off + 16].try_into().unwrap();
+        let sv = v128_load(sa);
+        let mv = v128_load(ma);
+        // i8x16_ne produces 0xFF for each differing lane, 0x00 for matching
+        let ne = i8x16_ne(sv, mv);
+        let mask = i8x16_bitmask(ne) as u32;
+        if mask != 0 {
+            len += mask.trailing_zeros();
+            return len.min(max_len);
+        }
+        len += 16;
+    }
+
+    // u64 word-at-a-time for 8-15 byte remainder
+    if (len as usize) + 8 <= max {
+        let off = len as usize;
+        let sw = u64::from_le_bytes(strptr[off..off + 8].try_into().unwrap());
+        let mw = u64::from_le_bytes(matchptr[off..off + 8].try_into().unwrap());
+        let xor = sw ^ mw;
+        if xor != 0 {
+            len += xor.trailing_zeros() >> 3;
+            return len.min(max_len);
+        }
+        len += 8;
+    }
+
+    // Byte-at-a-time for final remainder
+    while (len as usize) < max && strptr[len as usize] == matchptr[len as usize] {
+        len += 1;
+    }
+    len
+}
+
+/// Word-at-a-time match extension for non-WASM targets.
+#[cfg(not(all(target_arch = "wasm32", target_feature = "simd128")))]
+#[inline(always)]
+fn lz_extend_word(strptr: &[u8], matchptr: &[u8], start_len: u32, max_len: u32) -> u32 {
     use crate::fast_bytes::{get_byte, load_u64_le};
 
     let mut len = start_len;
