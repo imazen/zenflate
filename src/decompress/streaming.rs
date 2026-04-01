@@ -144,13 +144,15 @@ const LOOKBACK_SIZE: usize = 32 * 1024;
 /// (e.g. PNG), use `2 * row_stride` instead.
 pub const DEFAULT_CAPACITY: usize = 64 * 1024;
 
-/// Maximum number of DEFLATE blocks that can be processed without producing
-/// any output. Exceeding this returns
+/// Maximum number of consecutive DEFLATE blocks that can be processed without
+/// producing any output. Exceeding this returns
 /// [`StallLimitExceeded`](DecompressionError::StallLimitExceeded).
 ///
-/// 1,000,000 empty blocks at 3 bits each = ~366 KB of input, which is far
-/// beyond any legitimate use while still catching malicious stall attacks.
-const MAX_BLOCKS_WITHOUT_OUTPUT: u64 = 1_000_000;
+/// No legitimate compressor produces thousands of consecutive empty blocks.
+/// Even aggressive sync-flush protocols insert at most one empty stored block
+/// per flush point. 10,000 is generous enough for any real stream while
+/// keeping worst-case CPU waste under ~1 ms.
+const MAX_BLOCKS_WITHOUT_OUTPUT: u64 = 10_000;
 
 // ---------------------------------------------------------------------------
 // StreamDecompressor
@@ -2141,5 +2143,129 @@ mod tests {
         let mut dec = StreamDecompressor::deflate(&compressed[..csize], DEFAULT_CAPACITY);
         let output = stream_decompress_all(&mut dec).unwrap();
         assert_eq!(output.len(), 65536);
+    }
+
+    #[test]
+    fn stream_stall_detection_triggers_on_empty_blocks() {
+        // Craft a DEFLATE stream with many empty static Huffman blocks.
+        // Each empty static block is 10 bits: BFINAL(1) + BTYPE=01(2) + EOB(7).
+        //
+        // Non-final empty block: bits = 0b0000000_01_0 (LSB first in each field)
+        //   BFINAL=0, BTYPE=0b01, EOB=0b0000000 → 10-bit value 0x002
+        // Final empty block:
+        //   BFINAL=1, BTYPE=0b01, EOB=0b0000000 → 10-bit value 0x003
+        //
+        // We need MAX_BLOCKS_WITHOUT_OUTPUT + 2 blocks to trigger the error
+        // (the counter must exceed the limit, so we need limit+1 empty blocks,
+        // plus one more to be safe).
+        let num_empty = MAX_BLOCKS_WITHOUT_OUTPUT as usize + 2;
+
+        // Pack bits LSB-first into bytes
+        let mut bits: u64 = 0;
+        let mut bitcount: u32 = 0;
+        let mut bytes = Vec::new();
+
+        for i in 0..num_empty {
+            let is_final = i == num_empty - 1;
+            // BFINAL (1 bit) + BTYPE=01 (2 bits) + EOB=0000000 (7 bits) = 10 bits
+            // Non-final: 0b0000000010 = 0x002, final: 0b0000000011 = 0x003
+            let block_bits: u64 = if is_final { 0x003 } else { 0x002 };
+            bits |= block_bits << bitcount;
+            bitcount += 10;
+
+            while bitcount >= 8 {
+                bytes.push((bits & 0xFF) as u8);
+                bits >>= 8;
+                bitcount -= 8;
+            }
+        }
+        // Flush remaining bits
+        if bitcount > 0 {
+            bytes.push((bits & 0xFF) as u8);
+        }
+
+        let mut dec = StreamDecompressor::deflate(bytes.as_slice(), DEFAULT_CAPACITY);
+        let err = stream_decompress_all(&mut dec).unwrap_err();
+        match err {
+            StreamError::Decompress(DecompressionError::StallLimitExceeded) => {}
+            other => panic!("expected StallLimitExceeded, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stream_stall_counter_resets_on_output() {
+        // A stream that has some empty blocks, then a block with output, then
+        // more empty blocks. The counter should reset on the output block,
+        // so the total empty blocks can exceed the limit if they're not
+        // consecutive.
+        let mut bits: u64 = 0;
+        let mut bitcount: u32 = 0;
+        let mut bytes = Vec::new();
+
+        let flush = |bits: &mut u64, bitcount: &mut u32, bytes: &mut Vec<u8>| {
+            while *bitcount >= 8 {
+                bytes.push((*bits & 0xFF) as u8);
+                *bits >>= 8;
+                *bitcount -= 8;
+            }
+        };
+
+        // Emit some empty blocks (well under limit)
+        let half_limit = MAX_BLOCKS_WITHOUT_OUTPUT as usize / 2;
+        for _ in 0..half_limit {
+            // Non-final empty static block: 0b0000000010 = 0x002
+            bits |= 0x002u64 << bitcount;
+            bitcount += 10;
+            flush(&mut bits, &mut bitcount, &mut bytes);
+        }
+
+        // Emit a non-final static block with one literal byte (ASCII 'X' = 0x58)
+        // BFINAL=0, BTYPE=01, then literal 0x58.
+        // In static Huffman, literals 0-143 use 8-bit codes starting from
+        // 0b00110000 (48). Literal 0x58 (88) -> code = 48 + 88 = 136 = 0b10001000.
+        // DEFLATE codes are stored MSB-first within the bit field, but the bits
+        // themselves are packed LSB-first into bytes. So we need to reverse the
+        // 8-bit code: 0b10001000 reversed = 0b00010001 = 0x11.
+        // Then EOB (256) = 7-bit code 0b0000000 reversed = 0b0000000.
+        // BFINAL=0 + BTYPE=01 = 3 bits = 0x02
+        bits |= 0x02u64 << bitcount;
+        bitcount += 3;
+        flush(&mut bits, &mut bitcount, &mut bytes);
+        // Literal 0x58: static code reversed = 0x11
+        bits |= 0x11u64 << bitcount;
+        bitcount += 8;
+        flush(&mut bits, &mut bitcount, &mut bytes);
+        // EOB: 7-bit code 0x00
+        bitcount += 7;
+        flush(&mut bits, &mut bitcount, &mut bytes);
+
+        // Emit more empty blocks (well under limit)
+        for _ in 0..half_limit {
+            // Non-final empty static block: 0x002
+            bits |= 0x002u64 << bitcount;
+            bitcount += 10;
+            flush(&mut bits, &mut bitcount, &mut bytes);
+        }
+
+        // Final empty block: 0x003
+        bits |= 0x003u64 << bitcount;
+        bitcount += 10;
+        flush(&mut bits, &mut bitcount, &mut bytes);
+
+        if bitcount > 0 {
+            bytes.push((bits & 0xFF) as u8);
+        }
+
+        // Total empty blocks = half_limit * 2 + 1 > MAX_BLOCKS_WITHOUT_OUTPUT
+        // But no consecutive run exceeds the limit, so this should succeed.
+        let mut dec = StreamDecompressor::deflate(bytes.as_slice(), DEFAULT_CAPACITY);
+        let result = stream_decompress_all(&mut dec);
+        match result {
+            Ok(output) => {
+                // Should contain exactly one byte from the non-empty block
+                assert_eq!(output.len(), 1, "expected 1 byte of output");
+            }
+            Err(e) => panic!("should not stall with reset counter, got {e:?}"),
+        }
     }
 }
