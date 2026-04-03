@@ -3551,6 +3551,7 @@ mod tests {
 
     #[test]
     #[cfg_attr(miri, ignore)]
+    #[cfg(not(target_arch = "wasm32"))]
     fn test_compress_literals_large() {
         let data: Vec<u8> = (0..=255).cycle().take(100_000).collect();
         let mut c = Compressor::new(CompressionLevel::balanced());
@@ -3609,6 +3610,7 @@ mod tests {
 
     #[test]
     #[cfg_attr(miri, ignore)]
+    #[cfg(not(target_arch = "wasm32"))]
     fn test_cross_decompress_libdeflater() {
         // Compress with zenflate, decompress with libdeflater
         let data: Vec<u8> = (0..=255).cycle().take(50_000).collect();
@@ -3649,8 +3651,8 @@ mod tests {
             "level {level}: zenflate roundtrip mismatch"
         );
 
-        // Verify with libdeflater (skip under miri — can't run C FFI)
-        #[cfg(not(miri))]
+        // Verify with libdeflater (skip under miri — can't run C FFI, skip on wasm32 — no C deps)
+        #[cfg(all(not(miri), not(target_arch = "wasm32")))]
         {
             let mut ld = libdeflater::Decompressor::new();
             let mut ld_decompressed = vec![0u8; data.len()];
@@ -3718,6 +3720,7 @@ mod tests {
 
     #[test]
     #[cfg_attr(miri, ignore)]
+    #[cfg(not(target_arch = "wasm32"))]
     fn test_fastest_cross_decompress_c() {
         // Compress with C libdeflate level 1, decompress with zenflate
         let data: Vec<u8> = (0..=255u8).cycle().take(50_000).collect();
@@ -3994,6 +3997,7 @@ mod tests {
 
     #[test]
     #[cfg_attr(miri, ignore)]
+    #[cfg(not(target_arch = "wasm32"))]
     fn test_all_levels_cross_decompress_c() {
         // Compress with C libdeflate at each level, decompress with zenflate
         let data: Vec<u8> = (0..=255u8).cycle().take(50_000).collect();
@@ -4026,6 +4030,7 @@ mod tests {
 
     /// Helper: compare zenflate vs C libdeflate compressed output byte-for-byte.
     /// Collects all failures and reports them at the end.
+    #[cfg(not(target_arch = "wasm32"))]
     fn assert_byte_identical_deflate(data: &[u8], levels: core::ops::RangeInclusive<i32>) {
         let mut failures = alloc::vec::Vec::new();
         for level in levels {
@@ -4067,6 +4072,7 @@ mod tests {
 
     #[test]
     #[cfg_attr(miri, ignore)]
+    #[cfg(not(target_arch = "wasm32"))]
     fn test_libdeflate_byte_identical_sequential() {
         let data: Vec<u8> = (0..=255u8).cycle().take(50_000).collect();
         assert_byte_identical_deflate(&data, 0..=12);
@@ -4074,6 +4080,7 @@ mod tests {
 
     #[test]
     #[cfg_attr(miri, ignore)]
+    #[cfg(not(target_arch = "wasm32"))]
     fn test_libdeflate_byte_identical_mixed() {
         let mut data = Vec::with_capacity(100_000);
         for i in 0..100_000u32 {
@@ -4090,6 +4097,7 @@ mod tests {
 
     #[test]
     #[cfg_attr(miri, ignore)]
+    #[cfg(not(target_arch = "wasm32"))]
     fn test_libdeflate_byte_identical_zeros() {
         let data = vec![0u8; 100_000];
         assert_byte_identical_deflate(&data, 0..=12);
@@ -4097,6 +4105,7 @@ mod tests {
 
     #[test]
     #[cfg_attr(miri, ignore)]
+    #[cfg(not(target_arch = "wasm32"))]
     fn test_libdeflate_byte_identical_gzip() {
         let data: Vec<u8> = (0..=255u8).cycle().take(50_000).collect();
         let mut failures = alloc::vec::Vec::new();
@@ -4138,6 +4147,7 @@ mod tests {
 
     #[test]
     #[cfg_attr(miri, ignore)]
+    #[cfg(not(target_arch = "wasm32"))]
     fn test_libdeflate_byte_identical_zlib() {
         let data: Vec<u8> = (0..=255u8).cycle().take(50_000).collect();
         let mut failures = alloc::vec::Vec::new();
@@ -4370,6 +4380,7 @@ mod tests {
 
     #[test]
     #[cfg_attr(miri, ignore)]
+    #[cfg(not(target_arch = "wasm32"))]
     fn test_parallel_gzip_matches_single_threaded_crc() {
         // Verify the CRC-32 in the parallel output is correct by having
         // libdeflater (C) decompress it.
@@ -4409,18 +4420,18 @@ mod tests {
     // ---- Bug reproducer: greedy compressor corruption on adaptive-filtered PNG data ----
 
     /// PNG filter types (same as PNG spec).
-    #[cfg(not(miri))]
+    #[cfg(all(not(miri), not(target_arch = "wasm32")))]
     const FILTER_NONE: u8 = 0;
-    #[cfg(not(miri))]
+    #[cfg(all(not(miri), not(target_arch = "wasm32")))]
     const FILTER_SUB: u8 = 1;
-    #[cfg(not(miri))]
+    #[cfg(all(not(miri), not(target_arch = "wasm32")))]
     const FILTER_UP: u8 = 2;
-    #[cfg(not(miri))]
+    #[cfg(all(not(miri), not(target_arch = "wasm32")))]
     const FILTER_AVERAGE: u8 = 3;
-    #[cfg(not(miri))]
+    #[cfg(all(not(miri), not(target_arch = "wasm32")))]
     const FILTER_PAETH: u8 = 4;
 
-    #[cfg(not(miri))]
+    #[cfg(all(not(miri), not(target_arch = "wasm32")))]
     fn paeth_predictor(a: u8, b: u8, c: u8) -> u8 {
         let a = a as i16;
         let b = b as i16;
@@ -4439,7 +4450,7 @@ mod tests {
     }
 
     /// Apply a PNG filter to a row. Output written to `out`.
-    #[cfg(not(miri))]
+    #[cfg(all(not(miri), not(target_arch = "wasm32")))]
     fn apply_png_filter(filter: u8, row: &[u8], prev_row: &[u8], bpp: usize, out: &mut [u8]) {
         let len = row.len();
         match filter {
@@ -4479,7 +4490,7 @@ mod tests {
     }
 
     /// MinSum (sum of absolute values) heuristic score for a filtered row.
-    #[cfg(not(miri))]
+    #[cfg(all(not(miri), not(target_arch = "wasm32")))]
     fn sav_score(data: &[u8]) -> u64 {
         data.iter()
             .map(|&b| if b > 128 { 256 - b as u64 } else { b as u64 })
@@ -4488,7 +4499,7 @@ mod tests {
 
     /// Apply adaptive MinSum filtering to raw image data, producing PNG-style
     /// filtered output (filter byte + filtered row per scanline).
-    #[cfg(not(miri))]
+    #[cfg(all(not(miri), not(target_arch = "wasm32")))]
     fn filter_image_minsum(pixels: &[u8], row_bytes: usize, height: usize, bpp: usize) -> Vec<u8> {
         let mut out = Vec::with_capacity(height * (1 + row_bytes));
         let mut prev_row = vec![0u8; row_bytes];
@@ -4524,7 +4535,7 @@ mod tests {
     /// Try to compress and decompress data at the given level. Returns Ok(())
     /// if roundtrip succeeds, Err(msg) if compression panics, errors, or
     /// produces corrupt output.
-    #[cfg(not(miri))]
+    #[cfg(all(not(miri), not(target_arch = "wasm32")))]
     fn try_roundtrip(data: &[u8], level: u32) -> Result<(), String> {
         let data_owned = data.to_vec();
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
@@ -4593,7 +4604,7 @@ mod tests {
     /// Source: codec-corpus/clic2025-1024/0d154749...f0.png
     #[test]
     #[ignore] // requires corpus file
-    #[cfg(not(miri))]
+    #[cfg(all(not(miri), not(target_arch = "wasm32")))]
     fn test_bitstream_overflow_adaptive_filtered_png() {
         let corpus = std::env::var("CODEC_CORPUS_DIR").unwrap_or_else(|_| {
             let parent = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

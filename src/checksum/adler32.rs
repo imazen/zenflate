@@ -919,6 +919,7 @@ mod tests {
 
     #[test]
     #[cfg_attr(miri, ignore)]
+    #[cfg(not(target_arch = "wasm32"))]
     fn test_known_values() {
         let data = b"Hello World";
         let result = adler32(1, data);
@@ -1005,7 +1006,7 @@ mod tests {
 }
 
 // All parity tests use libdeflater (C FFI) for comparison.
-#[cfg(all(test, not(miri)))]
+#[cfg(all(test, not(miri), not(target_arch = "wasm32")))]
 mod parity {
     use super::*;
 

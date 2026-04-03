@@ -1638,7 +1638,7 @@ impl<R: std::io::BufRead> std::io::Read for StreamDecompressor<BufReadSource<R>>
 // Tests
 // ---------------------------------------------------------------------------
 
-#[cfg(all(test, not(miri)))]
+#[cfg(all(test, not(miri), not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
     use alloc::vec;

@@ -895,7 +895,7 @@ mod tests {
 }
 
 // All parity tests use libdeflater (C FFI) for comparison.
-#[cfg(all(test, not(miri)))]
+#[cfg(all(test, not(miri), not(target_arch = "wasm32")))]
 mod parity {
     use super::*;
 

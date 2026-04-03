@@ -32,16 +32,20 @@ libm = "0.2.16"
 
 
 [dev-dependencies]
+codec-corpus = "1"
+crc32fast = "1"
+fdeflate = "0.3"
+miniz_oxide = "0.9"
+png = "0.18"
+simd-adler32 = "0.3"
+
+# Comparison benchmarks and bench harness — native only.
+# libdeflate-sys requires C compilation (needs WASI SDK for wasm32).
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 zenbench = { version = "0.1.2", features = ["criterion-compat"] }
 libdeflater = "1.25"
 flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"] }
-miniz_oxide = "0.9"
-png = "0.18"
-fdeflate = "0.3"
 zlib-rs = "0.6"
-crc32fast = "1"
-simd-adler32 = "0.3"
-codec-corpus = "1"
 
 [profile.release]
 debug = true
@@ -53,3 +57,9 @@ harness = false
 [[bench]]
 name = "corpus"
 harness = false
+
+# Local patches for wasm32 support (codec-corpus fd-lock fix, zenbench fs4 fix).
+# Remove once these are published.
+[patch.crates-io]
+codec-corpus = { path = "/home/lilith/work/codec-corpus/crate" }
+zenbench = { path = "/home/lilith/work/zen/zenbench" }

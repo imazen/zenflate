@@ -1359,7 +1359,7 @@ impl Decompressor {
 }
 
 // All decompress tests use libdeflater (C FFI) to create test data.
-#[cfg(all(test, not(miri)))]
+#[cfg(all(test, not(miri), not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
 
