@@ -3004,7 +3004,7 @@ impl Compressor {
     ///
     /// If `is_last_chunk` is false, a sync flush (empty stored block) is appended
     /// to byte-align the output for concatenation with subsequent chunks.
-    #[cfg(feature = "std")]
+    #[cfg(feature = "threads")]
     fn deflate_compress_chunk(
         &mut self,
         input: &[u8],
@@ -3163,7 +3163,7 @@ impl Compressor {
     /// let result = decompressor.gzip_decompress(&compressed[..csize], &mut output, Unstoppable).unwrap();
     /// assert_eq!(&output[..result.output_written], &data[..]);
     /// ```
-    #[cfg(feature = "std")]
+    #[cfg(feature = "threads")]
     pub fn gzip_compress_parallel(
         &mut self,
         input: &[u8],
@@ -3339,7 +3339,7 @@ fn deflate_compress_none(input: &[u8], output: &mut [u8]) -> Result<usize, Compr
 }
 
 /// Level 0 chunk variant: output uncompressed blocks with BFINAL control.
-#[cfg(feature = "std")]
+#[cfg(feature = "threads")]
 fn deflate_compress_none_chunk(
     input: &[u8],
     output: &mut [u8],
@@ -4307,6 +4307,7 @@ mod tests {
 
     /// Verify parallel gzip compression produces valid output by decompressing
     /// and comparing to original input.
+    #[cfg(feature = "threads")]
     fn parallel_roundtrip(data: &[u8], level: u32, num_threads: usize) {
         let level = CompressionLevel::new(level);
         let bound = Compressor::gzip_compress_bound(data.len()) + num_threads * 5;
@@ -4327,6 +4328,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "threads")]
     fn test_parallel_gzip_level1() {
         // 256KB of mixed data — enough for 4 chunks
         let data = make_mixed_data(256 * 1024);
@@ -4334,18 +4336,21 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "threads")]
     fn test_parallel_gzip_level6() {
         let data = make_mixed_data(256 * 1024);
         parallel_roundtrip(&data, 6, 4);
     }
 
     #[test]
+    #[cfg(feature = "threads")]
     fn test_parallel_gzip_level12() {
         let data = make_mixed_data(256 * 1024);
         parallel_roundtrip(&data, 12, 4);
     }
 
     #[test]
+    #[cfg(feature = "threads")]
     fn test_parallel_gzip_all_levels() {
         let data = make_mixed_data(128 * 1024);
         for level in 0..=12 {
@@ -4356,6 +4361,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "threads")]
     fn test_parallel_gzip_zeros() {
         let data = vec![0u8; 256 * 1024];
         parallel_roundtrip(&data, 1, 4);
@@ -4364,6 +4370,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "threads")]
     fn test_parallel_gzip_sequential() {
         let data: Vec<u8> = (0..256 * 1024).map(|i| (i % 256) as u8).collect();
         parallel_roundtrip(&data, 1, 4);
@@ -4372,6 +4379,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "threads")]
     fn test_parallel_gzip_small_input() {
         // Small input should fall back to single-threaded
         let data = b"Hello, World!";
@@ -4380,7 +4388,7 @@ mod tests {
 
     #[test]
     #[cfg_attr(miri, ignore)]
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(feature = "threads", not(target_arch = "wasm32")))]
     fn test_parallel_gzip_matches_single_threaded_crc() {
         // Verify the CRC-32 in the parallel output is correct by having
         // libdeflater (C) decompress it.

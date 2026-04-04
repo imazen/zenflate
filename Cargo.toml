@@ -19,11 +19,14 @@ exclude = [
 ]
 
 [features]
-default = ["std", "avx512"]
+default = ["std", "avx512", "threads"]
 std = ["alloc", "archmage/std"]
 alloc = []
 avx512 = ["archmage/avx512"]
 unchecked = []
+## Enable `gzip_compress_parallel` and threaded tests.
+## Disable for wasm32 runtimes without thread support.
+threads = ["std"]
 
 [dependencies]
 archmage = { version = "0.9.15", default-features = false, features = ["macros"] }
