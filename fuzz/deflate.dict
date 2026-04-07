@@ -1,0 +1,6 @@
+# DEFLATE/zlib/gzip markers
+"\x78\x01"
+"\x78\x9C"
+"\x78\xDA"
+"\x1F\x8B"
+"\x08"
