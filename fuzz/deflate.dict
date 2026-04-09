@@ -1,6 +1,312 @@
-# DEFLATE/zlib/gzip markers
-"\x78\x01"
-"\x78\x9C"
-"\x78\xDA"
-"\x1F\x8B"
-"\x08"
+# =============================================================================
+# DEFLATE/zlib/gzip fuzzing dictionary for zenflate
+#
+# Covers RFC 1951 (DEFLATE), RFC 1950 (zlib), RFC 1952 (gzip).
+# Organized by format layer and purpose.
+# =============================================================================
+
+# =============================================================================
+# GZIP CONTAINER (RFC 1952)
+# =============================================================================
+
+# Magic bytes
+gzip_magic="\x1F\x8B"
+
+# Compression method (only 8 = deflate is valid)
+gzip_cm_deflate="\x08"
+gzip_cm_invalid="\x00"
+gzip_cm_invalid2="\x09"
+
+# Minimal gzip header: magic + CM=8 + FLG=0 + MTIME=0 + XFL=0 + OS=0xFF
+gzip_hdr_minimal="\x1F\x8B\x08\x00\x00\x00\x00\x00\x00\xFF"
+
+# FLG byte variants (byte 3)
+gzip_flg_none="\x00"
+gzip_flg_ftext="\x01"
+gzip_flg_fhcrc="\x02"
+gzip_flg_fextra="\x04"
+gzip_flg_fname="\x08"
+gzip_flg_fcomment="\x10"
+gzip_flg_all_valid="\x1F"
+gzip_flg_reserved_e0="\xE0"
+gzip_flg_reserved_20="\x20"
+gzip_flg_reserved_40="\x40"
+gzip_flg_reserved_80="\x80"
+
+# Full header combos: magic + CM + FLG
+gzip_hdr_plain="\x1F\x8B\x08\x00"
+gzip_hdr_fname="\x1F\x8B\x08\x08"
+gzip_hdr_fcomment="\x1F\x8B\x08\x10"
+gzip_hdr_fextra="\x1F\x8B\x08\x04"
+gzip_hdr_fhcrc="\x1F\x8B\x08\x02"
+gzip_hdr_fname_fcomment="\x1F\x8B\x08\x18"
+gzip_hdr_all_flags="\x1F\x8B\x08\x1F"
+gzip_hdr_reserved="\x1F\x8B\x08\xE0"
+
+# XFL (extra flags) byte values (byte 8)
+gzip_xfl_fastest="\x04"
+gzip_xfl_slowest="\x02"
+gzip_xfl_none="\x00"
+
+# OS byte values (byte 9)
+gzip_os_fat="\x00"
+gzip_os_unix="\x03"
+gzip_os_mac="\x07"
+gzip_os_ntfs="\x0B"
+gzip_os_unknown="\xFF"
+
+# MTIME field (4 bytes LE, at offset 4-7)
+gzip_mtime_zero="\x00\x00\x00\x00"
+
+# FEXTRA: XLEN (2 bytes LE) + subfield data
+gzip_xlen_zero="\x00\x00"
+gzip_xlen_small="\x06\x00"
+
+# BGZF extra field (BAM/samtools): SI1='B' SI2='C' SLEN=2 + block size
+bgzf_extra="\x42\x43\x02\x00"
+bgzf_header="\x1F\x8B\x08\x04\x00\x00\x00\x00\x00\xFF\x06\x00\x42\x43\x02\x00"
+
+# Null terminator for FNAME/FCOMMENT fields
+null_term="\x00"
+
+# Gzip footer: CRC32 (4 LE) + ISIZE (4 LE)
+gzip_footer_zero="\x00\x00\x00\x00\x00\x00\x00\x00"
+gzip_footer_ff="\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF"
+
+# =============================================================================
+# ZLIB CONTAINER (RFC 1950)
+# =============================================================================
+
+# CMF byte: CM (low 4 bits) + CINFO (high 4 bits)
+# CM=8 (deflate), CINFO=window log2 minus 8 (0-7)
+# CINFO=7 → 32K window (most common)
+zlib_cmf_32k="\x78"
+zlib_cmf_256="\x08"
+zlib_cmf_512="\x18"
+zlib_cmf_1k="\x28"
+zlib_cmf_2k="\x38"
+zlib_cmf_4k="\x48"
+zlib_cmf_8k="\x58"
+zlib_cmf_16k="\x68"
+
+# Invalid CMF: wrong CM (not deflate)
+zlib_cmf_bad_cm="\x19"
+# Invalid CMF: CINFO too high (>7)
+zlib_cmf_bad_cinfo="\x88"
+
+# Common zlib headers: CMF + FLG (must satisfy (CMF*256+FLG) % 31 == 0)
+zlib_hdr_fastest="\x78\x01"
+zlib_hdr_fast="\x78\x5E"
+zlib_hdr_default="\x78\x9C"
+zlib_hdr_best="\x78\xDA"
+
+# Other window size headers (valid CMF+FLG pairs)
+zlib_hdr_256="\x08\x1D"
+zlib_hdr_512="\x18\x19"
+zlib_hdr_1k="\x28\x15"
+zlib_hdr_2k="\x38\x11"
+zlib_hdr_4k="\x48\x0D"
+zlib_hdr_8k="\x58\x09"
+zlib_hdr_16k="\x68\x05"
+
+# FDICT set (bit 5 of FLG) — valid checksum pair with FDICT
+zlib_hdr_fdict="\x78\xBB"
+
+# Bad FLG: checksum doesn't validate (CMF*256+FLG) % 31 != 0
+zlib_hdr_bad_check="\x78\x00"
+zlib_hdr_bad_check2="\x78\x02"
+
+# Adler-32 initial value and common footer patterns
+adler32_init="\x00\x00\x00\x01"
+adler32_empty="\x00\x01\x00\x01"
+adler32_zero="\x00\x00\x00\x00"
+adler32_ff="\xFF\xFF\xFF\xFF"
+
+# =============================================================================
+# RAW DEFLATE BLOCKS (RFC 1951)
+# =============================================================================
+
+# --- Block header bits (packed in low bits of first byte) ---
+# Format: bit0=BFINAL, bits1-2=BTYPE
+# BTYPE: 00=stored, 01=static Huffman, 10=dynamic Huffman, 11=reserved
+
+# Non-final blocks (BFINAL=0)
+blk_stored_nonfinal="\x00"
+blk_static_nonfinal="\x02"
+blk_dynamic_nonfinal="\x04"
+blk_reserved_nonfinal="\x06"
+
+# Final blocks (BFINAL=1)
+blk_stored_final="\x01"
+blk_static_final="\x03"
+blk_dynamic_final="\x05"
+blk_reserved_final="\x07"
+
+# --- Stored blocks (BTYPE=00) ---
+# After BFINAL+BTYPE, align to byte, then LEN (2 LE) + NLEN (2 LE, ones complement)
+
+# Empty stored block, final: BFINAL=1,BTYPE=00 + LEN=0 + NLEN=0xFFFF
+stored_empty_final="\x01\x00\x00\xFF\xFF"
+# Empty stored block, non-final
+stored_empty_nonfinal="\x00\x00\x00\xFF\xFF"
+# Two empty stored blocks (non-final + final)
+stored_two_empty="\x00\x00\x00\xFF\xFF\x01\x00\x00\xFF\xFF"
+
+# Stored block with small data (LEN=5, NLEN=0xFFFA)
+stored_5bytes="\x01\x05\x00\xFA\xFF"
+
+# LEN/NLEN pairs
+len_nlen_0="\x00\x00\xFF\xFF"
+len_nlen_1="\x01\x00\xFE\xFF"
+len_nlen_max="\xFF\xFF\x00\x00"
+
+# Bad NLEN (LEN=5, NLEN=0 instead of 0xFFFA)
+stored_bad_nlen="\x01\x05\x00\x00\x00"
+
+# Sync flush marker: non-final empty stored block
+sync_flush="\x00\x00\x00\xFF\xFF"
+
+# --- Static Huffman blocks (BTYPE=01) ---
+
+# Fixed Huffman end-of-block (symbol 256): 7-bit code 0000000
+# Minimal static block: BFINAL=1 + BTYPE=01 + EOB(256)
+# Byte encoding: bits 0b011 (BFINAL=1,BTYPE=01) + 0000000(EOB) = 0x03 0x00
+static_empty_final="\x03\x00"
+
+# Static Huffman literal 0x00 (8-bit code: 00110000 reversed = 00001100)
+static_lit_00="\x63"
+# Static Huffman with a few common literals
+static_hello="\xF2\x48\xCD\xC9\xC9\x07"
+
+# --- Dynamic Huffman blocks (BTYPE=10) ---
+
+# BFINAL=1 + BTYPE=10 → low 3 bits = 0b101 = 0x05
+dynamic_final_marker="\x05"
+# BFINAL=0 + BTYPE=10 → low 3 bits = 0b100 = 0x04
+dynamic_nonfinal_marker="\x04"
+
+# Dynamic header fields (after 3-bit block header):
+# HLIT (5 bits): num_litlen_syms - 257 (range 0-29)
+# HDIST (5 bits): num_offset_syms - 1 (range 0-29)
+# HCLEN (4 bits): num_precode_lens - 4 (range 0-15)
+# Then HCLEN+4 precode lengths (3 bits each)
+
+# Minimal dynamic block attempt (truncated — should be rejected)
+dynamic_truncated_1="\x05"
+dynamic_truncated_2="\x05\x00"
+dynamic_truncated_3="\x05\x00\x00"
+dynamic_truncated_4="\x05\x00\x00\x00"
+
+# HLIT max (29 = 286 litlen symbols)
+hlit_max_bits="\xE8"
+# HDIST max (29 = 30 offset symbols)
+hdist_max_bits="\x74"
+
+# --- Precode code length alphabet ---
+# Values 0-15: direct code length
+# 16: repeat previous 3-6 times (2 extra bits)
+# 17: repeat 0 for 3-10 times (3 extra bits)
+# 18: repeat 0 for 11-138 times (7 extra bits)
+
+# Precode permutation order: 16,17,18,0,8,7,9,6,10,5,11,4,12,3,13,2,14,1,15
+
+# --- Match lengths and distances ---
+
+# Minimum match length (3 bytes) — symbol 257
+# Maximum match length (258 bytes) — symbol 285
+
+# Length extra bits patterns (representative values)
+len_extra_0="\x00"
+len_extra_1f="\x1F"
+
+# Distance code patterns (representative small distances)
+dist_1="\x00"
+dist_32768="\x1D"
+
+# =============================================================================
+# EDGE CASES AND BOUNDARY VALUES
+# =============================================================================
+
+# All zeros (4-8 bytes)
+zeros_4="\x00\x00\x00\x00"
+zeros_8="\x00\x00\x00\x00\x00\x00\x00\x00"
+
+# All ones
+ones_4="\xFF\xFF\xFF\xFF"
+ones_8="\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF"
+
+# Single bytes that exercise block type detection
+byte_00="\x00"
+byte_01="\x01"
+byte_02="\x02"
+byte_03="\x03"
+byte_04="\x04"
+byte_05="\x05"
+byte_06="\x06"
+byte_07="\x07"
+byte_08="\x08"
+byte_ff="\xFF"
+
+# 16-bit LE boundary values (for LEN, NLEN, XLEN fields)
+le16_0="\x00\x00"
+le16_1="\x01\x00"
+le16_max="\xFF\xFF"
+le16_256="\x00\x01"
+le16_32k="\x00\x80"
+
+# 32-bit LE boundary values (for CRC32, ISIZE, DICTID, Adler-32)
+le32_0="\x00\x00\x00\x00"
+le32_1="\x01\x00\x00\x00"
+le32_max="\xFF\xFF\xFF\xFF"
+
+# 32-bit BE boundary values (for Adler-32 in zlib footer)
+be32_0="\x00\x00\x00\x00"
+be32_1="\x00\x00\x00\x01"
+be32_max="\xFF\xFF\xFF\xFF"
+
+# =============================================================================
+# COMPLETE MINIMAL STREAMS
+# =============================================================================
+
+# Minimal valid raw DEFLATE: final static block with just EOB
+# BFINAL=1, BTYPE=01, EOB(7 bits 0000000) → 0x03 0x00
+min_deflate="\x03\x00"
+
+# Minimal valid zlib: header + deflate(empty) + adler32
+# 0x78 0x01 = zlib header (fastest), then 0x03 0x00 = static empty, then Adler-32 of empty = 0x00010001
+min_zlib="\x78\x01\x03\x00\x00\x01\x00\x01"
+
+# Minimal valid gzip: 10-byte header + deflate(empty) + CRC32(0) + ISIZE(0)
+# Header: 1F 8B 08 00 00000000 00 FF | DEFLATE: 03 00 | CRC32: 00000000 | ISIZE: 00000000
+min_gzip="\x1F\x8B\x08\x00\x00\x00\x00\x00\x00\xFF\x03\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+
+# Minimal stored block in zlib
+# 0x78 0x01 + BFINAL=1 BTYPE=00 + LEN=0 NLEN=0xFFFF + Adler-32(empty)
+min_zlib_stored="\x78\x01\x01\x00\x00\xFF\xFF\x00\x01\x00\x01"
+
+# =============================================================================
+# CONCATENATED / MULTI-MEMBER STREAMS
+# =============================================================================
+
+# Two concatenated gzip members (valid for multi-member gzip)
+gzip_concat_marker="\x1F\x8B\x08\x00\x00\x00\x00\x00\x00\xFF"
+
+# Non-final + final DEFLATE blocks mixed types
+mixed_stored_static="\x00\x00\x00\xFF\xFF\x03\x00"
+
+# =============================================================================
+# KNOWN BUG PATTERNS (upstream references)
+# =============================================================================
+
+# Sync flush pattern (WebSocket per-message compression, miniz_oxide #143)
+# Non-final dynamic block + empty stored sync marker
+sync_flush_pattern="\x00\x00\xFF\xFF"
+
+# flate2 #258: garbage that should be rejected by zlib
+short_garbage="\x4D"
+
+# CRC-32 of empty data
+crc32_empty="\x00\x00\x00\x00"
+
+# zlib-rs #172 test vector header prefix (valid gzip "expected output")
+zlibrs172_prefix="\x1F\x8B\x08\x00\x00\x00\x00\x00\x00\x03"
