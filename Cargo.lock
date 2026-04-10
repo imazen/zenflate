@@ -60,9 +60,9 @@ dependencies = [
 
 [[package]]
 name = "archmage"
-version = "0.9.16"
+version = "0.9.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "906d90739870dc217c19bac4b3d11541817679e875bc3ae03e66458f44ccac6b"
+checksum = "0636b11e613995a7c80768d523829ff5b969ce6ec93dabc911681419af155e77"
 dependencies = [
  "archmage-macros",
  "safe_unaligned_simd",
@@ -70,9 +70,9 @@ dependencies = [
 
 [[package]]
 name = "archmage-macros"
-version = "0.9.16"
+version = "0.9.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e2377968d27d15b6e6117b60026a12a76de7e79a40e1ac664158e2bc562d6d95"
+checksum = "bb5260d826eecd637c893974ae899753e21fd9d4b1f7098114263a1e18921d91"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -87,9 +87,9 @@ checksum = "843867be96c8daad0d758b57df9392b6d8d271134fce549de6ce169ff98a92af"
 
 [[package]]
 name = "cc"
-version = "1.2.59"
+version = "1.2.60"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b7a4d3ec6524d28a329fc53654bbadc9bdd7b0431f5d65f1a56ffb28a1ee5283"
+checksum = "43c5703da9466b66a946814e1adf53ea2c90f10063b86290cc9eb67ce3478a20"
 dependencies = [
  "find-msvc-tools",
  "shlex",
@@ -143,12 +143,12 @@ checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
 
 [[package]]
 name = "codec-corpus"
-version = "1.1.0"
+version = "1.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9bca18d8c762ea5837d394966f3fe3194bf84fae968d8639058c3d845d212d9f"
 dependencies = [
  "dirs",
  "fd-lock",
- "serde",
- "serde_json",
 ]
 
 [[package]]
@@ -807,7 +807,9 @@ checksum = "589f6da84c646204747d1270a2a5661ea66ed1cced2631d546fdfb155959f9ec"
 
 [[package]]
 name = "zenbench"
-version = "0.1.4"
+version = "0.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4e2f74641062813dd597c069db41e6b659714638e21720050cbf64ccf9e61775"
 dependencies = [
  "clap",
  "fs4",

@@ -68,9 +68,3 @@ harness = false
 [[bench]]
 name = "corpus"
 harness = false
-
-# Local patches for wasm32 support (codec-corpus fd-lock fix, zenbench fs4 fix).
-# Remove once these are published.
-[patch.crates-io]
-codec-corpus = { path = "/home/lilith/work/codec-corpus/crate" }
-zenbench = { path = "/home/lilith/work/zen/zenbench" }
