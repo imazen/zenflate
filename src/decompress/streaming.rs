@@ -196,6 +196,18 @@ pub struct StreamDecompressor<S> {
     capacity: usize,
     write_pos: usize,
     read_pos: usize,
+    // Number of real produced bytes immediately preceding `write_pos` that are
+    // valid back-reference targets. Saturates at `LOOKBACK_SIZE` (the maximum
+    // legal DEFLATE back-ref distance).
+    //
+    // This is NOT `write_pos - LOOKBACK_SIZE`: at construction `write_pos`
+    // starts at `LOOKBACK_SIZE`, but the bytes before it are zero-fill, not
+    // real output. A malicious stream emitting a back-ref as the very first
+    // symbol would otherwise read those implicit zeros as "lookback".
+    //
+    // Updated by every write to `write_pos`, and re-clamped by
+    // `compact_output` (which may reduce `write_pos`).
+    lookback_valid: usize,
 
     // Internal input staging buffer
     input_buf: Vec<u8>,
@@ -315,6 +327,7 @@ impl<S: InputSource> StreamDecompressor<S> {
             capacity,
             write_pos: LOOKBACK_SIZE,
             read_pos: LOOKBACK_SIZE,
+            lookback_valid: 0,
             input_buf: vec![0u8; INPUT_BUF_SIZE],
             input_len: 0,
             input_pos: 0,
@@ -416,6 +429,7 @@ impl<S: InputSource> StreamDecompressor<S> {
         self.inner = Decompressor::new();
         self.write_pos = LOOKBACK_SIZE;
         self.read_pos = LOOKBACK_SIZE;
+        self.lookback_valid = 0;
         self.input_len = 0;
         self.input_pos = 0;
         self.bitbuf = 0;
@@ -497,6 +511,10 @@ impl<S: InputSource> StreamDecompressor<S> {
         self.read_pos -= keep_start;
         self.write_pos = keep_len;
         self.checksum_watermark = self.write_pos;
+        // All `keep_len` bytes immediately before the new `write_pos` are
+        // real output. Cap `lookback_valid` to that — back-refs cannot index
+        // past the start of the buffer.
+        self.lookback_valid = self.lookback_valid.min(self.write_pos);
     }
 
     fn output_space(&self) -> usize {
@@ -1055,6 +1073,7 @@ impl<S: InputSource> StreamDecompressor<S> {
             }
             self.buffer[self.write_pos] = lit;
             self.write_pos += 1;
+            self.lookback_valid = (self.lookback_valid + 1).min(LOOKBACK_SIZE);
             if self.peek_len() >= self.capacity {
                 return Ok(());
             }
@@ -1085,6 +1104,10 @@ impl<S: InputSource> StreamDecompressor<S> {
                 let mut bitsleft = self.bitsleft;
                 let mut in_pos = self.input_pos;
                 let mut out_pos = self.write_pos;
+                // Local mirror of `self.lookback_valid` updated as we emit
+                // literals/matches in the fastloop. Saturates at LOOKBACK_SIZE
+                // so it never overflows the legal back-ref range.
+                let mut lookback_valid = self.lookback_valid;
 
                 refill_bits_fast(&mut bitbuf, &mut bitsleft, input, &mut in_pos);
                 let mut entry =
@@ -1115,6 +1138,7 @@ impl<S: InputSource> StreamDecompressor<S> {
                             bitsleft -= entry & 0xFF;
                             self.buffer[out_pos] = lit;
                             out_pos += 1;
+                            lookback_valid = (lookback_valid + 1).min(LOOKBACK_SIZE);
 
                             if entry & HUFFDEC_LITERAL != 0 {
                                 let lit = (entry >> 16) as u8;
@@ -1127,10 +1151,12 @@ impl<S: InputSource> StreamDecompressor<S> {
                                 bitsleft -= entry & 0xFF;
                                 self.buffer[out_pos] = lit;
                                 out_pos += 1;
+                                lookback_valid = (lookback_valid + 1).min(LOOKBACK_SIZE);
 
                                 if entry & HUFFDEC_LITERAL != 0 {
                                     self.buffer[out_pos] = (entry >> 16) as u8;
                                     out_pos += 1;
+                                    lookback_valid = (lookback_valid + 1).min(LOOKBACK_SIZE);
                                     entry = table_lookup(
                                         &self.inner.litlen_decode_table,
                                         bitbuf & litlen_tablemask,
@@ -1164,6 +1190,7 @@ impl<S: InputSource> StreamDecompressor<S> {
                             if entry & HUFFDEC_LITERAL != 0 {
                                 self.buffer[out_pos] = (entry >> 16) as u8;
                                 out_pos += 1;
+                                lookback_valid = (lookback_valid + 1).min(LOOKBACK_SIZE);
                                 entry = table_lookup(
                                     &self.inner.litlen_decode_table,
                                     bitbuf & litlen_tablemask,
@@ -1215,7 +1242,12 @@ impl<S: InputSource> StreamDecompressor<S> {
                                 >> ((oentry >> 8) as u8 as u64))
                                 as usize;
 
-                        if offset == 0 || offset > out_pos {
+                        // Reject back-refs that point past produced output.
+                        // `out_pos` alone is not the right bound: at stream
+                        // start the output buffer holds `LOOKBACK_SIZE` bytes
+                        // of zero-fill that are NOT real lookback. Track the
+                        // count of real bytes immediately behind `out_pos`.
+                        if offset == 0 || offset > lookback_valid {
                             break 'fastloop Exit::BadData;
                         }
 
@@ -1237,6 +1269,7 @@ impl<S: InputSource> StreamDecompressor<S> {
                             offset,
                         );
                         out_pos += length;
+                        lookback_valid = (lookback_valid + length).min(LOOKBACK_SIZE);
 
                         if in_pos >= in_fastloop_end || out_pos >= out_fastloop_end {
                             break 'fastloop Exit::Bounds;
@@ -1249,6 +1282,7 @@ impl<S: InputSource> StreamDecompressor<S> {
                 self.bitsleft = bitsleft;
                 self.input_pos = in_pos;
                 self.write_pos = out_pos;
+                self.lookback_valid = lookback_valid;
 
                 match exit {
                     Exit::EndOfBlock => {
@@ -1325,6 +1359,7 @@ impl<S: InputSource> StreamDecompressor<S> {
                     }
                     self.buffer[self.write_pos] = value as u8;
                     self.write_pos += 1;
+                    self.lookback_valid = (self.lookback_valid + 1).min(LOOKBACK_SIZE);
                     if self.peek_len() >= self.capacity {
                         return Ok(());
                     }
@@ -1362,7 +1397,10 @@ impl<S: InputSource> StreamDecompressor<S> {
                     + (extract_varbits8(saved_bitbuf_off, oentry) >> ((oentry >> 8) as u8 as u64))
                         as usize;
 
-                if offset == 0 || offset > self.write_pos {
+                // Reject back-refs that point past produced output. See the
+                // analogous fastloop check for why `self.write_pos` alone is
+                // not the correct upper bound at stream start.
+                if offset == 0 || offset > self.lookback_valid {
                     return Err(bad.into());
                 }
 
@@ -1420,6 +1458,7 @@ impl<S: InputSource> StreamDecompressor<S> {
             }
         }
         self.write_pos += length;
+        self.lookback_valid = (self.lookback_valid + length).min(LOOKBACK_SIZE);
     }
 
     // -----------------------------------------------------------------------
@@ -1462,6 +1501,7 @@ impl<S: InputSource> StreamDecompressor<S> {
             self.bitbuf >>= 8;
             self.bitsleft -= 8;
             self.write_pos += 1;
+            self.lookback_valid = (self.lookback_valid + 1).min(LOOKBACK_SIZE);
             remaining -= 1;
         }
 
@@ -1500,6 +1540,7 @@ impl<S: InputSource> StreamDecompressor<S> {
         self.buffer[self.write_pos..self.write_pos + can_write]
             .copy_from_slice(&self.input_buf[self.input_pos..self.input_pos + can_write]);
         self.write_pos += can_write;
+        self.lookback_valid = (self.lookback_valid + can_write).min(LOOKBACK_SIZE);
         self.input_pos += can_write;
 
         let new_remaining = remaining - can_write;
@@ -2266,6 +2307,121 @@ mod tests {
                 assert_eq!(output.len(), 1, "expected 1 byte of output");
             }
             Err(e) => panic!("should not stall with reset counter, got {e:?}"),
+        }
+    }
+
+    /// Build a fixed-Huffman DEFLATE stream where the very first symbol is a
+    /// length=258, distance=1 back-reference, followed by end-of-block.
+    ///
+    /// This is the malicious input for the H1 security regression: at the
+    /// start of the stream there is no real lookback, so a back-reference of
+    /// distance 1 must be rejected. A buggy decoder reads from the implicit
+    /// zero-fill at the start of its lookback buffer and emits 258 zeros.
+    fn craft_first_symbol_bad_backref() -> Vec<u8> {
+        // DEFLATE bitstream order: bits packed LSB-first into bytes.
+        // Huffman codes are listed MSB-first in the RFC, so they are
+        // bit-reversed before insertion. Non-Huffman fields (block header,
+        // length/distance extra bits) are written LSB-first directly.
+        let mut bits: u64 = 0;
+        let mut bitcount: u32 = 0;
+        let mut bytes: Vec<u8> = Vec::new();
+
+        let push_huffman =
+            |bits: &mut u64, bitcount: &mut u32, bytes: &mut Vec<u8>, code: u32, len: u32| {
+                // Reverse the `len` low bits of `code` (RFC 1951 sec 3.1.1).
+                let mut rev: u64 = 0;
+                for i in 0..len {
+                    if (code >> i) & 1 != 0 {
+                        rev |= 1 << (len - 1 - i);
+                    }
+                }
+                *bits |= rev << *bitcount;
+                *bitcount += len;
+                while *bitcount >= 8 {
+                    bytes.push((*bits & 0xFF) as u8);
+                    *bits >>= 8;
+                    *bitcount -= 8;
+                }
+            };
+
+        let push_lsb =
+            |bits: &mut u64, bitcount: &mut u32, bytes: &mut Vec<u8>, value: u64, len: u32| {
+                *bits |= value << *bitcount;
+                *bitcount += len;
+                while *bitcount >= 8 {
+                    bytes.push((*bits & 0xFF) as u8);
+                    *bits >>= 8;
+                    *bitcount -= 8;
+                }
+            };
+
+        // Block header: BFINAL=1, BTYPE=01 (fixed Huffman). 3 bits LSB-first.
+        push_lsb(&mut bits, &mut bitcount, &mut bytes, 0b011, 3);
+
+        // Symbol 1: length-258 (literal/length code 285).
+        // Fixed Huffman: 280..=287 use 8-bit codes 0b11000000..=0b11000111.
+        // Code for 285 = 0b11000101.
+        push_huffman(&mut bits, &mut bitcount, &mut bytes, 0b1100_0101, 8);
+        // No extra bits for length 258.
+
+        // Distance code 0 (= distance 1). Fixed: 5-bit codes 0..=29.
+        push_huffman(&mut bits, &mut bitcount, &mut bytes, 0b00000, 5);
+        // No extra bits for distance 1.
+
+        // End-of-block: literal/length code 256.
+        // Fixed Huffman: 256..=279 use 7-bit codes starting at 0b0000000.
+        push_huffman(&mut bits, &mut bitcount, &mut bytes, 0b000_0000, 7);
+
+        // Pad final byte if needed.
+        if bitcount > 0 {
+            bytes.push((bits & 0xFF) as u8);
+        }
+        bytes
+    }
+
+    #[test]
+    fn stream_first_symbol_backref_into_lookback_is_rejected() {
+        // H1 security regression: the streaming decompressor must not accept
+        // a back-reference whose distance points into the lookback area
+        // before any real output has been produced.
+        let bad = craft_first_symbol_bad_backref();
+
+        // Differential check: the whole-buffer decompressor correctly rejects
+        // this stream. The streaming decompressor must do the same.
+        let mut whole = crate::decompress::Decompressor::new();
+        let mut whole_out = vec![0u8; 1024];
+        let whole_result = whole.deflate_decompress(&bad, &mut whole_out, enough::Unstoppable);
+        assert!(
+            whole_result.is_err(),
+            "whole-buffer decompressor must reject distance-into-implicit-lookback"
+        );
+
+        // The streaming decompressor must match the whole-buffer behavior.
+        let mut dec = StreamDecompressor::deflate(bad.as_slice(), DEFAULT_CAPACITY);
+        let stream_result = stream_decompress_all(&mut dec);
+        match stream_result {
+            Err(StreamError::Decompress(DecompressionError::BadData)) => {}
+            Err(other) => panic!("streaming: expected DecompressionError::BadData, got {other:?}"),
+            Ok(output) => panic!(
+                "streaming accepted malicious stream and emitted {} bytes (likely zeros from implicit lookback)",
+                output.len()
+            ),
+        }
+    }
+
+    #[test]
+    fn stream_first_symbol_backref_with_small_capacity_is_rejected() {
+        // Same regression check but exercising the generic (non-fastloop)
+        // decode path by forcing a small output capacity. Both paths must
+        // gate on real produced bytes, not raw `write_pos`.
+        let bad = craft_first_symbol_bad_backref();
+        let mut dec = StreamDecompressor::deflate(bad.as_slice(), 16);
+        let result = stream_decompress_all(&mut dec);
+        match result {
+            Err(StreamError::Decompress(DecompressionError::BadData)) => {}
+            other => panic!(
+                "expected DecompressionError::BadData on tiny-capacity stream, got {other:?}"
+            ),
         }
     }
 }
