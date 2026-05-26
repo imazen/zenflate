@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Changed
+
+- `tests/fuzz_regression.rs` now uses the shared `zen-fuzz-regress`
+  test-helper crate (DEDUP-J2). Behaviour is unchanged — same
+  `fuzz/regression/` seeds, same `Decompressor::{deflate,zlib,gzip}_decompress`
+  entry points, same panic-propagation failure semantics. The
+  ~50-line in-file scaffolding (`collect_seeds`, walk + skip dotfiles
+  + skip `README.md`) is now provided by `RegressionSuite`.
+
 ### Added
 
 - `tests/fuzz_regression.rs` regression-harness template ported from
