@@ -1,5 +1,18 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- `tests/fuzz_regression.rs` regression-harness template ported from
+  zenwebp (DEDUP-J). Walks `fuzz/regression/` (incl. per-target subdirs)
+  and runs every raw-bytes seed through the `Decompressor::{deflate,
+  zlib, gzip}_decompress` entry points covered by the `fuzz_decompress`
+  fuzz target on the stable toolchain — no nightly required. Created
+  `fuzz/regression/README.md` documenting how to add minimized crash
+  seeds (and how to extend the harness for `fuzz_roundtrip`'s
+  arbitrary-encoded seeds).
+
 ## 0.3.2 (2026-03-25)
 
 ### Fixed
