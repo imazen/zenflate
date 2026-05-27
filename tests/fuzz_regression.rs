@@ -1,8 +1,8 @@
 //! Replay seed inputs from `fuzz/regression/` through every fuzz target
 //! entry point. Shared scaffolding lives in `zen-fuzz-regress`.
 
-use zenutils_fuzz::RegressionSuite;
 use zenflate::{Decompressor, Unstoppable};
+use zenutils_fuzz::RegressionSuite;
 
 #[test]
 fn fuzz_regression() {
