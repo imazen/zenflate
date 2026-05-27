@@ -806,10 +806,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "589f6da84c646204747d1270a2a5661ea66ed1cced2631d546fdfb155959f9ec"
 
 [[package]]
-name = "zen-fuzz-regress"
-version = "0.1.0"
-
-[[package]]
 name = "zenbench"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -838,10 +834,16 @@ dependencies = [
  "miniz_oxide 0.9.1",
  "png",
  "simd-adler32",
- "zen-fuzz-regress",
  "zenbench",
+ "zenutils-fuzz",
  "zlib-rs",
 ]
+
+[[package]]
+name = "zenutils-fuzz"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "37b899d74803c7deaca2fdc1345ef9c04b5d5a09a61acce0223805c66c5bc7c7"
 
 [[package]]
 name = "zlib-rs"

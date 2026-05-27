@@ -45,7 +45,7 @@ libm = "0.2.16"
 [dev-dependencies]
 codec-corpus = "1"
 crc32fast = "1"
-zen-fuzz-regress = { path = "../zen-fuzz-regress", version = "0.1.0" }
+zenutils-fuzz = "0.1.0"
 fdeflate = "0.3"
 miniz_oxide = "0.9"
 png = "0.18"
