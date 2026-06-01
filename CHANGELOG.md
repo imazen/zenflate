@@ -4,6 +4,8 @@
 
 ### Changed
 
+- Trimmed `.gitignore`, `UPSTREAM-AUDIT.md`, `benches/`, and `tests/` from the published package tarball via `exclude`; no behaviour change.
+
 - `tests/fuzz_regression.rs` now uses the shared `zen-fuzz-regress`
   test-helper crate (DEDUP-J2). Behaviour is unchanged — same
   `fuzz/regression/` seeds, same `Decompressor::{deflate,zlib,gzip}_decompress`

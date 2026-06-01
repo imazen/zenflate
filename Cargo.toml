@@ -10,9 +10,11 @@ categories = ["compression"]
 keywords = ["deflate", "zlib", "gzip", "compression", "decompression"]
 exclude = [
     ".github/",
+    ".gitignore",
     "CLAUDE.md",
     "CONTEXT-HANDOFF.md",
     "FEEDBACK.md",
+    "UPSTREAM-AUDIT.md",
     ".claude/",
     ".superwork/",
     ".zenbench/",
@@ -21,6 +23,8 @@ exclude = [
     "Cargo.toml.original.txt",
     "Dockerfile",
     "justfile",
+    "benches/",
+    "tests/",
     "examples/heap_*.rs",
     "examples/profile_compress.rs",
     "fuzz/",
