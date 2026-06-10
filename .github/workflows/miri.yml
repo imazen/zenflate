@@ -11,6 +11,9 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # No nightly rustdoc / cargo-public-api under Miri; the snapshot test also
+  # spawns cargo subprocesses, which Miri cannot do — skip it (see ci.yml).
+  ZEN_API_DOC: off
 
 jobs:
   miri:
@@ -35,4 +38,4 @@ jobs:
             --skip window_boundary --skip block_splitting \
             --skip parallel --skip compression_improves \
             --skip short_inputs --skip repetitive \
-            --skip actually_compresses
+            --skip actually_compresses --skip public_api

@@ -14,6 +14,9 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   CI: true
+  # Public-API snapshot regen (tests/public_api_doc.rs) needs nightly rustdoc
+  # + cargo-public-api; only the clippy job carries them and runs the check.
+  ZEN_API_DOC: off
 
 jobs:
   # ==========================================================================
@@ -73,6 +76,10 @@ jobs:
           key: cross-i686
 
       - name: Test (i686/QEMU)
+        # Cross containers don't inherit the workflow env; forward the
+        # public-API snapshot skip so tests/public_api_doc.rs stays off.
+        env:
+          CROSS_CONTAINER_OPTS: "--env ZEN_API_DOC=off"
         run: cross test --target i686-unknown-linux-gnu
 
   # ==========================================================================
@@ -114,6 +121,16 @@ jobs:
 
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
+
+      - uses: dtolnay/rust-toolchain@nightly # rustdoc JSON for cargo-public-api
+      - uses: dtolnay/rust-toolchain@stable # restore stable as default
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-public-api
+      - name: Public-API snapshot is current
+        run: cargo test -p zenflate --test public_api_doc
+        env:
+          ZEN_API_DOC: check
 
   # ==========================================================================
   # Format check

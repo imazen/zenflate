@@ -21,9 +21,18 @@ clippy:
     cargo clippy --all-targets -- -D warnings
     cargo clippy --all-targets --features unchecked -- -D warnings
 
-# Format check
+# Format check + regenerate the public-API surface snapshot (docs/public-api/)
 fmt:
     cargo fmt --all -- --check
+    cargo test -p zenflate --test public_api_doc
+
+# Regenerate the public-API surface snapshot only
+api-doc:
+    cargo test -p zenflate --test public_api_doc
+
+# Verify the committed snapshot is current (what CI runs)
+api-doc-check:
+    ZEN_API_DOC=check cargo test -p zenflate --test public_api_doc
 
 # Format fix
 fmt-fix:
