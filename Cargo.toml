@@ -50,7 +50,6 @@ libm = "0.2.16"
 [dev-dependencies]
 codec-corpus = "1"
 crc32fast = "1"
-serde_json = "1.0.150"
 zenutils-fuzz = "0.1.0"
 fdeflate = "0.3"
 miniz_oxide = "0.9"

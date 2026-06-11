@@ -833,7 +833,6 @@ dependencies = [
  "libm",
  "miniz_oxide 0.9.1",
  "png",
- "serde_json",
  "simd-adler32",
  "zenbench",
  "zenutils-fuzz",

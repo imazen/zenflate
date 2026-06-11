@@ -1,0 +1,16 @@
+# CI-free public-API snapshot runner — the only package depending on
+# zenutils-apidoc. The parent package is a single-package root (no workspace
+# table), so this package's own empty `[workspace]` keeps it standalone; plain
+# `cargo test` and every CI job (including --all-features ones) never
+# compile the apidoc tree or run rustdoc. Regenerate via `just api-doc`.
+[package]
+name = "zenflate-apidoc"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Self-contained: stays out of any parent workspace regardless of its config.
+[workspace]
+
+[dependencies]
+zenutils-apidoc = "0.1.0"
