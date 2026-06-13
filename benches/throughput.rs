@@ -1,7 +1,7 @@
 //! Throughput benchmarks: zenflate vs ecosystem compression libraries.
 //!
-//! Compares: zenflate (Rust), libdeflate (C), flate2 (miniz_oxide backend),
-//! and miniz_oxide (direct).
+//! Compares: zenflate (Rust), libdeflate (C), flate2 (zlib-rs backend),
+//! miniz_oxide (direct), and zlib-rs (direct).
 //!
 //! Run with: `cargo bench --release`
 
@@ -97,6 +97,11 @@ fn miniz_level(level: u32) -> u8 {
     level.min(9) as u8
 }
 
+/// Map zenflate levels to zlib-rs levels (0-9, standard zlib).
+fn zlib_rs_level(level: u32) -> i32 {
+    level.min(9) as i32
+}
+
 // ---------------------------------------------------------------------------
 // Compression benchmarks
 // ---------------------------------------------------------------------------
@@ -178,6 +183,34 @@ fn bench_compress(c: &mut Criterion) {
                     &level,
                     |b, _| {
                         b.iter(|| miniz_oxide::deflate::compress_to_vec(data, ml));
+                    },
+                );
+            }
+
+            // zlib-rs (direct, raw deflate, reuses output buffer).
+            // NOTE: zlib-rs's one-shot `compress_slice` allocates its internal
+            // deflate state per call, whereas the zenflate arm reuses its
+            // Compressor; at these sizes the difference is compute-bound and
+            // the per-call state alloc is negligible.
+            {
+                let bound = zlib_rs::compress_bound(data.len());
+                let mut out = vec![0u8; bound];
+                group.bench_with_input(
+                    BenchmarkId::new("zlib-rs", format!("L{level}")),
+                    &level,
+                    |b, &level| {
+                        b.iter(|| {
+                            let config = zlib_rs::DeflateConfig {
+                                level: zlib_rs_level(level),
+                                method: zlib_rs::Method::Deflated,
+                                window_bits: -15, // raw deflate, matches the other arms
+                                mem_level: 8,
+                                strategy: zlib_rs::Strategy::Default,
+                            };
+                            let (compressed, rc) = zlib_rs::compress_slice(&mut out, data, config);
+                            assert_eq!(rc, zlib_rs::ReturnCode::Ok);
+                            compressed.len()
+                        });
                     },
                 );
             }
