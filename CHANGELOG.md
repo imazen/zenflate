@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- README streaming-decompression example used non-existent constructors
+  (`StreamDecompressor::new_deflate`/`new_gzip`) and a non-idiomatic loop. It
+  now matches the real API: `StreamDecompressor::deflate(source, DEFAULT_CAPACITY)`
+  (and `gzip`/`zlib`) driven by `while !is_done() { fill()?; peek(); advance(n) }`,
+  plus a new untrusted-input note on `with_max_output_size` bomb defense. Docs only.
+
 ### Changed
 
 - Trimmed `.gitignore`, `UPSTREAM-AUDIT.md`, `benches/`, and `tests/` from the published package tarball via `exclude`; no behaviour change.

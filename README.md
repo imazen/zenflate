@@ -46,24 +46,40 @@ let result = decompressor
 For inputs that don't fit in memory or arrive incrementally. Works with
 `&[u8]` (zero overhead) or any `std::io::BufRead` via `BufReadSource`.
 
-```rust
-use zenflate::{StreamDecompressor, InputSource};
+Construct with `deflate`/`zlib`/`gzip` (each takes the source plus an output
+buffer capacity — `DEFAULT_CAPACITY` is 64 KiB), then drive the
+`fill` → `peek` → `advance` loop until `is_done()`:
 
-// From a slice (no_std compatible):
-let mut stream = StreamDecompressor::new_deflate(compressed_data);
-loop {
-    let chunk = stream.fill()?;
-    if chunk.is_empty() { break; }
+```rust
+use zenflate::{StreamDecompressor, DEFAULT_CAPACITY};
+
+// From a slice (`&[u8]` is a zero-overhead source):
+let mut stream = StreamDecompressor::deflate(compressed_data, DEFAULT_CAPACITY);
+while !stream.is_done() {
+    stream.fill()?;             // pull from source, decompress into the buffer
+    let chunk = stream.peek();  // borrow the available decompressed output
     // process chunk...
     let n = chunk.len();
-    stream.advance(n);
+    stream.advance(n);          // mark consumed, freeing buffer space
 }
 
 // From a BufRead (std only):
 use zenflate::BufReadSource;
 let file = std::io::BufReader::new(std::fs::File::open("data.gz").unwrap());
-let mut stream = StreamDecompressor::new_gzip(BufReadSource::new(file));
+let mut stream = StreamDecompressor::gzip(BufReadSource::new(file), DEFAULT_CAPACITY);
 // stream also implements Read + BufRead
+```
+
+**Untrusted input / decompression bombs.** The whole-buffer `Decompressor`
+is naturally bounded by the output slice you pass it. The streaming API
+produces output incrementally, so for untrusted data cap the total with
+`with_max_output_size` (decoding then errors instead of allocating past the
+cap); a stall guard also rejects streams that emit thousands of empty blocks
+without progress:
+
+```rust
+let mut stream = StreamDecompressor::gzip(compressed_data, DEFAULT_CAPACITY)
+    .with_max_output_size(Some(64 * 1024 * 1024)); // DecompressionError::OutputLimitExceeded past 64 MiB
 ```
 
 ### Formats
