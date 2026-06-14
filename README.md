@@ -41,6 +41,26 @@ let result = decompressor
 // result.output_written — bytes of decompressed data produced
 ```
 
+For gzip and zlib, use `gzip_decompress` / `zlib_decompress` (identical shape).
+
+**Server safety — bound the output.** The one-shot decompressors write into the
+`&mut [u8]` you pass, so **that buffer is the size cap**: for untrusted input you
+don't know the decompressed length up front (the gzip trailer is attacker-
+controlled), so size `output` to your maximum and decompression returns an error
+rather than over-allocating. If you instead use the streaming
+[`StreamDecompressor`](#streaming-decompression) (which grows its own buffer),
+cap it explicitly with `.with_max_output_size(Some(max_bytes))` — otherwise a
+small "zip bomb" can expand without bound.
+
+```rust
+// gzip into a hard-capped buffer (rejects anything larger):
+let mut out = vec![0u8; 100 * 1024 * 1024]; // 100 MiB ceiling
+match Decompressor::new().gzip_decompress(gzip_bytes, &mut out, Unstoppable) {
+    Ok(r) => { /* r.output_written bytes are valid */ }
+    Err(e) => { /* malformed input or output exceeds the 100 MiB ceiling */ }
+}
+```
+
 ### Streaming decompression
 
 For inputs that don't fit in memory or arrive incrementally. Works with
