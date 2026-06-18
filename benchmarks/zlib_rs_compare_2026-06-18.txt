@@ -1,0 +1,70 @@
+# zenflate vs zlib-rs — ratio + throughput (compress & decompress)
+# commit: c9cdd95   host: lilith   date: 2026-06-18T03:10:52Z
+# cmd: cargo run --release --features unchecked --example zlib_rs_ratio
+# zenflate 0.3.6 (unchecked), zlib-rs 0.6, zlib format, AMD Ryzen 9 7950X / WSL2
+# real corpora from ~/.cache/compression-corpus (canterbury, silesia); synthetic appended
+#
+   Compiling zenflate v0.3.6 (/home/lilith/work/zen/zenflate)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.70s
+     Running `target/release/examples/zlib_rs_ratio`
+zenflate 0.3.6 vs zlib-rs 0.6  |  zenflate unchecked feature: ON
+zf = zenflate, zl = zlib-rs. c = compress, d = decompress. zlib format, levels 1:1 (zlib-rs clamps to 9).
+
+=== canterbury (11 files, aggregate) — 2810784 bytes ===
+  lvl |  zf bytes  ratio zf c MiB/s zf d MiB/s |  zl bytes  ratio zl c MiB/s zl d MiB/s
+    1 |    828124  3.39x       424      1071 |   1150430  2.44x       474      1181
+    6 |    806581  3.48x       373      1107 |    745548  3.77x       119      1472
+    9 |    806356  3.49x       369      1101 |    732377  3.84x        16      1508
+   12 |    723538  3.88x       165      1124 |    732377  3.84x        16      1535
+
+=== silesia/dickens — 10192446 bytes ===
+  lvl |  zf bytes  ratio zf c MiB/s zf d MiB/s |  zl bytes  ratio zl c MiB/s zl d MiB/s
+    1 |   4422813  2.30x       284       741 |   6023625  1.69x       306       789
+    6 |   4312820  2.36x       246       751 |   3895411  2.62x        72      1063
+    9 |   4312788  2.36x       244       766 |   3859108  2.64x        32      1135
+   12 |   3890580  2.62x        97       789 |   3859108  2.64x        32      1158
+
+=== silesia/samba — 21606400 bytes ===
+  lvl |  zf bytes  ratio zf c MiB/s zf d MiB/s |  zl bytes  ratio zl c MiB/s zl d MiB/s
+    1 |   6195897  3.49x       451      1135 |   7543754  2.86x       489      1307
+    6 |   6023163  3.59x       399      1168 |   5501141  3.93x       126      1450
+    9 |   6015718  3.59x       380      1091 |   5406352  4.00x        56      1532
+   12 |   5480292  3.94x       196      1212 |   5406352  4.00x        58      1577
+
+=== silesia/xml — 5345280 bytes ===
+  lvl |  zf bytes  ratio zf c MiB/s zf d MiB/s |  zl bytes  ratio zl c MiB/s zl d MiB/s
+    1 |   1005716  5.31x       679      1584 |   1183179  4.52x       832      2084
+    6 |    893658  5.98x       626      1769 |    681865  7.84x       178      2747
+    9 |    886867  6.03x       607      1780 |    661887  8.08x        91      2859
+   12 |    752639  7.10x       273      2044 |    661887  8.08x        90      2847
+
+=== silesia/sao — 7251944 bytes ===
+  lvl |  zf bytes  ratio zf c MiB/s zf d MiB/s |  zl bytes  ratio zl c MiB/s zl d MiB/s
+    1 |   5652003  1.28x       190       611 |   6267389  1.16x       190       640
+    6 |   5600951  1.29x       163       619 |   5437902  1.33x        65       630
+    9 |   5600951  1.29x       164       629 |   5318086  1.36x        41       632
+   12 |   5346736  1.36x        86       589 |   5318086  1.36x        41       619
+
+=== silesia/x-ray — 8474240 bytes ===
+  lvl |  zf bytes  ratio zf c MiB/s zf d MiB/s |  zl bytes  ratio zl c MiB/s zl d MiB/s
+    1 |   6378703  1.33x       175       571 |   7872345  1.08x       165       570
+    6 |   6347704  1.34x       158       570 |   6281070  1.35x        75       541
+    9 |   6347704  1.34x       159       590 |   5957207  1.42x        49       652
+   12 |   5998446  1.41x       115       529 |   5957207  1.42x        49       654
+
+=== synthetic mixed (1 MB) — 1000000 bytes ===
+  lvl |  zf bytes  ratio zf c MiB/s zf d MiB/s |  zl bytes  ratio zl c MiB/s zl d MiB/s
+    1 |    888894  1.12x       203       723 |    935170  1.07x       173       668
+    6 |    889421  1.12x       175       720 |    888438  1.13x        78       620
+    9 |    889421  1.12x       175       721 |    888906  1.12x        68       615
+   12 |    885579  1.13x       125       731 |    888906  1.12x        68       613
+
+=== synthetic photo (~1 MB RGB) — 998787 bytes ===
+  lvl |  zf bytes  ratio zf c MiB/s zf d MiB/s |  zl bytes  ratio zl c MiB/s zl d MiB/s
+    1 |    919312  1.09x       187       640 |   1054741  0.95x       147       593
+    6 |    919227  1.09x       164       642 |    918324  1.09x        68       544
+    9 |    919227  1.09x       164       645 |    913433  1.09x        62       504
+   12 |    919837  1.09x       102       564 |    913433  1.09x        60       504
+
+Read each level as a (ratio, speed) pair: compare zenflate and zlib-rs at MATCHED
+RATIO (similar output size), not matched level number. zenflate L10/L12 vs zlib-rs L9.
