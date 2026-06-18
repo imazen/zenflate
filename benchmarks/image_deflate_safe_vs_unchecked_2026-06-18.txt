@@ -1,0 +1,30 @@
+# zenflate safe (default, forbid unsafe) vs unchecked (opt-in unsafe), on the image-DEFLATE corpus.
+# Answers the fairness question: zlib-rs has NO safe mode (default=[std,c-allocator], 181 unsafe
+# blocks, its only config); benched WITHOUT the opt-in avx512/vpclmulqdq features, so SSE/AVX2 not
+# AVX-512 (its numbers are if anything conservative on a 7950X).
+# commit: 54f1538  host: lilith  date: 2026-06-18T06:17:24Z
+# columns: class transform n  zf_ratio zl_ratio  zf_cMiB zl_cMiB  zf_dMiB zl_dMiB
+#
+## SAFE mode (cargo run --release --example image_deflate_corpus)
+================ level: zenflate L6 vs zlib-rs L6 ================
+*           raw           35   2.76x   2.89x      314      133     1049     1335   <== ALL
+*           tiff_pred2    35   3.44x   3.67x      354      120      996     1550   <== ALL
+*           png_filter    35   3.62x   3.83x      376      121     1118     1616   <== ALL
+================ level: zenflate L12 vs zlib-rs L9 ================
+*           raw           35   2.98x   3.12x      180       58      945     1358   <== ALL
+*           tiff_pred2    35   3.67x   3.80x      166       34     1091     1600   <== ALL
+*           png_filter    35   3.84x   3.95x      165       30     1149     1550   <== ALL
+
+## UNCHECKED mode (--features unchecked)
+================ level: zenflate L6 vs zlib-rs L6 ================
+*           raw           35   2.76x   2.89x      317      127     1032     1274   <== ALL
+*           tiff_pred2    35   3.44x   3.67x      352      120     1003     1572   <== ALL
+*           png_filter    35   3.62x   3.83x      374      112     1068     1613   <== ALL
+================ level: zenflate L12 vs zlib-rs L9 ================
+*           raw           35   2.98x   3.12x      183       56      917     1333   <== ALL
+*           tiff_pred2    35   3.67x   3.80x      165       33     1063     1590   <== ALL
+*           png_filter    35   3.84x   3.95x      176       30     1121     1625   <== ALL
+
+# Takeaways: output byte-identical (ratios match). Compress safe≈unchecked at L6 (~0%),
+# ~6% at L12 near-optimal. Decompress: SAFE is equal-or-FASTER than unchecked, yet still
+# ~0.69x of zlib-rs on png_filter — zlib-rs's inflate lead is real, not a mode artifact.
