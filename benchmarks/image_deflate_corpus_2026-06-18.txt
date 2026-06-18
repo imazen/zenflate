@@ -1,0 +1,79 @@
+# Image-DEFLATE corpus: zenflate vs zlib-rs on PNG/TIFF codec byte streams
+# commit: ae01709  host: lilith  date: 2026-06-18T05:55:40Z
+# cmd: IMG_PER_CLASS=4 cargo run --release --features unchecked --example image_deflate_corpus
+# corpus: imazen-26 PNG set (/mnt/v/output/imazen-26-png), content-classed, 8-bit RGB(A)/Gray
+# each image center-cropped to <=1.0MP; transforms = raw / TIFF predictor-2 / PNG adaptive filter
+# zenflate 0.3.6 unchecked, zlib-rs 0.6, zlib format, Ryzen 9 7950X / WSL2
+#
+image-DEFLATE corpus: zenflate 0.3.6 (unchecked=true) vs zlib-rs 0.6
+corpus: /mnt/v/output/imazen-26-png  (per-class=4, center-crop ≤1 MP)
+
+================ level: zenflate L6 vs zlib-rs L6 ================
+class       transform      n  zf rat  zl rat  zf cMiB  zl cMiB  zf dMiB  zl dMiB
+clipart     raw            4   2.29x   2.41x      366      174     1317     1414
+document    raw            4   9.71x  10.96x     2525      559     5695     6047
+other       raw            4  41.20x  45.86x     3794     1473     7359    10354
+photo       raw            4   1.69x   1.77x      191       88      652      743
+plot        raw            4  11.17x  13.30x     2143      482     5506     7296
+render      raw            4   1.77x   1.84x      231      126      842      874
+scan        raw            3   2.00x   2.11x      207       83      703      775
+screenshot  raw            4   9.12x   9.54x     1950      658     5051     6302
+texture     raw            4   1.48x   1.53x      178       85      650      658
+*           raw           35   2.76x   2.89x      317      127     1032     1274   <== ALL
+clipart     tiff_pred2     4   2.92x   3.10x      382      134     1248     1498
+document    tiff_pred2     4  10.62x  11.83x     2304      558     6130     7461
+other       tiff_pred2     4  35.92x  38.85x     3453     1378     9009    11502
+photo       tiff_pred2     4   2.37x   2.57x      249       50      809     1089
+plot        tiff_pred2     4  10.14x  11.29x     1868      488     4911     6168
+render      tiff_pred2     4   2.24x   2.35x      265       79      672     1030
+scan        tiff_pred2     3   2.27x   2.44x      210       62      692      916
+screenshot  tiff_pred2     4  10.12x  10.59x     1795      668     5020     6680
+texture     tiff_pred2     4   1.89x   1.98x      196       72      669      797
+*           tiff_pred2    35   3.44x   3.67x      352      120     1003     1572   <== ALL
+clipart     png_filter     4   3.10x   3.28x      395      133     1279     1558
+document    png_filter     4  12.10x  12.98x     2352      652     6125     7475
+other       png_filter     4  35.80x  38.23x     3552     1247     9547    11231
+photo       png_filter     4   2.46x   2.66x      248       50      754     1184
+plot        png_filter     4  11.05x  11.84x     2013      621     5297     6168
+render      png_filter     4   2.34x   2.45x      252       78      679      992
+scan        png_filter     3   2.41x   2.57x      219       59      697     1000
+screenshot  png_filter     4  10.61x  11.02x     1938      666     5259     7031
+texture     png_filter     4   1.96x   2.05x      201       73      680      830
+*           png_filter    35   3.62x   3.83x      374      112     1068     1613   <== ALL
+
+================ level: zenflate L12 vs zlib-rs L9 ================
+class       transform      n  zf rat  zl rat  zf cMiB  zl cMiB  zf dMiB  zl dMiB
+clipart     raw            4   2.45x   2.54x      209       53     1070     1342
+document    raw            4  10.87x  11.92x      704       64     3882     5009
+other       raw            4  47.56x  53.06x      803      179     5826     8688
+photo       raw            4   1.84x   1.90x      109       56      548      765
+plot        raw            4  12.91x  14.79x      681       69     3609     6555
+render      raw            4   1.89x   1.99x      146       56      688      878
+scan        raw            3   2.16x   2.24x      101       35      618      834
+screenshot  raw            4   9.88x  10.41x      619       88     3807     5457
+texture     raw            4   1.60x   1.68x      110       57      526      664
+*           raw           35   2.98x   3.12x      183       56      917     1333   <== ALL
+clipart     tiff_pred2     4   3.06x   3.13x      197       27     1238     1590
+document    tiff_pred2     4  11.59x  12.67x      651       41     6192     7835
+other       tiff_pred2     4  38.89x  42.15x      773      124    10188    11400
+photo       tiff_pred2     4   2.56x   2.64x      103       17      766     1141
+plot        tiff_pred2     4  10.99x  12.13x      647       51     5176     6518
+render      tiff_pred2     4   2.32x   2.38x      118       28      724     1066
+scan        tiff_pred2     3   2.49x   2.60x       91       20      664      852
+screenshot  tiff_pred2     4  10.77x  11.24x      590       62     4633     5963
+texture     tiff_pred2     4   2.00x   2.07x      108       27      643      873
+*           tiff_pred2    35   3.67x   3.80x      165       33     1063     1590   <== ALL
+clipart     png_filter     4   3.26x   3.30x      193       25     1280     1625
+document    png_filter     4  13.00x  13.82x      677       45     6141     8318
+other       png_filter     4  38.43x  41.22x      763       94     9602    11719
+photo       png_filter     4   2.65x   2.71x      107       13      768     1198
+plot        png_filter     4  11.74x  12.70x      646       47     5533     7115
+render      png_filter     4   2.44x   2.48x      114       21      883     1181
+scan        png_filter     3   2.61x   2.71x       93       15      695      951
+screenshot  png_filter     4  11.27x  11.63x      594       55     4489     6140
+texture     png_filter     4   2.06x   2.13x       94       21      649      897
+*           png_filter    35   3.84x   3.95x      176       30     1121     1625   <== ALL
+
+ratio = original/compressed (higher is better). cMiB = compress MiB/s, dMiB = decompress MiB/s.
+Note how the transform moves the ratio far more than the compressor does: png_filter/tiff_pred2
+vs raw is the real image-DEFLATE workload. Photos barely move; screenshots/clipart/plots move a lot.
