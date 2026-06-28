@@ -12,6 +12,7 @@
 
 ### Changed
 
+- README/onboarding refresh: standardized badge row (CI/crates.io/lib.rs/docs.rs/MSRV/license, all `flat-square`, no `branch=`), added a copy-paste `## Quick start` round-trip, documented the `threads` feature, wrapped the heavy benchmark tables in `crates.io:skip` markers behind an honest v0.3.1-provenance note, refreshed the crosslink footer, and made License links absolute. crates.io now ships a generated `README.crates.md` (`readme = "README.crates.md"`); added `benchmarks/README.md` (methodology + repro). Docs only.
 - Trimmed `.gitignore`, `UPSTREAM-AUDIT.md`, `benches/`, and `tests/` from the published package tarball via `exclude`; no behaviour change.
 
 - `tests/fuzz_regression.rs` now uses the shared `zen-fuzz-regress`

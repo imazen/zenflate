@@ -1,4 +1,6 @@
-# zenflate [![CI](https://img.shields.io/github/actions/workflow/status/imazen/zenflate/ci.yml?style=flat-square&label=CI)](https://github.com/imazen/zenflate/actions/workflows/ci.yml) [![crates.io](https://img.shields.io/crates/v/zenflate?style=flat-square)](https://crates.io/crates/zenflate) [![lib.rs](https://img.shields.io/crates/v/zenflate?style=flat-square&label=lib.rs&color=blue)](https://lib.rs/crates/zenflate) [![docs.rs](https://img.shields.io/docsrs/zenflate?style=flat-square)](https://docs.rs/zenflate) [![MSRV](https://img.shields.io/badge/MSRV-1.89-blue?style=flat-square)](https://doc.rust-lang.org/cargo/reference/manifest.html#the-rust-version-field) [![license](https://img.shields.io/badge/license-AGPL--3.0%20%2F%20Commercial-blue?style=flat-square)](#license)
+<!-- GENERATED FROM README.md by zenutils gen-readme-crates.sh — DO NOT EDIT. -->
+
+# zenflate [![CI](https://img.shields.io/github/actions/workflow/status/imazen/zenflate/ci.yml?style=flat-square&label=CI)](https://github.com/imazen/zenflate/actions/workflows/ci.yml)
 
 Pure Rust DEFLATE / zlib / gzip. Compression spans effort levels 0–30 across six strategies (and can emit byte-identical output to C libdeflate on demand), with whole-buffer and streaming decompression plus SIMD Adler-32 / CRC-32. `#![forbid(unsafe_code)]` by default (with an opt-in `unchecked` fast path) and `no_std`-friendly: compression and streaming decompression require `alloc`, while whole-buffer decompression is fully stack-allocated.
 
@@ -268,58 +270,6 @@ the loop and can stop between `fill()` calls.
 
 Decompression works in `no_std` without `alloc`; all state is stack-allocated.
 
-<!-- crates.io:skip-start -->
-## Performance
-
-The headline figures below were measured on x86_64 with AVX-512 (Intel),
-`--features unchecked`, on **v0.3.1**. The v0.3.2 storage change
-(`NearOptimalState` / `BtMatchfinder` moved from fixed arrays to `Vec`) can
-shift levels 10–12 and 30, so treat the high-effort rows as indicative. For
-current, dated, reproducible runs — including a v0.3.6-vs-zlib-rs comparison —
-and the full methodology, see
-**[benchmarks/README.md](https://github.com/imazen/zenflate/blob/main/benchmarks/README.md)**.
-
-**Compression** (3 MiB photo bitmap, reproducible via `examples/ratio_bench.rs`):
-
-| Library | Level | Ratio | Speed | vs C |
-|---------|-------|-------|-------|------|
-| **zenflate** | effort 1 (fastest) | 91.69% | 149 MiB/s | 0.81x |
-| **zenflate** | effort 15 (balanced) | 92.31% | 105 MiB/s | 0.88x |
-| **zenflate** | effort 22 (high) | 92.31% | 104 MiB/s | 0.87x |
-| **zenflate** | effort 30 (best) | 91.80% | 39 MiB/s | 0.89x |
-| libdeflate (C) | L1 | 91.69% | 185 MiB/s | — |
-| libdeflate (C) | L9 | 92.31% | 119 MiB/s | — |
-| libdeflate (C) | L12 | 91.80% | 44 MiB/s | — |
-| flate2 | L1 | 91.70% | 291 MiB/s | — |
-| flate2 | L9 (best) | 91.58% | 55 MiB/s | — |
-
-zenflate and libdeflate produce **byte-identical output** at every level
-(via `CompressionLevel::libdeflate(n)`).
-
-**Decompression** (compressed at L6):
-
-| Data type | zenflate | libdeflate (C) | flate2 | miniz_oxide |
-|-----------|----------|----------------|--------|-------------|
-| Sequential | 27.7 GiB/s | 31.6 GiB/s | 7.2 GiB/s | 6.6 GiB/s |
-| Zeros | 34.6 GiB/s | 14.5 GiB/s | 26.6 GiB/s | 17.2 GiB/s |
-| Mixed | 717 MiB/s | 795 MiB/s | 585 MiB/s | 571 MiB/s |
-
-**Checksums:**
-
-| Algorithm | zenflate | libdeflate (C) | Implementation |
-|-----------|----------|----------------|----------------|
-| Adler-32 | 114 GiB/s | 121 GiB/s | AVX-512 VNNI (x86), NEON (aarch64), WASM simd128 |
-| CRC-32 | 78 GiB/s | 77 GiB/s | PCLMULQDQ (x86), PMULL (aarch64) |
-
-**Parallel gzip** (4 MB mixed data):
-
-| Level | 1 thread | 4 threads | Speedup |
-|-------|----------|-----------|---------|
-| effort 1 | 161 MiB/s | 534 MiB/s | 3.3x |
-| effort 15 | 133 MiB/s | 440 MiB/s | 3.3x |
-| effort 30 | 46 MiB/s | 135 MiB/s | 2.9x |
-
-<!-- crates.io:skip-end -->
 ## How it works
 
 zenflate started as a port of Eric Biggers'
