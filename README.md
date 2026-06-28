@@ -9,6 +9,26 @@ Pure Rust DEFLATE / zlib / gzip. Compression spans effort levels 0–30 across s
 zenflate = "0.3"
 ```
 
+One-shot helpers compress or decompress a whole buffer in a single call and hand
+back a right-sized `Vec`:
+
+```rust
+use zenflate::CompressionLevel;
+
+let data: &[u8] = b"the quick brown fox jumps over the lazy dog, again and again";
+
+// Compress to gzip with the balanced preset (`zlib_compress` shares this shape).
+let compressed = zenflate::gzip_compress(data, CompressionLevel::balanced()).unwrap();
+
+// Decompress. `max_output_size` is a hard ceiling that bounds untrusted input:
+// decompression errors out rather than allocating past it (zip-bomb defense).
+let restored = zenflate::gzip_decompress(&compressed, 1024 * 1024).unwrap();
+assert_eq!(restored, data);
+```
+
+Prefer to manage the buffers yourself — zero extra allocation, in-place output,
+raw DEFLATE, or a fixed output cap? Drive `Compressor` / `Decompressor` directly:
+
 ```rust
 use zenflate::{Compressor, Decompressor, CompressionLevel, Unstoppable};
 
@@ -27,8 +47,8 @@ let r = Decompressor::new()
 assert_eq!(&out[..r.output_written], data);
 ```
 
-Need gzip/zlib framing, streaming, parallel gzip, cancellation, or fine-grained
-effort control? Those are covered below.
+Need streaming, parallel gzip, cancellation, or fine-grained effort control?
+Those are covered below.
 
 ## Usage
 
@@ -62,16 +82,19 @@ let result = decompressor
 // result.output_written — bytes of decompressed data produced
 ```
 
-For gzip and zlib, use `gzip_decompress` / `zlib_decompress` (identical shape).
+For gzip and zlib, call `decompressor.gzip_decompress` / `.zlib_decompress`
+(identical shape).
 
-**Server safety — bound the output.** The one-shot decompressors write into the
-`&mut [u8]` you pass, so **that buffer is the size cap**: for untrusted input you
-don't know the decompressed length up front (the gzip trailer is attacker-
-controlled), so size `output` to your maximum and decompression returns an error
-rather than over-allocating. If you instead use the streaming
-[`StreamDecompressor`](#streaming-decompression) (which grows its own buffer),
-cap it explicitly with `.with_max_output_size(Some(max_bytes))` — otherwise a
-small "zip bomb" can expand without bound.
+**Server safety — bound the output.** The whole-buffer `Decompressor` methods
+write into the `&mut [u8]` you pass, so **that buffer is the size cap**: for
+untrusted input you don't know the decompressed length up front (the gzip trailer
+is attacker-controlled), so size `output` to your maximum and decompression
+returns an error rather than over-allocating. The one-shot free functions
+(`zenflate::gzip_decompress` / `zlib_decompress`) take that same ceiling as an
+explicit `max_output_size` argument and refuse to grow past it. If you instead
+use the streaming [`StreamDecompressor`](#streaming-decompression) (which grows
+its own buffer), cap it explicitly with `.with_max_output_size(Some(max_bytes))`
+— otherwise a small "zip bomb" can expand without bound.
 
 ```rust
 // gzip into a hard-capped buffer (rejects anything larger):
