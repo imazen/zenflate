@@ -1,6 +1,6 @@
 <!-- GENERATED FROM README.md by zenutils gen-readme-crates.sh — DO NOT EDIT. -->
 
-# zenflate [![CI](https://img.shields.io/github/actions/workflow/status/imazen/zenflate/ci.yml?style=flat-square&label=CI)](https://github.com/imazen/zenflate/actions/workflows/ci.yml)
+# zenflate
 
 Pure Rust DEFLATE / zlib / gzip. Compression spans effort levels 0–30 across six strategies (and can emit byte-identical output to C libdeflate on demand), with whole-buffer and streaming decompression plus SIMD Adler-32 / CRC-32. `#![forbid(unsafe_code)]` by default (with an opt-in `unchecked` fast path) and `no_std`-friendly: compression and streaming decompression require `alloc`, while whole-buffer decompression is fully stack-allocated.
 
