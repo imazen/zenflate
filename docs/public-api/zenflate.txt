@@ -6,14 +6,14 @@
 # impls omitted; re-export duplicates annotated `[also: path]`.
 # DO NOT EDIT BY HAND — commit regenerated changes with the code.
 #
-# files: zenflate.txt 201 lines (supported surface) | zenflate.features.txt 0 added (features: alloc,avx512,std,threads,unchecked) | zenflate.internal.txt 8 lines (8 hidden + 0 excluded-feature)
+# files: zenflate.txt 197 lines (supported surface) | zenflate.features.txt 0 added (features: alloc,avx512,std,threads,unchecked) | zenflate.internal.txt 8 lines (8 hidden + 0 excluded-feature)
 
 ## summary
 #
 #   pub modules                                 6
 #   pub types (struct/enum/trait/alias)        28
 #   pub consts/statics                          2
-#   free functions                             12
+#   free functions                              8
 #   inherent methods                          124
 #   struct fields                               4
 #   enum variants                              22
@@ -23,13 +23,13 @@
 #   auto-trait exceptions                       3
 #
 # per-module pub lines:
-#   (root)                           76
+#   (root)                           72
 #   checksum                          6
 #   compress                         53
 #   decompress                       52
 #   error                            14
 
-## items (183 lines)
+## items (179 lines)
 
 pub mod zenflate
 pub use Stop
@@ -210,10 +210,6 @@ pub fn adler32(u32, &[u8]) -> u32 [also: checksum]
 pub fn adler32_combine(u32, u32, usize) -> u32 [also: checksum]
 pub fn crc32(u32, &[u8]) -> u32 [also: checksum]
 pub fn crc32_combine(u32, u32, usize) -> u32 [also: checksum]
-pub fn gzip_compress(&[u8], compress::CompressionLevel) -> core::result::Result<alloc::vec::Vec<u8>, error::CompressionError>
-pub fn gzip_decompress(&[u8], usize) -> core::result::Result<alloc::vec::Vec<u8>, error::DecompressionError>
-pub fn zlib_compress(&[u8], compress::CompressionLevel) -> core::result::Result<alloc::vec::Vec<u8>, error::CompressionError>
-pub fn zlib_decompress(&[u8], usize) -> core::result::Result<alloc::vec::Vec<u8>, error::DecompressionError>
 
 ## trait impls (14 types)
 
