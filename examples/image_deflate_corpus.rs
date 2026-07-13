@@ -329,7 +329,8 @@ fn main() {
         return;
     }
 
-    let transforms: [(&str, fn(&Image) -> Vec<u8>); 3] = [
+    type Transform = (&'static str, fn(&Image) -> Vec<u8>);
+    let transforms: [Transform; 3] = [
         ("raw", t_raw),
         ("tiff_pred2", t_tiff_pred2),
         ("png_filter", t_png_filter),

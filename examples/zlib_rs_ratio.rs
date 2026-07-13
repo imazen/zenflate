@@ -214,9 +214,8 @@ fn bench(name: &str, data: &[u8], levels: &[u32]) {
 fn main() {
     let unchecked = cfg!(feature = "unchecked");
     println!(
-        "zenflate {} vs zlib-rs {}  |  zenflate unchecked feature: {}",
+        "zenflate {} vs zlib-rs 0.6  |  zenflate unchecked feature: {}",
         env!("CARGO_PKG_VERSION"),
-        "0.6",
         if unchecked { "ON" } else { "off" },
     );
     println!(
