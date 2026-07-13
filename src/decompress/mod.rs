@@ -1363,6 +1363,7 @@ impl Decompressor {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "compress")]
     #[test]
     fn test_decompress_empty_static() {
         // Compress empty data with libdeflater, decompress with us
@@ -1380,6 +1381,7 @@ mod tests {
         assert_eq!(out_size, 0);
     }
 
+    #[cfg(feature = "compress")]
     #[test]
     fn test_decompress_hello_world() {
         let data = b"Hello, World!";
@@ -1398,6 +1400,7 @@ mod tests {
         assert_eq!(&output, data);
     }
 
+    #[cfg(feature = "compress")]
     #[test]
     fn test_decompress_all_levels() {
         let data: Vec<u8> = (0..=255).cycle().take(10_000).collect();
@@ -1419,6 +1422,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "compress")]
     #[test]
     fn test_decompress_all_zeros() {
         let data = vec![0u8; 100_000];
@@ -1437,6 +1441,7 @@ mod tests {
         assert_eq!(output, data);
     }
 
+    #[cfg(feature = "compress")]
     #[test]
     fn test_decompress_uncompressed_block() {
         // Level 0 produces uncompressed blocks
@@ -1456,6 +1461,7 @@ mod tests {
         assert_eq!(&output[..], data);
     }
 
+    #[cfg(feature = "compress")]
     #[test]
     fn test_zlib_decompress() {
         let data: Vec<u8> = (0..=255).cycle().take(5000).collect();
@@ -1474,6 +1480,7 @@ mod tests {
         assert_eq!(output, data);
     }
 
+    #[cfg(feature = "compress")]
     #[test]
     fn test_gzip_decompress() {
         let data: Vec<u8> = (0..=255).cycle().take(5000).collect();
@@ -1492,6 +1499,7 @@ mod tests {
         assert_eq!(output, data);
     }
 
+    #[cfg(feature = "compress")]
     #[test]
     fn test_decompress_large() {
         let data: Vec<u8> = (0..=255).cycle().take(1_000_000).collect();
@@ -1510,6 +1518,7 @@ mod tests {
         assert_eq!(output, data);
     }
 
+    #[cfg(feature = "compress")]
     #[test]
     fn test_decompress_single_byte() {
         for b in 0..=255u8 {
@@ -1530,6 +1539,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "compress")]
     #[test]
     fn test_all_formats_all_levels() {
         let data: Vec<u8> = (0..=255).cycle().take(50_000).collect();
@@ -1777,6 +1787,7 @@ mod tests {
         assert_eq!(err, DecompressionError::InvalidHeader);
     }
 
+    #[cfg(feature = "compress")]
     /// flate2 #474: empty input with L0 compression.
     /// Verify compress + decompress round-trip works for empty data at level 0.
     #[test]
@@ -1829,6 +1840,7 @@ mod tests {
     // skip_checksum tests
     // -----------------------------------------------------------------------
 
+    #[cfg(feature = "compress")]
     /// Corrupt Adler-32 in valid zlib: strict mode fails, skip mode succeeds
     /// and reports checksum_matched() == Some(false).
     #[test]
@@ -1861,6 +1873,7 @@ mod tests {
         assert_eq!(d.checksum_matched(), Some(false));
     }
 
+    #[cfg(feature = "compress")]
     /// Corrupt CRC32 in valid gzip: strict mode fails, skip mode succeeds.
     #[test]
     fn gzip_skip_checksum_corrupt_crc() {
@@ -1892,6 +1905,7 @@ mod tests {
         assert_eq!(d.checksum_matched(), Some(false));
     }
 
+    #[cfg(feature = "compress")]
     /// Valid zlib with skip_checksum: checksum_matched() == Some(true).
     #[test]
     fn zlib_skip_checksum_valid_reports_true() {
@@ -1920,6 +1934,7 @@ mod tests {
         assert_eq!(err, DecompressionError::InvalidHeader);
     }
 
+    #[cfg(feature = "compress")]
     /// checksum_matched is None for raw DEFLATE (no wrapper checksum).
     #[test]
     fn deflate_checksum_matched_is_none() {
@@ -2041,6 +2056,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "compress")]
     /// zlib stream with invalid checksum must be rejected.
     /// Verifies Adler-32 footer is actually checked (flate2 #258).
     #[test]
@@ -2066,6 +2082,7 @@ mod tests {
         assert_eq!(err, DecompressionError::ChecksumMismatch);
     }
 
+    #[cfg(feature = "compress")]
     /// gzip stream with corrupted CRC-32 must be rejected.
     #[test]
     fn reject_gzip_bad_crc32() {
@@ -2090,6 +2107,7 @@ mod tests {
         assert_eq!(err, DecompressionError::ChecksumMismatch);
     }
 
+    #[cfg(feature = "compress")]
     /// gzip stream with corrupted ISIZE must be rejected.
     #[test]
     fn reject_gzip_bad_isize() {
@@ -2114,6 +2132,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "compress")]
     /// Exact-size compress buffer: verify compress_bound is sufficient for
     /// all levels and that the buffer is fully used (libdeflate #294, #102).
     #[test]
@@ -2181,6 +2200,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "compress")]
     /// Zero-length output buffer: decompress of valid data into empty output
     /// must not panic (zlib-rs #23). Empty data compresses to a final empty
     /// stored block or a dynamic block encoding zero literals.
@@ -2218,6 +2238,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "compress")]
     /// Reuse decompressor across many operations: verifies state reset works.
     /// Catches stale-state bugs where previous block's tables bleed through.
     #[test]
@@ -2326,6 +2347,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "compress")]
     /// zlib-rs #172: gzip stream that failed at certain chunk sizes.
     /// Whole-buffer decompressor should handle this correctly.
     #[test]
@@ -2346,6 +2368,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "compress")]
     /// Exact compressed size buffer: compression must succeed when output buffer
     /// is exactly the compressed size (not just compress_bound).
     /// Catches libdeflate #102 where exact-fit buffers failed.
@@ -2379,6 +2402,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "compress")]
     /// Deterministic compression: reusing a Compressor must produce identical
     /// output for identical input (zlib-rs #459 pattern).
     #[test]
@@ -2413,6 +2437,7 @@ mod tests {
     // input_consumed correctness tests (libdeflate #420, miniz_oxide #158)
     // =====================================================================
 
+    #[cfg(feature = "compress")]
     /// deflate: input_consumed must equal the compressed size (no trailing bytes).
     #[test]
     fn input_consumed_deflate_exact() {
@@ -2435,6 +2460,7 @@ mod tests {
         assert_eq!(result.output_written, data.len());
     }
 
+    #[cfg(feature = "compress")]
     /// deflate: input_consumed ignores trailing garbage after the final block.
     #[test]
     fn input_consumed_deflate_trailing_garbage() {
@@ -2464,6 +2490,7 @@ mod tests {
         assert_eq!(&output[..result.output_written], &data[..]);
     }
 
+    #[cfg(feature = "compress")]
     /// zlib: input_consumed must include header (2) + deflate + footer (4).
     #[test]
     fn input_consumed_zlib() {
@@ -2486,6 +2513,7 @@ mod tests {
         assert_eq!(result.output_written, data.len());
     }
 
+    #[cfg(feature = "compress")]
     /// gzip: input_consumed must include header (10+) + deflate + footer (8).
     #[test]
     fn input_consumed_gzip() {
@@ -2508,6 +2536,7 @@ mod tests {
         assert_eq!(result.output_written, data.len());
     }
 
+    #[cfg(feature = "compress")]
     /// input_consumed for empty data across all formats.
     #[test]
     fn input_consumed_empty_data() {
@@ -2555,6 +2584,7 @@ mod tests {
         assert_eq!(result.output_written, 0);
     }
 
+    #[cfg(feature = "compress")]
     /// input_consumed at all compression levels, all formats.
     #[test]
     fn input_consumed_all_levels() {
@@ -2604,6 +2634,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "compress")]
     #[test]
     fn max_output_size_allows_within_limit() {
         // Data that decompresses to 1000 bytes should succeed with limit >= 1000
@@ -2623,6 +2654,7 @@ mod tests {
         assert_eq!(result.output_written, 1000);
     }
 
+    #[cfg(feature = "compress")]
     #[test]
     fn max_output_size_rejects_over_limit() {
         // Data that decompresses to 1000 bytes should fail with limit < 1000
@@ -2642,6 +2674,7 @@ mod tests {
         assert_eq!(err, DecompressionError::OutputLimitExceeded);
     }
 
+    #[cfg(feature = "compress")]
     #[test]
     fn max_output_size_none_is_unlimited() {
         // Default (None) should behave exactly like before
@@ -2661,6 +2694,7 @@ mod tests {
         assert_eq!(result.output_written, 65536);
     }
 
+    #[cfg(feature = "compress")]
     #[test]
     fn max_output_size_works_with_zlib_wrapper() {
         let data: Vec<u8> = (0..=255).cycle().take(1000).collect();
@@ -2680,6 +2714,7 @@ mod tests {
         assert_eq!(err, DecompressionError::OutputLimitExceeded);
     }
 
+    #[cfg(feature = "compress")]
     #[test]
     fn max_output_size_exact_boundary() {
         // Limit exactly equals output size should succeed

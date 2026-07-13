@@ -69,14 +69,14 @@ pub mod error;
 pub(crate) mod fast_bytes;
 
 pub mod checksum;
-#[cfg(feature = "alloc")]
+#[cfg(feature = "compress")]
 pub mod compress;
 pub mod decompress;
-#[cfg(feature = "alloc")]
+#[cfg(feature = "compress")]
 pub(crate) mod matchfinder;
 
 pub use checksum::{Adler32Hasher, Crc32Hasher, adler32, adler32_combine, crc32, crc32_combine};
-#[cfg(feature = "alloc")]
+#[cfg(feature = "compress")]
 pub use compress::{CompressionLevel, Compressor, CompressorSnapshot};
 #[cfg(all(feature = "alloc", feature = "std"))]
 pub use decompress::streaming::BufReadSource;

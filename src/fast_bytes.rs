@@ -10,6 +10,7 @@
 //! correct by construction.
 
 /// Load a little-endian `u32` from `data[off..off+4]`.
+#[cfg(feature = "compress")]
 #[inline(always)]
 pub(crate) fn load_u32_le(data: &[u8], off: usize) -> u32 {
     #[cfg(feature = "unchecked")]
@@ -41,6 +42,7 @@ pub(crate) fn load_u64_le(data: &[u8], off: usize) -> u64 {
 }
 
 /// Store a little-endian `u64` at `data[off..off+8]`.
+#[cfg(feature = "compress")]
 #[inline(always)]
 pub(crate) fn store_u64_le(data: &mut [u8], off: usize, val: u64) {
     #[cfg(feature = "unchecked")]
@@ -58,6 +60,7 @@ pub(crate) fn store_u64_le(data: &mut [u8], off: usize, val: u64) {
 }
 
 /// Get a single byte at `data[idx]`.
+#[cfg(feature = "compress")]
 #[inline(always)]
 pub(crate) fn get_byte(data: &[u8], idx: usize) -> u8 {
     #[cfg(feature = "unchecked")]
@@ -73,14 +76,14 @@ pub(crate) fn get_byte(data: &[u8], idx: usize) -> u8 {
 }
 
 /// Load a little-endian `u32` from a raw pointer + offset.
-#[cfg(feature = "unchecked")]
+#[cfg(all(feature = "unchecked", feature = "compress"))]
 #[inline(always)]
 pub(crate) unsafe fn load_u32_le_ptr(ptr: *const u8, off: usize) -> u32 {
     unsafe { u32::from_le_bytes(*(ptr.add(off) as *const [u8; 4])) }
 }
 
 /// Prefetch a cache line at a raw pointer address.
-#[cfg(all(feature = "unchecked", target_arch = "x86_64"))]
+#[cfg(all(feature = "unchecked", feature = "compress", target_arch = "x86_64"))]
 #[inline(always)]
 pub(crate) unsafe fn prefetch_ptr(ptr: *const u8) {
     unsafe {
@@ -89,7 +92,11 @@ pub(crate) unsafe fn prefetch_ptr(ptr: *const u8) {
 }
 
 /// No-op prefetch for non-x86_64 targets.
-#[cfg(all(feature = "unchecked", not(target_arch = "x86_64")))]
+#[cfg(all(
+    feature = "unchecked",
+    feature = "compress",
+    not(target_arch = "x86_64")
+))]
 #[inline(always)]
 pub(crate) unsafe fn prefetch_ptr(_ptr: *const u8) {}
 
@@ -99,6 +106,7 @@ pub(crate) unsafe fn prefetch_ptr(_ptr: *const u8) {}
 /// The C code uses `PREFETCHW` (write-intent) which is slightly better for
 /// write-heavy patterns, but `PREFETCHT0` still eliminates the main latency
 /// (DRAM/L3 → L1 fetch). No-op on other platforms or without `unchecked`.
+#[cfg(feature = "compress")]
 #[inline(always)]
 pub(crate) fn prefetch<T>(_r: &T) {
     #[cfg(all(feature = "unchecked", target_arch = "x86_64"))]

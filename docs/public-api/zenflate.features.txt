@@ -1,5 +1,5 @@
 # zenflate public API — additions from non-default features
-# features: alloc,avx512,std,threads,unchecked
+# features: alloc,avx512,compress,std,threads,unchecked
 # (regenerated on every `cargo test` by zenutils-apidoc; ZEN_API_DOC=check verifies, =off skips).
 # Encodings: crate-name prefix stripped; auto traits collapse to a
 # count + exceptions; trait impls collapse to one roster line per

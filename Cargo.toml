@@ -1,6 +1,6 @@
 [package]
 name = "zenflate"
-version = "0.3.6"
+version = "0.4.0"
 edition = "2024"
 rust-version = "1.89"
 description = "Pure Rust DEFLATE/zlib/gzip compression and decompression"
@@ -33,14 +33,18 @@ exclude = [
 ]
 
 [features]
-default = ["std", "avx512", "threads"]
+default = ["std", "avx512", "threads", "compress"]
 std = ["alloc", "archmage/std"]
 alloc = []
+## Compression support (Compressor, CompressionLevel, CompressorSnapshot).
+## Decompression and checksums are always available; disable this feature
+## for a decode-only build.
+compress = ["alloc"]
 avx512 = ["archmage/avx512"]
 unchecked = []
 ## Enable `gzip_compress_parallel` and threaded tests.
 ## Disable for wasm32 runtimes without thread support.
-threads = ["std"]
+threads = ["std", "compress"]
 
 [dependencies]
 archmage = { version = "0.9.15", default-features = false, features = ["macros"] }
@@ -71,7 +75,50 @@ debug = true
 [[bench]]
 name = "throughput"
 harness = false
+required-features = ["compress"]
 
 [[bench]]
 name = "corpus"
 harness = false
+required-features = ["compress"]
+
+# All examples exercise compression; skip them in decode-only builds.
+[[example]]
+name = "heap_compare"
+required-features = ["compress"]
+
+[[example]]
+name = "heap_c"
+required-features = ["compress"]
+
+[[example]]
+name = "heap_zen"
+required-features = ["compress"]
+
+[[example]]
+name = "image_deflate_corpus"
+required-features = ["compress"]
+
+[[example]]
+name = "monotonicity_bench"
+required-features = ["compress"]
+
+[[example]]
+name = "profile_compress"
+required-features = ["compress"]
+
+[[example]]
+name = "profile_full_optimal"
+required-features = ["compress"]
+
+[[example]]
+name = "ratio_bench"
+required-features = ["compress"]
+
+[[example]]
+name = "strategy_bench"
+required-features = ["compress"]
+
+[[example]]
+name = "zlib_rs_ratio"
+required-features = ["compress"]

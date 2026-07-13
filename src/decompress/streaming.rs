@@ -1702,6 +1702,7 @@ mod tests {
         Ok(output)
     }
 
+    #[cfg(feature = "compress")]
     #[test]
     fn test_stream_deflate_basic() {
         let data = b"Hello, World! Hello, World! Hello, World!";
@@ -1715,6 +1716,7 @@ mod tests {
         assert_eq!(&output, data);
     }
 
+    #[cfg(feature = "compress")]
     #[test]
     fn test_stream_zlib_basic() {
         let data = b"Hello, World! Hello, World! Hello, World!";
@@ -1728,6 +1730,7 @@ mod tests {
         assert_eq!(&output, data);
     }
 
+    #[cfg(feature = "compress")]
     #[test]
     fn test_stream_gzip_basic() {
         let data = b"Hello, World! Hello, World! Hello, World!";
@@ -1741,6 +1744,7 @@ mod tests {
         assert_eq!(&output, data);
     }
 
+    #[cfg(feature = "compress")]
     #[test]
     fn test_stream_all_levels_deflate() {
         let data: Vec<u8> = (0..=255).cycle().take(10_000).collect();
@@ -1757,6 +1761,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "compress")]
     #[test]
     fn test_stream_all_formats_all_levels() {
         let data: Vec<u8> = (0..=255).cycle().take(50_000).collect();
@@ -1796,6 +1801,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "compress")]
     #[test]
     fn test_stream_small_capacity() {
         let data: Vec<u8> = (0..=255).cycle().take(10_000).collect();
@@ -1810,6 +1816,7 @@ mod tests {
         assert_eq!(output, data);
     }
 
+    #[cfg(feature = "compress")]
     #[test]
     fn test_stream_parity_with_whole_buffer() {
         let data: Vec<u8> = (0..=255).cycle().take(100_000).collect();
@@ -1839,6 +1846,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "compress")]
     #[test]
     fn test_stream_empty() {
         let mut c = libdeflater::Compressor::new(libdeflater::CompressionLvl::new(1).unwrap());
@@ -1851,6 +1859,7 @@ mod tests {
         assert!(output.is_empty());
     }
 
+    #[cfg(feature = "compress")]
     #[test]
     fn test_stream_all_zeros() {
         let data = vec![0u8; 100_000];
@@ -1884,6 +1893,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "compress")]
     #[test]
     fn test_stream_chunk_stress_1byte() {
         // 1-byte-at-a-time input source — exercises staging buffer refill heavily
@@ -1931,6 +1941,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "compress")]
     #[test]
     fn test_stream_chunk_stress_64byte() {
         // 64-byte chunks — typical small BufRead buffer
@@ -1949,6 +1960,7 @@ mod tests {
         assert_eq!(output, data);
     }
 
+    #[cfg(feature = "compress")]
     #[test]
     fn test_stream_scanline() {
         // Simulates PNG scanline-at-a-time decompression:
@@ -1978,6 +1990,7 @@ mod tests {
         assert_eq!(output, data);
     }
 
+    #[cfg(feature = "compress")]
     #[test]
     fn test_stream_1mb_mixed() {
         // Exercises multi-block decompression with pseudo-random data that
@@ -2017,6 +2030,7 @@ mod tests {
         assert_eq!(output, data);
     }
 
+    #[cfg(feature = "compress")]
     #[cfg(feature = "std")]
     #[test]
     fn test_stream_bufreader() {
@@ -2039,6 +2053,7 @@ mod tests {
     // skip_checksum tests (streaming)
     // -----------------------------------------------------------------------
 
+    #[cfg(feature = "compress")]
     /// Corrupt Adler-32 in valid zlib stream: strict mode fails, skip mode succeeds.
     #[test]
     fn stream_zlib_skip_checksum_corrupt_adler() {
@@ -2071,6 +2086,7 @@ mod tests {
         assert_eq!(dec.checksum_matched(), Some(false));
     }
 
+    #[cfg(feature = "compress")]
     /// Corrupt CRC32 in valid gzip stream: strict mode fails, skip mode succeeds.
     #[test]
     fn stream_gzip_skip_checksum_corrupt_crc() {
@@ -2103,6 +2119,7 @@ mod tests {
         assert_eq!(dec.checksum_matched(), Some(false));
     }
 
+    #[cfg(feature = "compress")]
     /// Valid zlib stream with skip_checksum: checksum_matched() == Some(true).
     #[test]
     fn stream_zlib_skip_checksum_valid_reports_true() {
@@ -2119,6 +2136,7 @@ mod tests {
         assert_eq!(dec.checksum_matched(), Some(true));
     }
 
+    #[cfg(feature = "compress")]
     /// checksum_matched is None for raw DEFLATE streams (no wrapper checksum).
     #[test]
     fn stream_deflate_checksum_matched_is_none() {
@@ -2135,6 +2153,7 @@ mod tests {
         assert_eq!(dec.checksum_matched(), None);
     }
 
+    #[cfg(feature = "compress")]
     #[test]
     fn stream_max_output_size_allows_within_limit() {
         let data: Vec<u8> = (0..=255).cycle().take(1000).collect();
@@ -2152,6 +2171,7 @@ mod tests {
         assert_eq!(output, data);
     }
 
+    #[cfg(feature = "compress")]
     #[test]
     fn stream_max_output_size_rejects_over_limit() {
         let data: Vec<u8> = (0..=255).cycle().take(1000).collect();
@@ -2171,6 +2191,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "compress")]
     #[test]
     fn stream_max_output_size_none_is_unlimited() {
         let data: Vec<u8> = vec![0u8; 65536];
