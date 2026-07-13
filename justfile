@@ -8,6 +8,18 @@ test:
 test-unchecked:
     cargo test --features unchecked
 
+# Check + test every supported feature combination (decode-only, no-simd, no_std)
+check-features:
+    cargo check --no-default-features
+    cargo check --no-default-features --features alloc
+    cargo check --no-default-features --features std
+    cargo check --no-default-features --features compress
+    cargo check --no-default-features --features compress,simd
+    cargo check --no-default-features --features simd,avx512,std
+    cargo check --no-default-features --features std,unchecked
+    cargo test --lib --no-default-features --features std
+    cargo test --lib --no-default-features --features compress,std,threads
+
 # Run all benchmarks
 bench:
     cargo bench

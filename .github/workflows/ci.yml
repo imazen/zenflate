@@ -44,11 +44,24 @@ jobs:
       - name: Test (default features)
         run: cargo test
 
-      - name: Check (no_std + alloc)
-        run: cargo check --no-default-features --features alloc
+      - name: Test (decode-only, no simd)
+        run: cargo test --lib --no-default-features --features std
+
+      - name: Test (no simd, compress on scalar checksums)
+        run: cargo test --lib --no-default-features --features compress,std,threads
 
       - name: Test (with unchecked bounds elimination)
         run: cargo test --features unchecked
+
+      - name: Check feature combos (no_std / decode-only / no-simd)
+        shell: bash
+        run: |
+          cargo check --no-default-features
+          cargo check --no-default-features --features alloc
+          cargo check --no-default-features --features compress
+          cargo check --no-default-features --features compress,simd
+          cargo check --no-default-features --features simd,avx512,std
+          cargo check --no-default-features --features std,unchecked
 
   # ==========================================================================
   # Cross-compiled 32-bit testing (i686 via QEMU)
@@ -94,6 +107,12 @@ jobs:
 
       - name: Check WASM (no_std)
         run: cargo check --target wasm32-wasip1 --no-default-features
+
+      - name: Check WASM (decode-only + alloc)
+        run: cargo check --target wasm32-wasip1 --no-default-features --features alloc
+
+      - name: Check WASM (simd128, no threads)
+        run: RUSTFLAGS="-C target-feature=+simd128" cargo check --target wasm32-wasip1 --no-default-features --features std,compress,simd,avx512
 
   # ==========================================================================
   # Clippy
