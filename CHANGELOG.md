@@ -2,6 +2,35 @@
 
 ## [Unreleased]
 
+### Changed
+
+- **BREAKING (0.4.0):** compression is now behind the `compress` feature
+  (on by default, implies `alloc`). `default-features = false` consumers that
+  used `Compressor`/`CompressionLevel` via `alloc`/`std` must add `compress`;
+  benches and examples declare `required-features = ["compress"]` (ba343a6).
+- **BREAKING (0.4.0):** SIMD is now behind the `simd` feature (on by default);
+  archmage is an optional dependency. Without `simd`, Adler-32/CRC-32 use the
+  scalar paths (identical output, verified by the C parity suite) and the
+  matchfinder init/rebase helpers drop `#[autoversion]` multiversioning.
+  `avx512` now implies `simd`; `threads` now implies `compress` (a720edf).
+- Compress-only code is module-gated rather than attr-gated: checksum SIMD
+  tiers live in `mod simd`, compress-only byte helpers in
+  `fast_bytes::compress_only`, and Compressor-dependent decompression tests in
+  gated sibling test modules. Decompression tests that compress via libdeflater
+  (C) now run in decode-only builds — 105 decode-only lib tests, up from a
+  would-have-been 72 (645fdaf).
+- Docs: effort range corrected to 0-200 everywhere (31-200 = Zopfli-style
+  FullOptimal, `iterations = effort − 16`); README/lib.rs gained a feature
+  table, decode-only build guide, and 0.3→0.4 migration note.
+
+### Removed
+
+- **BREAKING (0.4.0):** the `libm` dependency. `std` builds use `f64::log2`;
+  `no_std` builds use a local deterministic `log2_series` (exact exponent +
+  atanh-series mantissa, ~1e-8 bits absolute error, accuracy-tested against
+  `f64::log2`). Only call sites were the Zopfli entropy estimate's two log2
+  calls — cost-model setup, not a hot loop (9f22a14).
+
 ### Fixed
 
 - README streaming-decompression example used non-existent constructors

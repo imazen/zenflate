@@ -2,7 +2,7 @@
 
 # zenflate
 
-Pure Rust DEFLATE / zlib / gzip. Compression spans effort levels 0–30 across six strategies (and can emit byte-identical output to C libdeflate on demand), with whole-buffer and streaming decompression plus SIMD Adler-32 / CRC-32. `#![forbid(unsafe_code)]` by default (with an opt-in `unchecked` fast path) and `no_std`-friendly: compression and streaming decompression require `alloc`, while whole-buffer decompression is fully stack-allocated.
+Pure Rust DEFLATE / zlib / gzip. Compression spans effort levels 0–200 across seven strategies (and can emit byte-identical output to C libdeflate on demand), with whole-buffer and streaming decompression plus SIMD Adler-32 / CRC-32. `#![forbid(unsafe_code)]` by default (with an opt-in `unchecked` fast path) and `no_std`-friendly: compression and streaming decompression require `alloc`, while whole-buffer decompression is fully stack-allocated.
 
 ## Quick start
 
@@ -145,7 +145,7 @@ decompressor.gzip_decompress(compressed, &mut out, Unstoppable)?;
 
 ### Compression levels
 
-Pick a preset or dial in a specific effort from 0 to 30:
+Pick a preset or dial in a specific effort from 0 to 200:
 
 ```rust
 use zenflate::CompressionLevel;
@@ -158,9 +158,10 @@ CompressionLevel::balanced()  // effort 15 — lazy matching (default)
 CompressionLevel::high()      // effort 22 — double-lazy matching
 CompressionLevel::best()      // effort 30 — near-optimal parsing
 
-// Fine-grained control (0-30, clamped)
+// Fine-grained control (0-200, clamped)
 CompressionLevel::new(12)     // lazy matching, mid-range
 CompressionLevel::new(25)     // near-optimal, fast end
+CompressionLevel::new(46)     // Zopfli-style full-optimal, 30 iterations
 
 // Byte-identical C libdeflate compatibility (0-12)
 CompressionLevel::libdeflate(6)
@@ -175,7 +176,7 @@ CompressionLevel::libdeflate(6)
 | `high()` | 22 | Lazy2 | Double-lazy — best before near-optimal |
 | `best()` | 30 | Near-optimal | Best compression ratio |
 
-Effort levels 0-30 map to six strategies:
+Effort levels map to seven strategies:
 
 | Effort | Strategy | Notes |
 |--------|----------|-------|
@@ -186,6 +187,7 @@ Effort levels 0-30 map to six strategies:
 | 11-17 | Lazy | Hash chains with lazy matching |
 | 18-22 | Lazy2 | Double-lazy matching |
 | 23-30 | Near-optimal | Near-optimal parsing via binary trees |
+| 31-200 | FullOptimal | Zopfli-style iterative optimal parsing (`iterations = effort − 16`); very slow, maximum density |
 
 Higher effort within a strategy increases search depth and match quality.
 Strategy transitions (e.g. e9→e10, e10→e11) can occasionally produce
@@ -263,12 +265,28 @@ the loop and can stop between `fill()` calls.
 | Feature | Default | Effect |
 |---------|---------|--------|
 | `std` | yes | `std::error::Error` impls, `BufReadSource` |
-| `alloc` | yes (via `std`) | Compression, streaming decompression |
-| `threads` | yes | Parallel gzip (`gzip_compress_parallel`); disable for thread-less `wasm32` |
-| `avx512` | yes | AVX-512 SIMD for checksums on supported CPUs |
+| `alloc` | yes (via `std`) | Streaming decompression |
+| `compress` | yes | `Compressor` / `CompressionLevel` (implies `alloc`) |
+| `simd` | yes | Runtime-dispatched SIMD checksums and matchfinder multiversioning (via archmage); without it, scalar paths |
+| `avx512` | yes | AVX-512 SIMD tiers (implies `simd`) |
+| `threads` | yes | Parallel gzip (`gzip_compress_parallel`, implies `compress`); disable for thread-less `wasm32` |
 | `unchecked` | no | Elide bounds checks in compression hot paths (+0-12% compression speed) |
 
 Decompression works in `no_std` without `alloc`; all state is stack-allocated.
+
+For a minimal, fast-to-compile decoder, disable default features:
+
+```toml
+zenflate = { version = "0.4.0", default-features = false, features = ["std"] }
+```
+
+That decode-only configuration builds in well under a second with a single
+dependency (`enough`) — no proc macros, no SIMD — and still decodes all three
+formats with checksum verification (scalar Adler-32/CRC-32).
+
+**Migrating from 0.3:** with `default-features = false`, add `compress` if you
+compress and `simd` if you want SIMD checksums; both were previously implied
+by `alloc` / always-on.
 
 ## How it works
 
@@ -278,7 +296,7 @@ own implementation. The core decompressor, matchfinders, Huffman construction,
 and block splitting trace back to libdeflate. On top of that foundation,
 zenflate pulls in techniques from several other projects and adds original work:
 
-- **Effort-based compression (0-30)** with six strategies and named presets,
+- **Effort-based compression (0-200)** with seven strategies and named presets,
   replacing libdeflate's fixed 0-12 levels. Includes two original matchfinder
   designs (turbo, fast HT) for the low-effort range.
 - **Full-optimal compression** (Zopfli-style iterative squeeze), ported from

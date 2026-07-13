@@ -34,13 +34,20 @@ Pure Rust DEFLATE/zlib/gzip compression and decompression.
 - [x] Phase 6: Benchmarks + Polish (criterion benchmarks, README, doc examples, #[non_exhaustive] errors)
 - [x] Phase 7: Ecosystem benchmarks (flate2, miniz_oxide), justfile, Dockerfile, CI bench checks
 - [x] Phase 8: Streaming decompression (StreamDecompressor, InputSource trait, fill/peek/advance API, BufRead/Read impls, 15 tests)
-- [x] Phase 9: Effort-based compression (0-30) with new strategies
-  - CompressionLevel::new(effort) with effort 0-30, Pareto-ranked
+- [x] Phase 9: Effort-based compression (0-200) with new strategies
+  - CompressionLevel::new(effort) with effort 0-200; 0-30 Pareto-ranked,
+    31-200 = Zopfli-style FullOptimal (iterations = effort − 16)
   - CompressionLevel::libdeflate(level) for byte-identical C parity (0-12)
   - Turbo (effort 1-4): dynamic Huffman + single-entry hash, limited skip updates
   - FastHt (effort 5-7): dynamic Huffman + 2-entry hash, limited skip updates
   - Named presets: none(), fastest(), fast(), balanced(), high(), best()
   - 195 tests + 10 doctests pass
+- [x] Phase 10 (0.4.0): Feature split — `compress` (compression + matchfinders,
+  implies alloc), `simd` (archmage optional; scalar checksums without it),
+  libm dropped (std → f64::log2, no_std → local log2_series). Decode-only
+  build (`--no-default-features --features std`): 1 dep (enough), cold build
+  0.28s debug / 0.30s release vs 3.2s/3.4s full-default, 105 lib tests.
+  BREAKING for default-features=false users: add `compress`/`simd` as needed.
 
 
 ## Compression Speed
@@ -284,6 +291,13 @@ features vs a prototype containing only decompress + scalar checksums + error + 
   Known consumers unaffected: zenpng uses defaults; heic + zenzop use default-features=false
   (decode+checksums only today — they'd keep working, dropping to scalar checksums unless they
   add `simd`).
+- **IMPLEMENTED in 0.4.0** (2026-07-13): `compress` + `simd` features landed (module-gated:
+  checksum SIMD tiers live in `mod simd`, compress-only fast_bytes helpers in
+  `mod compress_only`, crate-Compressor tests in gated sibling test mods); libm dropped
+  entirely (std → f64::log2, no_std → `log2_series`, ~1e-8 bits error, accuracy-tested).
+  Measured on the real crate: decode-only cold build 0.28s debug / 0.30s release,
+  dep tree = enough only, 105 decode-only lib tests (libdeflater-compressed decode
+  tests stay live). Default features unchanged: 3.2s cold, full API, 245 tests.
 
 ## Known Bugs
 

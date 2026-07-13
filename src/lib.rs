@@ -4,7 +4,7 @@
 //! [Zopfli](https://github.com/google/zopfli), and
 //! [Brotli](https://github.com/google/brotli).
 //!
-//! - **Compression** ([`Compressor`]) — buffer-to-buffer. Effort 0-30 with named
+//! - **Compression** ([`Compressor`]) — buffer-to-buffer. Effort 0-200 with named
 //!   presets ([`CompressionLevel::balanced()`], etc.). Parallel gzip via
 //!   [`Compressor::gzip_compress_parallel()`].
 //! - **Decompression** ([`Decompressor`]) — buffer-to-buffer, fastest mode.
@@ -39,7 +39,7 @@
 //!
 //! # Compression levels
 //!
-//! Use named presets or dial in a specific effort from 0 to 30:
+//! Use named presets or dial in a specific effort from 0 to 200:
 //!
 //! | Preset | Effort | Strategy |
 //! |--------|--------|----------|
@@ -50,12 +50,31 @@
 //! | [`CompressionLevel::high()`] | 22 | Double-lazy matching |
 //! | [`CompressionLevel::best()`] | 30 | Near-optimal parsing |
 //!
-//! [`CompressionLevel::new(n)`](CompressionLevel::new) accepts any effort 0-30
+//! [`CompressionLevel::new(n)`](CompressionLevel::new) accepts any effort 0-200
 //! for fine-grained control between presets. Higher effort within a strategy
-//! increases search depth and match quality.
+//! increases search depth and match quality. Efforts 31-200 engage the
+//! Zopfli-style full-optimal parser (`iterations = effort − 16`) — very slow,
+//! maximum density.
 //!
 //! [`CompressionLevel::libdeflate(n)`](CompressionLevel::libdeflate) (0-12)
 //! produces byte-identical output with C libdeflate.
+//!
+//! # Feature flags
+//!
+//! | Feature | Default | Effect |
+//! |---------|---------|--------|
+//! | `std` | yes | `std::error::Error` impls, `BufReadSource` |
+//! | `alloc` | yes (via `std`) | Streaming decompression |
+//! | `compress` | yes | [`Compressor`] / [`CompressionLevel`] (implies `alloc`) |
+//! | `simd` | yes | Runtime-dispatched SIMD checksums + matchfinder multiversioning |
+//! | `avx512` | yes | AVX-512 SIMD tiers (implies `simd`) |
+//! | `threads` | yes | [`Compressor::gzip_compress_parallel()`] (implies `compress`) |
+//! | `unchecked` | no | Elide bounds checks in compression hot paths |
+//!
+//! Buffer-to-buffer decompression and both checksums are always available,
+//! including `no_std` without `alloc`. For a minimal, fast-to-compile
+//! decoder use `default-features = false, features = ["std"]` — one
+//! dependency, no proc macros, scalar checksums.
 
 #![cfg_attr(not(feature = "unchecked"), forbid(unsafe_code))]
 #![cfg_attr(not(feature = "std"), no_std)]
