@@ -254,6 +254,37 @@ Verified all hot paths auto-vectorize correctly on wasm32 with simd128:
 - `RUSTFLAGS="-C target-feature=+simd128" cargo check --target wasm32-unknown-unknown --no-default-features --features alloc` — zero warnings
 - All CRC-32 fold constants/macros properly cfg-gated to x86_64/aarch64
 
+### Decode-only / optional-archmage / no-libm feasibility (2026-07-13, scratchpad prototype)
+
+Measured cold builds (7950X, fresh scratch CARGO_TARGET_DIR each run), full crate at default
+features vs a prototype containing only decompress + scalar checksums + error + enough:
+
+- Cold build wall time: debug 3.24s → 0.26s (12.5x), release-without-debuginfo 3.43s → 0.32s (10.7x).
+  The proc-macro chain (proc-macro2 → quote → syn → archmage-macros → archmage) IS the critical
+  path: ~3.0s of the 3.2s debug wall. zenflate itself: 0.82s debug. libm: 0.62s + 0.10s build script.
+- Dependency count: 9 crates → 1 (enough). rlib (release, no debuginfo): 2.21 MB → 514 KB.
+- Decode-only *binary* size delta is only ~11-14 KB (release-stripped and opt-z/LTO/panic-abort
+  probes agree): unused compress code is already linker-DCE'd; the delta is the SIMD checksum
+  paths, which stay reachable via the crc32/adler32 runtime dispatch.
+- Coupling is already clean: decompress's non-test code imports only `crate::checksum` +
+  `crate::error` (all Compressor refs in decompress files are `#[cfg(test)]`). archmage appears in
+  exactly 3 files: checksum/adler32.rs + checksum/crc32.rs (SIMD tiers; scalar impls are plain code
+  except a `ScalarToken` param) and matchfinder/mod.rs (compress-only, `autoversion`). libm has
+  2 call sites, both `libm::log2` in compress/full_optimal.rs.
+- Prototype correctness verified: decoded 587 KB gzip (system gzip -9, CRC-32 verified) and zlib
+  (python zlib, Adler-32 verified) fixtures byte-exactly; `cargo check` clean for no_std-no-alloc,
+  alloc, alloc+unchecked, and wasm32 decode-only.
+- Cleanup surface found: 4 fast_bytes helpers (`load_u32_le`, `store_u64_le`, `get_byte`,
+  `prefetch`) become dead in decode-only builds — need `#[cfg(feature = "compress")]`; incant's
+  scalar tier needs a tokenless-scalar shim when archmage is optional; matchfinder needs
+  `cfg_attr`-style autoversion gating (moot if archmage is only optional for decode-only).
+- Feature design sketch: `compress = ["alloc", "dep:libm"]`, `simd = ["dep:archmage"]`, both in
+  default; decompress stays unconditional (it's the small part). SEMVER: gating Compressor behind
+  `compress` breaks `default-features = false, features = ["alloc"|"std"]` consumers → 0.4.0.
+  Known consumers unaffected: zenpng uses defaults; heic + zenzop use default-features=false
+  (decode+checksums only today — they'd keep working, dropping to scalar checksums unless they
+  add `simd`).
+
 ## Known Bugs
 
 (none currently)
