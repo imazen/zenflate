@@ -54,7 +54,6 @@ threads = ["std", "compress"]
 [dependencies]
 archmage = { version = "0.9.15", default-features = false, features = ["macros"], optional = true }
 enough = { version = "0.4.3", default-features = false }
-libm = "0.2.16"
 
 
 [dev-dependencies]

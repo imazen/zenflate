@@ -706,6 +706,49 @@ impl Default for SymbolStats {
     }
 }
 
+/// log2 of the positive integer-valued f64 counts used by the entropy
+/// estimate in [`SymbolStats::calculate_entropy`].
+///
+/// With `std`, defers to [`f64::log2`]. Without it, uses [`log2_series`].
+#[inline]
+fn log2(x: f64) -> f64 {
+    #[cfg(feature = "std")]
+    {
+        x.log2()
+    }
+    #[cfg(not(feature = "std"))]
+    {
+        log2_series(x)
+    }
+}
+
+/// Deterministic log2 for positive integer-valued f64 inputs (symbol counts
+/// and their sums — never zero, negative, NaN, or subnormal).
+///
+/// Extracts the exponent exactly from the bit pattern, then evaluates
+/// `ln(m) = 2·atanh(z)` for the normalized mantissa `m ∈ [1, 2)` with
+/// `z = (m − 1)/(m + 1) ∈ [0, 1/3)` as an odd polynomial through `z¹³`.
+/// Absolute error is ≈1e-8 bits — five orders of magnitude below the
+/// cost-model differences that change parse decisions. Pure arithmetic,
+/// so results are identical on every platform.
+#[cfg(any(test, not(feature = "std")))]
+fn log2_series(x: f64) -> f64 {
+    let bits = x.to_bits();
+    let e = ((bits >> 52) & 0x7FF) as i32 - 1023;
+    let m = f64::from_bits((bits & 0x000F_FFFF_FFFF_FFFF) | (1023u64 << 52));
+    let z = (m - 1.0) / (m + 1.0);
+    let z2 = z * z;
+    #[rustfmt::skip]
+    let series = z * (1.0
+        + z2 * (1.0 / 3.0
+        + z2 * (1.0 / 5.0
+        + z2 * (1.0 / 7.0
+        + z2 * (1.0 / 9.0
+        + z2 * (1.0 / 11.0
+        + z2 * (1.0 / 13.0)))))));
+    f64::from(e) + 2.0 * core::f64::consts::LOG2_E * series
+}
+
 impl SymbolStats {
     fn get_statistics(&mut self, store: &Lz77Store) {
         for &litlen in &store.litlens {
@@ -725,12 +768,12 @@ impl SymbolStats {
         fn calculate_and_store(count: &[usize], bitlengths: &mut [f64]) {
             let n = count.len();
             let sum: usize = count.iter().sum();
-            let log2sum = libm::log2(if sum == 0 { n } else { sum } as f64);
+            let log2sum = log2(if sum == 0 { n } else { sum } as f64);
             for i in 0..n {
                 if count[i] == 0 {
                     bitlengths[i] = log2sum;
                 } else {
-                    bitlengths[i] = log2sum - libm::log2(count[i] as f64);
+                    bitlengths[i] = log2sum - log2(count[i] as f64);
                 }
             }
         }
@@ -1735,4 +1778,23 @@ fn flush_lz77_block(
         &static_codes,
         is_final_block,
     );
+}
+
+#[cfg(all(test, feature = "std"))]
+mod tests {
+    /// The no_std series impl must agree with std's f64::log2 to well below
+    /// the precision that could flip a cost-model comparison.
+    #[test]
+    fn log2_series_matches_std() {
+        let mut worst = 0.0f64;
+        // Every count a 64 KiB block could produce, plus large sums.
+        for n in (1u64..=70_000).chain([1 << 20, 1 << 26, (1 << 32) - 1, 1 << 40]) {
+            let x = n as f64;
+            let err = (super::log2_series(x) - x.log2()).abs();
+            if err > worst {
+                worst = err;
+            }
+        }
+        assert!(worst < 1e-7, "worst log2_series error {worst:e}");
+    }
 }
