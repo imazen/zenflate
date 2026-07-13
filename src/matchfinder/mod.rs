@@ -2,6 +2,7 @@
 //!
 //! Ported from libdeflate's `matchfinder_common.h`.
 
+#[cfg(feature = "simd")]
 use archmage::autoversion;
 
 pub(crate) mod bt;
@@ -40,11 +41,11 @@ pub(crate) fn lz_hash(seq: u32, num_bits: u32) -> u32 {
 /// data (PNG filtered rows, repeated patterns).
 #[inline(always)]
 pub(crate) fn lz_extend(strptr: &[u8], matchptr: &[u8], start_len: u32, max_len: u32) -> u32 {
-    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128", feature = "simd"))]
     {
         lz_extend_wasm128(strptr, matchptr, start_len, max_len)
     }
-    #[cfg(not(all(target_arch = "wasm32", target_feature = "simd128")))]
+    #[cfg(not(all(target_arch = "wasm32", target_feature = "simd128", feature = "simd")))]
     {
         lz_extend_word(strptr, matchptr, start_len, max_len)
     }
@@ -55,7 +56,7 @@ pub(crate) fn lz_extend(strptr: &[u8], matchptr: &[u8], start_len: u32, max_len:
 /// Uses `i8x16_ne` to find the first differing byte position via `i8x16_bitmask`
 /// + `trailing_zeros`. Falls back to u64 word-at-a-time for the 8-15 byte
 /// remainder and byte-at-a-time for the final 0-7 bytes.
-#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+#[cfg(all(target_arch = "wasm32", target_feature = "simd128", feature = "simd"))]
 #[inline(always)]
 fn lz_extend_wasm128(strptr: &[u8], matchptr: &[u8], start_len: u32, max_len: u32) -> u32 {
     // Use archmage's prelude which re-exports safe v128_load from safe_unaligned_simd
@@ -132,7 +133,7 @@ fn lz_extend_word(strptr: &[u8], matchptr: &[u8], start_len: u32, max_len: u32) 
 }
 
 /// Initialize a matchfinder table to all MATCHFINDER_INITVAL.
-#[autoversion]
+#[cfg_attr(feature = "simd", autoversion)]
 pub(crate) fn matchfinder_init(data: &mut [i16]) {
     data.fill(MATCHFINDER_INITVAL);
 }
@@ -144,7 +145,7 @@ pub(crate) fn matchfinder_init(data: &mut [i16]) {
 ///
 /// Written as `saturating_add(i16::MIN)` so LLVM auto-vectorizes to `vpaddsw`
 /// (x86 AVX2), `sqadd` (NEON), or `i16x8_add_sat_s` (WASM simd128).
-#[autoversion]
+#[cfg_attr(feature = "simd", autoversion)]
 pub(crate) fn matchfinder_rebase(data: &mut [i16]) {
     for entry in data.iter_mut() {
         *entry = entry.saturating_add(i16::MIN);

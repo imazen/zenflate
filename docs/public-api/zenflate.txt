@@ -6,7 +6,7 @@
 # impls omitted; re-export duplicates annotated `[also: path]`.
 # DO NOT EDIT BY HAND — commit regenerated changes with the code.
 #
-# files: zenflate.txt 197 lines (supported surface) | zenflate.features.txt 0 added (features: alloc,avx512,compress,std,threads,unchecked) | zenflate.internal.txt 8 lines (8 hidden + 0 excluded-feature)
+# files: zenflate.txt 197 lines (supported surface) | zenflate.features.txt 0 added (features: alloc,avx512,compress,simd,std,threads,unchecked) | zenflate.internal.txt 8 lines (8 hidden + 0 excluded-feature)
 
 ## summary
 #
