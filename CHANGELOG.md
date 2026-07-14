@@ -24,6 +24,13 @@
 - Docs: effort range corrected to 0-200 everywhere (31-200 = Zopfli-style
   FullOptimal, `iterations = effort − 16`); README/lib.rs gained a feature
   table, decode-only build guide, and 0.3→0.4 migration note.
+- `CompressionError`, `DecompressionError`, and `StreamError` now implement
+  [`core::error::Error`] instead of `std::error::Error` (a re-export of it
+  since Rust 1.81; MSRV is 1.89). The two whole-buffer errors implement it
+  **unconditionally** — available in `no_std` builds, not just under `std`;
+  `StreamError`'s impl tracks its own `alloc` gate. The `std` feature now
+  gates only the `std::io::{Read, BufRead}` integration (`BufReadSource`).
+  Additive — `cargo semver-checks` reports no new break (220eb99).
 
 ### Removed
 
@@ -40,6 +47,10 @@
   now matches the real API: `StreamDecompressor::deflate(source, DEFAULT_CAPACITY)`
   (and `gzip`/`zlib`) driven by `while !is_done() { fill()?; peek(); advance(n) }`,
   plus a new untrusted-input note on `with_max_output_size` bomb defense. Docs only.
+- Two `DecompressionError::OutputLimitExceeded` intra-doc links
+  (`Decompressor`/`StreamDecompressor::with_max_output_size`) were bare and
+  unresolvable from `error.rs`'s scope; now fully-qualified `crate::` targets so
+  docs.rs renders them. `cargo doc` is clean under `-D warnings` (220eb99).
 
 ### Changed (earlier, docs/infra)
 
