@@ -62,3 +62,149 @@ Making `avx512` opt-in removes **no** dependency, saves **~1%** build time, save
 lower the MSRV — while costing **4.3× standalone CRC-32**, 1.5× standalone Adler-32, and up to 10% gzip
 decompress on fast/compressible data. For the DEFLATE pipeline the effect is 0–10% (typically ~1%); the 4×
 only matters if zenflate is used as a standalone checksum library.
+
+## Appendix: raw per-round data
+
+Harness sources: `benchmarks/harnesses/cksum-ab.rs` and `benchmarks/harnesses/pipe-ab.rs`
+(each depends on `zenflate` by path, built twice with `--features avx2` / `--features avx512`).
+Each round is one full pass of both tiers, run interleaved (`nice -n19`) to cancel thermal drift.
+
+### Checksum A/B (GiB/s per size, 5 rounds)
+
+```
+########## round 1
+# tier=avx2(v3)  per_sample=512MiB  samples=15
+size_kib,adler32_gibs,crc32_gibs
+64,84.7,18.4
+256,83.3,18.5
+1024,77.3,18.3
+4096,80.0,18.4
+16384,77.2,18.3
+# tier=avx512(v4x)  per_sample=512MiB  samples=15
+size_kib,adler32_gibs,crc32_gibs
+64,136.5,78.6
+256,134.5,79.0
+1024,109.2,75.1
+4096,120.7,78.1
+16384,78.8,69.4
+########## round 2
+# tier=avx2(v3)  per_sample=512MiB  samples=15
+size_kib,adler32_gibs,crc32_gibs
+64,84.4,18.3
+256,83.0,18.5
+1024,77.5,18.4
+4096,80.5,18.2
+16384,75.8,18.3
+# tier=avx512(v4x)  per_sample=512MiB  samples=15
+size_kib,adler32_gibs,crc32_gibs
+64,137.0,79.6
+256,135.6,80.2
+1024,113.1,78.2
+4096,120.5,78.5
+16384,86.8,75.5
+########## round 3
+# tier=avx2(v3)  per_sample=512MiB  samples=15
+size_kib,adler32_gibs,crc32_gibs
+64,84.5,18.4
+256,83.0,18.5
+1024,77.1,18.3
+4096,81.0,18.3
+16384,76.8,18.3
+# tier=avx512(v4x)  per_sample=512MiB  samples=15
+size_kib,adler32_gibs,crc32_gibs
+64,135.5,77.3
+256,134.8,80.9
+1024,112.8,78.6
+4096,120.9,78.6
+16384,82.9,75.9
+########## round 4
+# tier=avx2(v3)  per_sample=512MiB  samples=15
+size_kib,adler32_gibs,crc32_gibs
+64,84.6,18.4
+256,82.9,18.5
+1024,77.6,18.4
+4096,80.4,18.4
+16384,77.1,18.2
+# tier=avx512(v4x)  per_sample=512MiB  samples=15
+size_kib,adler32_gibs,crc32_gibs
+64,138.4,79.6
+256,128.6,80.1
+1024,113.2,79.3
+4096,121.4,79.2
+16384,83.4,76.1
+########## round 5
+# tier=avx2(v3)  per_sample=512MiB  samples=15
+size_kib,adler32_gibs,crc32_gibs
+64,84.4,18.5
+256,82.9,18.5
+1024,77.4,18.4
+4096,81.7,18.4
+16384,75.3,18.3
+# tier=avx512(v4x)  per_sample=512MiB  samples=15
+size_kib,adler32_gibs,crc32_gibs
+64,136.3,79.0
+256,134.5,79.6
+1024,111.7,77.8
+4096,119.6,78.5
+16384,84.7,75.1
+```
+
+### gzip pipeline A/B (GiB/s on uncompressed bytes, 5 rounds)
+
+```
+########## round 1
+# tier=avx2  gzip effort=15 (balanced)  median-of-9
+file,mib,comp_gibs,decomp_gibs
+xml,5.3,0.147,1.819
+nci,33.6,0.211,1.148
+x-ray,8.5,0.105,0.478
+# tier=avx512  gzip effort=15 (balanced)  median-of-9
+file,mib,comp_gibs,decomp_gibs
+xml,5.3,0.153,2.012
+nci,33.6,0.197,1.105
+x-ray,8.5,0.104,0.481
+########## round 2
+# tier=avx2  gzip effort=15 (balanced)  median-of-9
+file,mib,comp_gibs,decomp_gibs
+xml,5.3,0.148,1.823
+nci,33.6,0.197,1.110
+x-ray,8.5,0.103,0.474
+# tier=avx512  gzip effort=15 (balanced)  median-of-9
+file,mib,comp_gibs,decomp_gibs
+xml,5.3,0.154,2.006
+nci,33.6,0.206,1.190
+x-ray,8.5,0.101,0.474
+########## round 3
+# tier=avx2  gzip effort=15 (balanced)  median-of-9
+file,mib,comp_gibs,decomp_gibs
+xml,5.3,0.152,1.774
+nci,33.6,0.201,1.113
+x-ray,8.5,0.105,0.451
+# tier=avx512  gzip effort=15 (balanced)  median-of-9
+file,mib,comp_gibs,decomp_gibs
+xml,5.3,0.146,1.924
+nci,33.6,0.196,1.111
+x-ray,8.5,0.102,0.464
+########## round 4
+# tier=avx2  gzip effort=15 (balanced)  median-of-9
+file,mib,comp_gibs,decomp_gibs
+xml,5.3,0.147,1.752
+nci,33.6,0.204,1.173
+x-ray,8.5,0.109,0.497
+# tier=avx512  gzip effort=15 (balanced)  median-of-9
+file,mib,comp_gibs,decomp_gibs
+xml,5.3,0.153,2.012
+nci,33.6,0.205,1.162
+x-ray,8.5,0.106,0.489
+########## round 5
+# tier=avx2  gzip effort=15 (balanced)  median-of-9
+file,mib,comp_gibs,decomp_gibs
+xml,5.3,0.144,1.820
+nci,33.6,0.204,1.128
+x-ray,8.5,0.104,0.474
+# tier=avx512  gzip effort=15 (balanced)  median-of-9
+file,mib,comp_gibs,decomp_gibs
+xml,5.3,0.151,1.997
+nci,33.6,0.203,1.144
+x-ray,8.5,0.104,0.488
+```

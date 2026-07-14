@@ -92,6 +92,10 @@ file header. Current files:
 - `rd_sweep_train1_2026-07-13.csv` — 120 roundtrip-verified rate/distortion
   points (every library × level: size, adaptive median time, zenflate decode)
   from the CCX63 box; backs `examples/rd_sweep.rs`.
+- `avx512_checksum_ab_2026-07-13.md` — does the `avx512` feature earn default-on?
+  A/B of the 512-bit checksum tiers (v4x) vs AVX2 (v3): standalone CRC-32 4.3×,
+  Adler-32 1.1–1.6×, but gzip pipeline only 0–10%; +0 crates / +1% build / +0 MSRV
+  to keep on. Raw 5-round data + harness sources in `harnesses/`.
 
 Do not commit numbers you didn't generate, and don't extrapolate one size or
 machine to another — measure each. Memory claims need heaptrack / `time -v`, not
