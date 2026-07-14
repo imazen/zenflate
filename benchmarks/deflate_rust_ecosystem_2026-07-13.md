@@ -161,6 +161,30 @@ max-compression race is decided by hundreds of bytes.
 | zenflate/e76 | 912815 | 967.2 ms |
 
 
+## Fast-end reality check: dickens 10 MB (real English text, local 7950X)
+
+The synthetic panels flatter static/greedy fast paths (near-incompressible data
+rewards doing the least work). On real text the picture inverts — median-of-5,
+raw deflate:
+
+| point | bytes | ratio | time |
+|---|---|---|---|
+| zlib-rs/L1 | 6,023,619 | 1.692x | 34.2 ms |
+| libdeflate/L1 (C) | 4,217,525 | **2.417x** | 35.3 ms |
+| zenflate/e1-e4 | 4,422,807 | 2.305x | ~38.3 ms |
+| zenflate/e6 | 4,312,814 | 2.363x | 43.6 ms |
+| miniz_oxide/L1 | 5,363,862 | 1.900x | 59.7 ms |
+| zlib-rs/L2 | 4,303,512 | 2.368x | 60.3 ms |
+| libdeflate/L3 (C) | 3,989,875 | 2.555x | 66.6 ms |
+| miniz_oxide/L2 | 4,438,205 | 2.297x | 71.8 ms |
+
+miniz_oxide L1's synthetic-frontier position does not survive real data:
+zenflate e1 dominates it on both axes (2.305x at 38 ms vs 1.900x at 60 ms).
+The fast point worth studying is **C libdeflate L1** — 5% better ratio than
+zenflate e1 at slightly less time on text (its greedy ht path vs our Turbo's
+single-probe hash; Turbo's ratio plateau e1-e4 = 2.305x is the tell). zlib-rs
+L1 is the raw-speed reference (34 ms) at a much worse 1.692x.
+
 ## Per-host synthetic results (dedicated Hetzner hardware)
 
 ### zen-train-1 — CCX63, 48 dedicated x86 cores (idle, load 0.00)
