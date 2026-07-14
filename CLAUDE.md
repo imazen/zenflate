@@ -50,158 +50,75 @@ Pure Rust DEFLATE/zlib/gzip compression and decompression.
   BREAKING for default-features=false users: add `compress`/`simd` as needed.
 
 
-## Compression Speed
+## Performance (0.4.0)
 
-All benchmarks: safe = default `forbid(unsafe_code)`, unchecked = `--features unchecked`.
-`unchecked` eliminates bounds checks in hot compression loops (+0-12% at L1, +0-6% at L6+).
-It does NOT help decompression (safe bounds checks give LLVM information for better codegen).
+**Source of truth = the committed dated runs in `benchmarks/`.** Do not relabel
+them as newer than their date; re-run to refresh. The inline numbers below are
+headlines measured on **0.4.0, AMD Ryzen 9 7950X (Zen 4), WSL2, safe (default),
+no `-C target-cpu=native`** — the full tables live in:
 
-### Standard Corpus Compression
+- `benchmarks/deflate_rust_ecosystem_2026-07-13.md` — 0.4.0 vs the whole Rust
+  ecosystem (libdeflater C / zlib-rs / flate2 / miniz_oxide / fdeflate /
+  zune-inflate / libflate / yazi), **3 hosts** (7950X WSL2, Hetzner CCX63 x86,
+  Hetzner CAX31 aarch64): synthetic compress/decompress, Silesia per-file
+  decompress, max-compression race, dickens real-text reality check.
+- `benchmarks/avx512_checksum_ab_2026-07-13.md` — checksum SIMD tiers (v4x vs v3),
+  gzip pipeline impact, build/dep cost (why `avx512` stays default-on).
+- `benchmarks/rd_sweep_train1_2026-07-13.csv` — 120 roundtrip-verified RD points.
+- `benchmarks/image_deflate_corpus_2026-06-18.txt`,
+  `benchmarks/zenflate_vs_zlibrs_2026-06-13.md`, `benchmarks/README.md` — older
+  PNG-residual + matched-ratio runs + methodology.
 
-Canterbury (11 text files, 2.7 MiB), Silesia (11 mixed files, 153 MiB), gb82 photos (5 raw RGB, 4.75 MiB).
-Aggregate throughput across all files in each corpus.
+### Compression (lower = faster)
 
-| Corpus | Level | Safe | Unchecked | C | vs C (unc) | vs flate2 (unc) |
-|--------|-------|------|-----------|---|------------|-----------------|
-| Canterbury | L1 | 355 MiB/s | 431 MiB/s | 381 MiB/s | **1.13x** | 0.98x |
-| Canterbury | L6 | 295 MiB/s | 347 MiB/s | 131 MiB/s | **2.66x** | **3.21x** |
-| Canterbury | L12 | 134 MiB/s | 147 MiB/s | 8 MiB/s | **19.6x** | **9.69x** |
-| Silesia | L1 | — | 365 MiB/s | 319 MiB/s | **1.14x** | 0.97x |
-| Silesia | L6 | — | 289 MiB/s | 128 MiB/s | **2.25x** | **3.00x** |
-| Silesia | L12 | — | 146 MiB/s | 7 MiB/s | **19.7x** | **3.09x** |
-| Photos (RGB) | L1 | 202 MiB/s | 222 MiB/s | 193 MiB/s | **1.15x** | **1.24x** |
-| Photos (RGB) | L6 | 162 MiB/s | 162 MiB/s | 114 MiB/s | **1.42x** | **2.31x** |
-| Photos (RGB) | L12 | 93 MiB/s | 99 MiB/s | 18 MiB/s | **5.53x** | **2.23x** |
+1 MB mixed synthetic, median of n=100 (interleaved zenbench):
 
-Silesia safe not measured (thermal throttling invalidated the long run).
+| | L1 | L6 | L12 / max |
+|---|---|---|---|
+| zenflate | 5.53 ms | 6.08 ms | 8.31 ms |
+| libdeflate (C) | 4.95 ms | 6.03 ms | 17.02 ms |
+| zlib-rs | 5.35 ms | 12.69 ms | 14.56 ms (L9) |
+| miniz_oxide | 2.81 ms | 14.63 ms | 15.33 ms (L9) |
 
-Note: flate2 uses zlib-rs backend. At L1, flate2 uses static Huffman + 4K hash table
-(faster but worse ratio than zenflate's dynamic Huffman). zenflate L6 is 2-3x faster
-than both C and flate2 across all corpus types. L12 gap vs C is huge because zenflate's
-near-optimal is a fundamentally different (faster) algorithm.
+≈C at L6, ~2× every Rust crate at L6+, ~2× C at L12 (different near-optimal
+algorithm). Byte-identical to C at every level via `CompressionLevel::libdeflate(n)`.
+3 MB near-incompressible synthetic photo (`examples/ratio_bench.rs`, safe): zenflate
+e1 172 / e15 88 / e30 10 MiB/s vs libdeflate L1 178 / L9 114 / L12 43 — this is the
+worst case for effort near-optimal (real corpora invert it; see ecosystem file).
+`unchecked` adds +0–12% at L1, +0–6% at L6+ (compression only).
 
-### Per-file Silesia L6
+### Decompression (higher = faster; `unchecked` does NOT help — safe is equal/faster)
 
-| File | Unchecked | C | vs C | vs flate2 |
-|------|-----------|---|------|-----------|
-| dickens (10M text) | 221 MiB/s | 81 MiB/s | **2.73x** | **3.25x** |
-| nci (33M chemistry) | 872 MiB/s | 290 MiB/s | **3.01x** | **3.71x** |
-| reymont (6.6M text) | 299 MiB/s | 90 MiB/s | **3.34x** | **5.30x** |
-| samba (21M source) | 400 MiB/s | 157 MiB/s | **2.55x** | **3.40x** |
-| sao (7M binary) | 153 MiB/s | 86 MiB/s | **1.78x** | **2.45x** |
-| webster (41M dict) | 286 MiB/s | 114 MiB/s | **2.51x** | **3.32x** |
-| x-ray (8.5M image) | 150 MiB/s | 134 MiB/s | **1.12x** | **1.99x** |
-| xml (5.3M data) | 595 MiB/s | 221 MiB/s | **2.69x** | **3.33x** |
+1 MB compressed at zenflate L6:
 
-### Synthetic Photo Bitmap All Levels (3 MiB)
+| Data | zenflate | libdeflate (C) | flate2 (zlib-rs) | miniz_oxide |
+|---|---|---|---|---|
+| Sequential | 21.3 GiB/s | 27.7 GiB/s | 25.8 GiB/s | 11.0 GiB/s |
+| Mixed | 763 MiB/s | 806 MiB/s | 649 MiB/s | 552 MiB/s |
+| Photo | 662 MiB/s | 694 MiB/s | 578 MiB/s | 476 MiB/s |
 
-| Level | Safe | Unchecked | C | vs C (unc) |
-|-------|------|-----------|---|------------|
-| L1 | 606 MiB/s | 679 MiB/s | 582 MiB/s | **1.17x** |
-| L2 | 615 MiB/s | 674 MiB/s | 408 MiB/s | **1.65x** |
-| L4 | 610 MiB/s | 678 MiB/s | 411 MiB/s | **1.65x** |
-| L6 | 468 MiB/s | 471 MiB/s | 403 MiB/s | **1.17x** |
-| L9 | 468 MiB/s | 479 MiB/s | 383 MiB/s | **1.25x** |
-| L10 | 306 MiB/s | 321 MiB/s | 178 MiB/s | **1.81x** |
-| L12 | 295 MiB/s | 309 MiB/s | 150 MiB/s | **2.06x** |
+Fastest Rust decoder on realistic data (13–15% ahead of zlib-rs/flate2, ~20% ahead
+of zune-inflate), within ~5% of C. aarch64 lead is *wider* (see ecosystem file).
+Streaming decode overhead ≈1.1–1.6× whole-buffer depending on chunk size.
 
-Byte-identical output at every level.
+### Checksums (1 MiB sequential, `avx512` default-on)
 
-### Ecosystem Comparison (3 MiB photo bitmap)
+| Algorithm | zenflate | libdeflate (C) | vs C |
+|---|---|---|---|
+| Adler-32 | 110 GiB/s | 118 GiB/s | 0.93× |
+| CRC-32 | 77 GiB/s | 75 GiB/s | 1.02× |
 
-| Library | Level | Safe | Unchecked |
-|---------|-------|------|-----------|
-| zenflate | L6 | 468 MiB/s | 471 MiB/s |
-| zenflate | L9 | 468 MiB/s | 479 MiB/s |
-| zenflate | L12 | 295 MiB/s | 309 MiB/s |
-| flate2 (zlib-rs) | L1 | 456 MiB/s | 455 MiB/s |
-| miniz_oxide | L9 | 175 MiB/s | 176 MiB/s |
+Standalone 512-bit (v4x) vs 256-bit (v3): CRC-32 4.3×, Adler-32 1.1–1.6× — full
+A/B in the avx512 file. Impl: AVX-512 VNNI / PCLMULQDQ (x86), NEON / PMULL
+(aarch64), simd128 (WASM).
 
-zenflate L6 is ~2.7x faster than flate2/miniz_oxide at comparable ratios.
+### Parallel gzip (4 MiB mixed, `gzip_compress_parallel`)
 
-### Synthetic Data Compression (1 MiB)
-
-| Level | Data | Safe | Unchecked | C | vs C (unc) |
-|-------|------|------|-----------|---|------------|
-| L1 | mixed | 4.5ms | 4.1ms | 4.7ms | **1.15x** |
-| L6 | mixed | 6.0ms | 6.0ms | 6.1ms | **1.02x** |
-| L12 | mixed | 8.3ms | 7.9ms | 17.7ms | **2.25x** |
-| L1 | photo | 4.9ms | 4.4ms | 5.2ms | **1.17x** |
-| L6 | photo | 6.4ms | 6.4ms | 7.5ms | **1.17x** |
-| L12 | photo | 10.2ms | 9.7ms | 20.0ms | **2.06x** |
-
-Sequential/zeros omitted — too synthetic (zenflate 5-14x faster than C on ultra-repetitive data).
-
-### `unchecked` Feature Benefit (compression only)
-
-| Level | Data | Speedup |
-|-------|------|---------|
-| L1 | mixed | +11% |
-| L6 | mixed | +0% |
-| L12 | mixed | +6% |
-| L1 | photo | +12% |
-| L6 | photo | +1% |
-| L12 | photo | +5% |
-
-`unchecked` helps most at L1 (bounds checks in turbo hash lookups), barely at L6+.
-Does NOT help decompression at all — safe is equal or faster.
-
-### Parallel Compression (4 MiB mixed data)
-
-| Level | 1T (safe) | 1T (unc) | 4T (safe) | 4T (unc) | Speedup (4T) |
-|-------|-----------|----------|-----------|----------|--------------|
-| L1 | 18.4ms | 16.6ms | 5.8ms | 5.3ms | **3.1x** |
-| L6 | 24.0ms | 23.9ms | 7.3ms | 7.2ms | **3.3x** |
-| L12 | 33.8ms | 32.3ms | 10.1ms | 9.5ms | **3.4x** |
-
-Pigz-style chunking: equal-sized chunks with 32KB dictionary overlap,
-sync flush at boundaries, combined CRC-32 via GF(2) matrix.
-
-## Decompression Speed
-
-`unchecked` does NOT help decompression — safe bounds checks give LLVM information
-that enables better optimization. All decompression numbers are from safe mode.
-
-### Synthetic Data (1 MiB, compressed at L6)
-
-| Data | zenflate | C | fdeflate | zlib-rs | flate2 (zlib-rs) | miniz_oxide | vs C |
-|------|----------|---|----------|---------|------------------|-------------|------|
-| Sequential | 46µs | 35µs | 90µs | 49µs | 36µs | 81µs | 0.77x |
-| Zeros | 35µs | 54µs | 56µs | 42µs | 29µs | 73µs | **1.57x** |
-| Mixed | 1.32ms | 1.25ms | 1.42ms | 1.55ms | 1.54ms | 1.70ms | 0.95x |
-| Photo | 1.47ms | 1.39ms | 1.52ms | 1.75ms | 1.73ms | 2.01ms | 0.95x |
-
-flate2 uses zlib-rs backend, which is much faster than old miniz_oxide backend.
-
-### Corpus Decompression (L6, selected files)
-
-| File | zenflate | C | fdeflate | zlib-rs | flate2 | vs C |
-|------|----------|---|----------|---------|--------|------|
-| dickens (10M) | 746 MiB/s | 1098 MiB/s | 771 MiB/s | 814 MiB/s | 824 MiB/s | 0.68x |
-| samba (21M) | 1159 MiB/s | 1669 MiB/s | 1123 MiB/s | 1291 MiB/s | 1338 MiB/s | 0.69x |
-| xml (5.3M) | 1717 MiB/s | 2732 MiB/s | 1571 MiB/s | 2020 MiB/s | 2054 MiB/s | 0.63x |
-| sao (7M binary) | 656 MiB/s | 801 MiB/s | 572 MiB/s | 627 MiB/s | 645 MiB/s | 0.82x |
-| x-ray (8.5M) | 593 MiB/s | 699 MiB/s | 561 MiB/s | 541 MiB/s | 580 MiB/s | 0.85x |
-| dog (photo RGB) | 595 MiB/s | 633 MiB/s | 571 MiB/s | 539 MiB/s | 553 MiB/s | 0.94x |
-
-Gap vs C: 0.63-0.94x across real-world data. Largest gap on highly compressible
-text (xml, dickens); smallest on binary/photo data.
-
-### Streaming Decompression (1 MiB, compressed at L6)
-
-| Data | whole | stream (64K) | stream (4K) | overhead (64K) | fdeflate |
-|------|-------|--------------|-------------|----------------|----------|
-| Sequential | 46µs | 55µs | 113µs | 1.19x | 90µs |
-| Zeros | 35µs | 54µs | 105µs | 1.57x | 56µs |
-| Mixed | 1.31ms | 1.49ms | 1.66ms | 1.14x | 1.41ms |
-| Photo | 1.46ms | 1.63ms | 1.82ms | 1.12x | 1.51ms |
-
-## Checksums (1 MiB sequential)
-
-| Algorithm | Safe | Unchecked | C | vs C (unc) |
-|-----------|------|-----------|---|------------|
-| Adler-32 | 117 GiB/s | 123 GiB/s | 121 GiB/s | **1.01x** |
-| CRC-32 | 77 GiB/s | 78 GiB/s | 78 GiB/s | **1.00x** |
+| effort | 1 thread | 4 threads | speedup |
+|---|---|---|---|
+| e1 | 21 ms | 6.2 ms | 3.4× |
+| e15 | 38 ms | 11 ms | 3.5× |
+| e30 | 178 ms | 52 ms | 3.4× |
 
 ## Investigation Notes
 

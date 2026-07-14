@@ -289,53 +289,53 @@ by `alloc` / always-on.
 <!-- crates.io:skip-start -->
 ## Performance
 
-The headline figures below were measured on x86_64 with AVX-512 (Intel),
-`--features unchecked`, on **v0.3.1**. The v0.3.2 storage change
-(`NearOptimalState` / `BtMatchfinder` moved from fixed arrays to `Vec`) can
-shift levels 10–12 and 30, so treat the high-effort rows as indicative. For
-current, dated, reproducible runs — including a v0.3.6-vs-zlib-rs comparison —
-and the full methodology, see
-**[benchmarks/README.md](https://github.com/imazen/zenflate/blob/main/benchmarks/README.md)**.
+Measured on **zenflate 0.4.0**, AMD Ryzen 9 7950X (Zen 4), Linux/WSL2, **safe**
+mode (the default — `forbid(unsafe_code)`, no `unchecked`), **no**
+`-C target-cpu=native` (runtime SIMD dispatch only). The full head-to-head —
+x86 + aarch64, the whole Rust ecosystem, real corpora, per-host — is committed at
+**[benchmarks/deflate_rust_ecosystem_2026-07-13.md](https://github.com/imazen/zenflate/blob/main/benchmarks/deflate_rust_ecosystem_2026-07-13.md)**.
+One machine, one run set — re-measure before quoting externally.
 
-**Compression** (3 MiB photo bitmap, reproducible via `examples/ratio_bench.rs`):
+**Compression** (1 MB mixed synthetic, median of n=100, *lower is better*):
 
-| Library | Level | Ratio | Speed | vs C |
-|---------|-------|-------|-------|------|
-| **zenflate** | effort 1 (fastest) | 91.69% | 149 MiB/s | 0.81x |
-| **zenflate** | effort 15 (balanced) | 92.31% | 105 MiB/s | 0.88x |
-| **zenflate** | effort 22 (high) | 92.31% | 104 MiB/s | 0.87x |
-| **zenflate** | effort 30 (best) | 91.80% | 39 MiB/s | 0.89x |
-| libdeflate (C) | L1 | 91.69% | 185 MiB/s | — |
-| libdeflate (C) | L9 | 92.31% | 119 MiB/s | — |
-| libdeflate (C) | L12 | 91.80% | 44 MiB/s | — |
-| flate2 | L1 | 91.70% | 291 MiB/s | — |
-| flate2 | L9 (best) | 91.58% | 55 MiB/s | — |
+| Library | L1 | L6 | L12 / max |
+|---------|-----|-----|-----------|
+| **zenflate** | 5.53 ms | 6.08 ms | 8.31 ms |
+| libdeflate (C) | 4.95 ms | 6.03 ms | 17.02 ms |
+| zlib-rs | 5.35 ms | 12.69 ms | 14.56 ms (L9) |
+| miniz_oxide | 2.81 ms | 14.63 ms | 15.33 ms (L9) |
 
-zenflate and libdeflate produce **byte-identical output** at every level
-(via `CompressionLevel::libdeflate(n)`).
+At L6 zenflate matches C and is ~2× faster than every other Rust crate; at L12 it
+is ~2× faster than C (a different, faster near-optimal algorithm). Level numbers
+are not equivalent across libraries — compare at matched ratio (see the benchmark
+file). Via `CompressionLevel::libdeflate(n)`, zenflate emits **byte-identical**
+output to C libdeflate at every level.
 
-**Decompression** (compressed at L6):
+**Decompression** (1 MB, compressed at zenflate L6, *higher is better*):
 
-| Data type | zenflate | libdeflate (C) | flate2 | miniz_oxide |
-|-----------|----------|----------------|--------|-------------|
-| Sequential | 27.7 GiB/s | 31.6 GiB/s | 7.2 GiB/s | 6.6 GiB/s |
-| Zeros | 34.6 GiB/s | 14.5 GiB/s | 26.6 GiB/s | 17.2 GiB/s |
-| Mixed | 717 MiB/s | 795 MiB/s | 585 MiB/s | 571 MiB/s |
+| Data | zenflate | libdeflate (C) | flate2 (zlib-rs) | miniz_oxide |
+|------|----------|----------------|------------------|-------------|
+| Sequential | 21.3 GiB/s | 27.7 GiB/s | 25.8 GiB/s | 11.0 GiB/s |
+| Mixed | 763 MiB/s | 806 MiB/s | 649 MiB/s | 552 MiB/s |
+| Photo | 662 MiB/s | 694 MiB/s | 578 MiB/s | 476 MiB/s |
 
-**Checksums:**
+On realistic data zenflate is the **fastest Rust decoder** (13–15% ahead of
+zlib-rs/flate2, ~20% ahead of zune-inflate) and within ~5% of C libdeflate.
 
-| Algorithm | zenflate | libdeflate (C) | Implementation |
-|-----------|----------|----------------|----------------|
-| Adler-32 | 114 GiB/s | 121 GiB/s | AVX-512 VNNI (x86), NEON (aarch64), WASM simd128 |
-| CRC-32 | 78 GiB/s | 77 GiB/s | PCLMULQDQ (x86), PMULL (aarch64) |
+**Checksums** (1 MiB sequential, `avx512` default-on):
 
-**Parallel gzip** (4 MB mixed data):
+| Algorithm | zenflate | libdeflate (C) | vs C | Implementation |
+|-----------|----------|----------------|------|----------------|
+| Adler-32 | 110 GiB/s | 118 GiB/s | 0.93× | AVX-512 VNNI (x86), NEON (aarch64), WASM simd128 |
+| CRC-32 | 77 GiB/s | 75 GiB/s | 1.02× | PCLMULQDQ (x86), PMULL (aarch64) |
+
+**Parallel gzip** (4 MiB mixed, `gzip_compress_parallel`):
 
 | Level | 1 thread | 4 threads | Speedup |
 |-------|----------|-----------|---------|
-| effort 1 | 161 MiB/s | 534 MiB/s | 3.3x |
-| effort 15 | 133 MiB/s | 440 MiB/s | 3.3x |
-| effort 30 | 46 MiB/s | 135 MiB/s | 2.9x |
+| effort 1 | 21 ms | 6.2 ms | 3.4× |
+| effort 15 | 38 ms | 11 ms | 3.5× |
+| effort 30 | 178 ms | 52 ms | 3.4× |
 
 <!-- crates.io:skip-end -->
 ## How it works
