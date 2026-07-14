@@ -157,6 +157,10 @@ fn miniz_level(level: u32) -> u8 {
     level.min(9) as u8
 }
 
+fn yazi_level(level: u32) -> yazi::CompressionLevel {
+    yazi::CompressionLevel::Specific(level.min(10) as u8)
+}
+
 // ---------------------------------------------------------------------------
 // Compress a single corpus file across all libraries at given levels
 // ---------------------------------------------------------------------------
@@ -242,7 +246,28 @@ fn bench_corpus_compress(
                     },
                 );
             }
+
+            // yazi (one-shot API allocates output per call)
+            {
+                let yl = yazi_level(level);
+                group.bench_with_input(
+                    BenchmarkId::new("yazi", format!("L{level}")),
+                    &level,
+                    |b, _| {
+                        b.iter(|| yazi::compress(data, yazi::Format::Raw, yl).unwrap().len());
+                    },
+                );
+            }
         }
+
+        // libflate (no level knob — single default configuration)
+        group.bench_function("libflate/default", |b| {
+            b.iter(|| {
+                let mut enc = libflate::deflate::Encoder::new(Vec::with_capacity(data.len() / 2));
+                std::io::Write::write_all(&mut enc, data).unwrap();
+                enc.finish().into_result().unwrap().len()
+            });
+        });
 
         group.finish();
     }
@@ -345,6 +370,34 @@ fn bench_corpus_decompress(c: &mut Criterion, corpus_name: &str, files: &[(&str,
         // miniz_oxide
         group.bench_function("miniz_oxide", |b| {
             b.iter(|| miniz_oxide::inflate::decompress_to_vec(compressed).unwrap());
+        });
+
+        // zune-inflate (raw deflate; allocates output per call)
+        group.bench_function("zune-inflate", |b| {
+            b.iter(|| {
+                let mut dec = zune_inflate::DeflateDecoder::new(compressed);
+                dec.decode_deflate().unwrap().len()
+            });
+        });
+
+        // yazi (raw deflate; allocates output per call)
+        group.bench_function("yazi", |b| {
+            b.iter(|| {
+                yazi::decompress(compressed, yazi::Format::Raw)
+                    .unwrap()
+                    .0
+                    .len()
+            });
+        });
+
+        // libflate (raw deflate; io::Read API, output buffer reused)
+        group.bench_function("libflate", |b| {
+            let mut out = Vec::with_capacity(data.len());
+            b.iter(|| {
+                out.clear();
+                let mut dec = libflate::deflate::Decoder::new(compressed);
+                std::io::Read::read_to_end(&mut dec, &mut out).unwrap()
+            });
         });
 
         group.finish();

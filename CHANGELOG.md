@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-07-13
+
 ### Changed
 
 - **BREAKING (0.4.0):** compression is now behind the `compress` feature

@@ -60,8 +60,8 @@ enough = { version = "0.4.3", default-features = false }
 codec-corpus = "1"
 crc32fast = "1"
 zenutils-fuzz = "0.1.0"
-fdeflate = "0.3"
-miniz_oxide = "0.9"
+fdeflate = "0.3.7"
+miniz_oxide = "0.9.1"
 png = "0.18"
 simd-adler32 = "0.3"
 
@@ -69,9 +69,13 @@ simd-adler32 = "0.3"
 # libdeflate-sys requires C compilation (needs WASI SDK for wasm32).
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 zenbench = { version = "0.1.2", features = ["criterion-compat"] }
-libdeflater = "1.25"
-flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"] }
-zlib-rs = "0.6"
+libdeflater = "1.25.2"
+flate2 = { version = "1.1.9", default-features = false, features = ["zlib-rs"] }
+zlib-rs = "0.6.6"
+libflate = "2.3.0"
+yazi = "0.2.1"
+zune-inflate = "0.2.54"
+zopfli = "0.8.3"
 
 [profile.release]
 debug = true
@@ -117,6 +121,10 @@ required-features = ["compress"]
 
 [[example]]
 name = "ratio_bench"
+required-features = ["compress"]
+
+[[example]]
+name = "rd_sweep"
 required-features = ["compress"]
 
 [[example]]
