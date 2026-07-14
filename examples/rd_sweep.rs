@@ -64,6 +64,8 @@ fn make_photo_bitmap(width: usize, height: usize) -> Vec<u8> {
     data
 }
 
+type CompressFn = Box<dyn FnMut(&[u8]) -> Vec<u8>>;
+
 #[derive(Clone, Copy, PartialEq)]
 enum Fmt {
     Deflate,
@@ -100,7 +102,7 @@ struct Point {
     lib: &'static str,
     label: String,
     fmt: Fmt,
-    compress: Box<dyn FnMut(&[u8]) -> Vec<u8>>,
+    compress: CompressFn,
     /// Skip datasets larger than this (optimal parsers on 10 MB inputs).
     max_input: usize,
 }
@@ -231,7 +233,7 @@ fn points() -> Vec<Point> {
         lib: "fdeflate",
         label: "default".into(),
         fmt: Fmt::Zlib,
-        compress: Box::new(|data| fdeflate::compress_to_vec(data)),
+        compress: Box::new(fdeflate::compress_to_vec),
         max_input: usize::MAX,
     });
 
