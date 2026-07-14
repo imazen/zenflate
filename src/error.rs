@@ -24,8 +24,8 @@ pub enum DecompressionError {
     InsufficientSpace,
     /// Decompressed output exceeded the configured maximum size limit.
     ///
-    /// Returned when [`Decompressor::with_max_output_size`] or
-    /// [`StreamDecompressor::with_max_output_size`] is set and the
+    /// Returned when [`Decompressor::with_max_output_size`](crate::Decompressor::with_max_output_size) or
+    /// [`StreamDecompressor::with_max_output_size`](crate::StreamDecompressor::with_max_output_size) is set and the
     /// decompressed data exceeds that limit. This defends against
     /// decompression bombs (small inputs that expand to enormous output).
     OutputLimitExceeded,
@@ -106,15 +106,13 @@ impl<E> From<DecompressionError> for StreamError<E> {
     }
 }
 
-#[cfg(feature = "std")]
-impl std::error::Error for CompressionError {}
+impl core::error::Error for CompressionError {}
 
-#[cfg(feature = "std")]
-impl std::error::Error for DecompressionError {}
+impl core::error::Error for DecompressionError {}
 
-#[cfg(feature = "std")]
-impl<E: std::error::Error + 'static> std::error::Error for StreamError<E> {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+#[cfg(feature = "alloc")]
+impl<E: core::error::Error + 'static> core::error::Error for StreamError<E> {
+    fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
         match self {
             Self::Decompress(e) => Some(e),
             Self::Source(e) => Some(e),

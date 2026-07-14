@@ -262,7 +262,7 @@ the loop and can stop between `fill()` calls.
 
 | Feature | Default | Effect |
 |---------|---------|--------|
-| `std` | yes | `std::error::Error` impls, `BufReadSource` |
+| `std` | yes | `std::io::{Read, BufRead}` integration (`BufReadSource`) |
 | `alloc` | yes (via `std`) | Streaming decompression |
 | `compress` | yes | `Compressor` / `CompressionLevel` (implies `alloc`) |
 | `simd` | yes | Runtime-dispatched SIMD checksums and matchfinder multiversioning (via archmage); without it, scalar paths |

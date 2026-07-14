@@ -63,7 +63,7 @@
 //!
 //! | Feature | Default | Effect |
 //! |---------|---------|--------|
-//! | `std` | yes | `std::error::Error` impls, `BufReadSource` |
+//! | `std` | yes | `std::io::{Read, BufRead}` integration (`BufReadSource`) |
 //! | `alloc` | yes (via `std`) | Streaming decompression |
 //! | `compress` | yes | [`Compressor`] / [`CompressionLevel`] (implies `alloc`) |
 //! | `simd` | yes | Runtime-dispatched SIMD checksums + matchfinder multiversioning |
@@ -72,7 +72,8 @@
 //! | `unchecked` | no | Elide bounds checks in compression hot paths |
 //!
 //! Buffer-to-buffer decompression and both checksums are always available,
-//! including `no_std` without `alloc`. For a minimal, fast-to-compile
+//! including `no_std` without `alloc`; the error types implement
+//! [`core::error::Error`] unconditionally. For a minimal, fast-to-compile
 //! decoder use `default-features = false, features = ["std"]` — one
 //! dependency, no proc macros, scalar checksums.
 
