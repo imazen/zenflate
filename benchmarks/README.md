@@ -85,6 +85,13 @@ file header. Current files:
   predictor/filter residual streams (the imazen-26 PNG set).
 - `image_deflate_safe_vs_unchecked_2026-06-18.txt` — the same image-DEFLATE
   corpus, `safe` (default) vs `unchecked`, with the zlib-rs fairness note.
+- `deflate_rust_ecosystem_2026-07-13.md` — zenflate 0.4.0 vs the full Rust
+  ecosystem (libdeflater, flate2/zlib-rs, miniz_oxide, fdeflate, libflate, yazi,
+  zune-inflate), per-host on Hetzner train-1 (CCX63 x86) and arm-big (CAX31
+  aarch64) plus WSL2, with a fast-end dickens reality check.
+- `rd_sweep_train1_2026-07-13.csv` — 120 roundtrip-verified rate/distortion
+  points (every library × level: size, adaptive median time, zenflate decode)
+  from the CCX63 box; backs `examples/rd_sweep.rs`.
 
 Do not commit numbers you didn't generate, and don't extrapolate one size or
 machine to another — measure each. Memory claims need heaptrack / `time -v`, not

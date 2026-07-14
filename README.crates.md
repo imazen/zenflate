@@ -8,7 +8,7 @@ Pure Rust DEFLATE / zlib / gzip. Compression spans effort levels 0–200 across 
 
 ```toml
 [dependencies]
-zenflate = "0.3"
+zenflate = "0.4"
 ```
 
 ```rust
