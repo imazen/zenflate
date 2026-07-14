@@ -299,6 +299,25 @@ features vs a prototype containing only decompress + scalar checksums + error + 
   dep tree = enough only, 105 decode-only lib tests (libdeflater-compressed decode
   tests stay live). Default features unchanged: 3.2s cold, full API, 245 tests.
 
+### `avx512` stays DEFAULT-ON — measured, do not re-litigate opt-in (2026-07-14)
+
+Considered making `avx512` opt-in for "dep weight." Measured on 7950X (Zen 4,
+native AVX-512+VNNI+VPCLMULQDQ), no `target-cpu=native`. Full data:
+`benchmarks/avx512_checksum_ab_2026-07-13.md`.
+
+- `avx512` gates ONLY the 512-bit checksum tiers (`adler32_impl_v4x` VNNI,
+  `crc32_impl_v4x` VPCLMULQDQ). Nothing in compress/decompress core uses it.
+- **Cost of keeping it on is ~nil:** +0 crates (13→13 — `archmage/avx512` only
+  toggles codegen inside archmage, already a dep), +0.02s (+1%) cold build,
+  +7 KB binary, +0 MSRV (archmage itself requires 1.89 via `simd`, so opt-in
+  would NOT lower the default MSRV).
+- **Benefit is real but niche:** standalone CRC-32 **4.3×** (18→78 GiB/s),
+  Adler-32 1.1–1.6×. gzip pipeline: 0% compress, 1% typical / 10% best-case
+  (xml) decompress. The 4× only matters if `zenflate::crc32`/`adler32` is used
+  as a standalone checksum library.
+- **Decision (user, 2026-07-14):** keep `avx512` in default. Opt-in removes
+  nothing measurable and costs 4.3× standalone CRC. Don't revisit without new data.
+
 ## Known Bugs
 
 (none currently)
