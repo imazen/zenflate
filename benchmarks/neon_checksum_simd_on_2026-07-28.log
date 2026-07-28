@@ -1,0 +1,646 @@
+    Updating crates.io index
+ Downloading crates ...
+  Downloaded cc v1.2.67
+  Downloaded libflate_lz77 v2.3.0
+  Downloaded adler32 v1.2.0
+  Downloaded yazi v0.2.1
+  Downloaded dary_heap v0.3.9
+  Downloaded miniz_oxide v0.9.1
+  Downloaded libflate v2.3.0
+  Downloaded rle-decode-fast v1.0.3
+   Compiling libc v0.2.186
+   Compiling proc-macro2 v1.0.106
+   Compiling quote v1.0.46
+   Compiling unicode-ident v1.0.24
+   Compiling bitflags v2.13.0
+   Compiling memchr v2.8.3
+   Compiling cfg-if v1.0.4
+   Compiling rustix v1.1.4
+   Compiling simd-adler32 v0.3.9
+   Compiling serde_core v1.0.228
+   Compiling crc32fast v1.5.0
+   Compiling utf8parse v0.2.2
+   Compiling shlex v2.0.1
+   Compiling zmij v1.0.23
+   Compiling find-msvc-tools v0.1.9
+   Compiling cc v1.2.67
+   Compiling anstyle-parse v1.0.0
+   Compiling anstyle-query v1.1.5
+   Compiling colorchoice v1.0.5
+   Compiling is_terminal_polyfill v1.70.2
+   Compiling adler2 v2.0.1
+   Compiling serde v1.0.228
+   Compiling anstyle v1.0.14
+   Compiling syn v2.0.118
+   Compiling serde_json v1.0.150
+   Compiling anstream v1.0.0
+   Compiling libdeflate-sys v1.25.2
+   Compiling errno v0.3.14
+   Compiling objc2-core-foundation v0.3.2
+   Compiling equivalent v1.0.2
+   Compiling clap_lex v1.1.0
+   Compiling option-ext v0.2.0
+   Compiling strsim v0.11.1
+   Compiling allocator-api2 v0.2.21
+   Compiling itoa v1.0.18
+   Compiling heck v0.5.0
+   Compiling foldhash v0.2.0
+   Compiling clap_builder v4.6.0
+   Compiling hashbrown v0.16.1
+   Compiling dirs-sys v0.5.0
+   Compiling objc2-io-kit v0.3.2
+   Compiling miniz_oxide v0.8.9
+   Compiling no_std_io2 v0.9.4
+   Compiling rle-decode-fast v1.0.3
+   Compiling zlib-rs v0.6.6
+   Compiling safe_unaligned_simd v0.2.5
+   Compiling libflate_lz77 v2.3.0
+   Compiling serde_derive v1.0.228
+   Compiling clap_derive v4.6.1
+   Compiling archmage-macros v0.9.27
+   Compiling sysinfo v0.36.1
+   Compiling clap v4.6.1
+   Compiling archmage v0.9.27
+   Compiling dirs v6.0.0
+   Compiling terminal_size v0.4.4
+   Compiling fs4 v1.1.0
+   Compiling fd-lock v4.0.4
+   Compiling fdeflate v0.3.7
+   Compiling adler32 v1.2.0
+   Compiling enough v0.4.4
+   Compiling flate2 v1.1.9
+   Compiling bumpalo v3.20.3
+   Compiling log v0.4.33
+   Compiling dary_heap v0.3.9
+   Compiling png v0.18.1
+   Compiling zopfli v0.8.3
+   Compiling libflate v2.3.0
+   Compiling codec-corpus v1.1.0
+   Compiling zenbench v0.1.8
+   Compiling zenflate v0.4.0 (/Users/lilith/work/zen/zenflate)
+   Compiling libdeflater v1.25.2
+   Compiling miniz_oxide v0.9.1
+   Compiling zune-inflate v0.2.54
+   Compiling yazi v0.2.1
+   Compiling zenutils-fuzz v0.1.0
+    Finished `bench` profile [optimized + debuginfo] target(s) in 8.62s
+     Running benches/throughput.rs (target/release/deps/throughput-702e51d260acefc2)
+
+  compress/sequential  0 rounds ⚠ only 0 rounds
+                            mean ±mad µs  95% CI vs base    
+  ├─ zenflate/L1          195.6 ±45.8µs  [186.9–204.6]µs    [1]
+  ├─ libdeflate/L1         485.6 ±5.7µs                    
+  ├─ flate2/L1             159.5 ±0.7µs                    
+  ├─ miniz_oxide/L1         65.0 ±0.2µs                    
+  ├─ zlib-rs/L1            161.5 ±0.5µs                    
+  ├─ yazi/L1               636.2 ±2.4µs                    
+  ├─ zenflate/L2           124.2 ±0.7µs                    
+  ├─ libdeflate/L2         711.7 ±2.1µs                    
+  ├─ flate2/L2             193.5 ±1.0µs                    
+  ├─ miniz_oxide/L2        697.3 ±3.2µs                    
+  ├─ zlib-rs/L2            198.2 ±1.0µs                    
+  ├─ yazi/L2               634.3 ±3.8µs                    
+  ├─ zenflate/L4           117.4 ±4.4µs                    
+  ├─ libdeflate/L4         706.2 ±2.9µs                    
+  ├─ flate2/L4             193.1 ±0.7µs                    
+  ├─ miniz_oxide/L4        699.2 ±5.2µs                    
+  ├─ zlib-rs/L4            197.8 ±1.3µs                    
+  ├─ yazi/L4               637.2 ±4.0µs                    
+  ├─ zenflate/L6           121.0 ±2.3µs                    
+  ├─ libdeflate/L6        1198.7 ±3.0µs                    
+  ├─ flate2/L6             197.3 ±0.6µs                    
+  ├─ miniz_oxide/L6        697.6 ±3.8µs                    
+  ├─ zlib-rs/L6            203.0 ±0.7µs                    
+  ├─ yazi/L6               634.8 ±2.3µs                    
+  ├─ zenflate/L9           113.1 ±0.4µs                    
+  ├─ libdeflate/L9         712.2 ±2.4µs                    
+  ├─ flate2/L9             734.3 ±2.3µs                    
+  ├─ miniz_oxide/L9        701.1 ±4.6µs                    
+  ├─ zlib-rs/L9            738.6 ±2.9µs                    
+  ├─ yazi/L9               636.1 ±3.9µs                    
+  ├─ zenflate/L10          958.4 ±3.8µs                    
+  ├─ libdeflate/L10      6863.3 ±23.9µs                    
+  ├─ flate2/L10            736.3 ±4.5µs                    
+  ├─ miniz_oxide/L10       698.3 ±3.7µs                    
+  ├─ zlib-rs/L10           738.0 ±2.5µs                    
+  ├─ yazi/L10              643.2 ±8.5µs                    
+  ├─ zenflate/L12         1020.2 ±8.0µs                    
+  ├─ libdeflate/L12     13491.1 ±46.0µs                    
+  ├─ flate2/L12            736.0 ±2.6µs                    
+  ├─ miniz_oxide/L12       702.4 ±4.0µs                    
+  ├─ zlib-rs/L12           739.9 ±3.3µs                    
+  ├─ yazi/L12              638.9 ±3.2µs                    
+  ╰─ libflate/default     1875.6 ±5.3µs                    
+
+  miniz_oxide/L1    █ 65.00µs
+  zenflate/L9       █ 113.10µs
+  zenflate/L4       █ 117.38µs
+  zenflate/L6       █ 120.99µs
+  zenflate/L2       █ 124.22µs
+  flate2/L1         █ 159.54µs
+  zlib-rs/L1        █ 161.52µs
+  flate2/L4         █ 193.14µs
+  flate2/L2         █ 193.46µs
+  zenflate/L1       █ 195.59µs
+  flate2/L6         █ 197.32µs
+  zlib-rs/L4        █ 197.81µs
+  zlib-rs/L2        █ 198.20µs
+  zlib-rs/L6        █ 203.04µs
+  libdeflate/L1     ██ 485.58µs
+  yazi/L2           ██ 634.27µs
+  yazi/L6           ██ 634.76µs
+  yazi/L9           ██ 636.05µs
+  yazi/L1           ██ 636.16µs
+  yazi/L4           ██ 637.18µs
+  yazi/L12          ██ 638.85µs
+  yazi/L10          ██ 643.17µs
+  miniz_oxide/L2    ███ 697.27µs
+  miniz_oxide/L6    ███ 697.55µs
+  miniz_oxide/L10   ███ 698.30µs
+  miniz_oxide/L4    ███ 699.20µs
+  miniz_oxide/L9    ███ 701.13µs
+  miniz_oxide/L12   ███ 702.39µs
+  libdeflate/L4     ███ 706.16µs
+  libdeflate/L2     ███ 711.69µs
+  libdeflate/L9     ███ 712.19µs
+  flate2/L9         ███ 734.28µs
+  flate2/L12        ███ 735.98µs
+  flate2/L10        ███ 736.26µs
+  zlib-rs/L10       ███ 738.04µs
+  zlib-rs/L9        ███ 738.60µs
+  zlib-rs/L12       ███ 739.86µs
+  zenflate/L10      ████ 958.44µs
+  zenflate/L12      ████ 1.02ms
+  libdeflate/L6     ████ 1.20ms
+  libflate/default  ███████ 1.88ms
+  libdeflate/L10    █████████████████████████ 6.86ms
+  libdeflate/L12    ██████████████████████████████████████████████████ 13.49ms
+  [1] CV=23%
+
+  compress/zeros  0 rounds ⚠ only 0 rounds
+                             mean ±mad µs  95% CI vs base    
+  ├─ zenflate/L1            115.1 ±0.2µs  [114.9–115.2]µs   
+  ├─ libdeflate/L1          475.2 ±2.8µs                    
+  ├─ flate2/L1              166.0 ±0.4µs                    
+  ├─ miniz_oxide/L1          64.2 ±0.1µs                    
+  ├─ zlib-rs/L1             167.3 ±2.9µs                    
+  ├─ yazi/L1                623.3 ±1.4µs                    
+  ├─ zenflate/L2            102.9 ±1.2µs                    
+  ├─ libdeflate/L2          740.8 ±1.7µs                    
+  ├─ flate2/L2              188.7 ±1.0µs                    
+  ├─ miniz_oxide/L2         724.4 ±2.8µs                    
+  ├─ zlib-rs/L2             190.3 ±1.3µs                    
+  ├─ yazi/L2                623.9 ±1.5µs                    
+  ├─ zenflate/L4            101.9 ±1.1µs                    
+  ├─ libdeflate/L4          749.4 ±1.7µs                    
+  ├─ flate2/L4              190.1 ±1.6µs                    
+  ├─ miniz_oxide/L4         725.3 ±3.0µs                    
+  ├─ zlib-rs/L4             189.7 ±2.5µs                    
+  ├─ yazi/L4                622.9 ±1.2µs                    
+  ├─ zenflate/L6            115.3 ±0.4µs                    
+  ├─ libdeflate/L6         1185.4 ±9.7µs                    
+  ├─ flate2/L6              196.0 ±1.0µs                    
+  ├─ miniz_oxide/L6         723.6 ±1.2µs                    
+  ├─ zlib-rs/L6             185.1 ±4.4µs                    
+  ├─ yazi/L6                623.8 ±1.3µs                    
+  ├─ zenflate/L9            104.9 ±0.9µs                    
+  ├─ libdeflate/L9          750.3 ±2.3µs                    
+  ├─ flate2/L9              731.2 ±1.5µs                    
+  ├─ miniz_oxide/L9         723.5 ±0.8µs                    
+  ├─ zlib-rs/L9             736.4 ±1.1µs                    
+  ├─ yazi/L9                623.9 ±1.6µs                    
+  ├─ zenflate/L10           977.7 ±0.6µs                    
+  ├─ libdeflate/L10      8442.3 ±280.1µs                    
+  ├─ flate2/L10             732.0 ±2.5µs                    
+  ├─ miniz_oxide/L10        722.3 ±1.9µs                    
+  ├─ zlib-rs/L10            735.8 ±2.0µs                    
+  ├─ yazi/L10               624.7 ±2.0µs                    
+  ├─ zenflate/L12          1103.7 ±3.8µs                    
+  ├─ libdeflate/L12     15172.1 ±287.5µs                    
+  ├─ flate2/L12             729.2 ±4.0µs                    
+  ├─ miniz_oxide/L12        723.5 ±2.3µs                    
+  ├─ zlib-rs/L12            736.4 ±1.6µs                    
+  ├─ yazi/L12               625.6 ±2.1µs                    
+  ╰─ libflate/default      1743.6 ±8.6µs                    
+
+  miniz_oxide/L1    █ 64.22µs
+  zenflate/L4       █ 101.91µs
+  zenflate/L2       █ 102.89µs
+  zenflate/L9       █ 104.92µs
+  zenflate/L1       █ 115.06µs
+  zenflate/L6       █ 115.30µs
+  flate2/L1         █ 166.04µs
+  zlib-rs/L1        █ 167.33µs
+  zlib-rs/L6        █ 185.13µs
+  flate2/L2         █ 188.68µs
+  zlib-rs/L4        █ 189.73µs
+  flate2/L4         █ 190.14µs
+  zlib-rs/L2        █ 190.32µs
+  flate2/L6         █ 196.03µs
+  libdeflate/L1     ██ 475.25µs
+  yazi/L4           ██ 622.87µs
+  yazi/L1           ██ 623.27µs
+  yazi/L6           ██ 623.79µs
+  yazi/L9           ██ 623.90µs
+  yazi/L2           ██ 623.92µs
+  yazi/L10          ██ 624.68µs
+  yazi/L12          ██ 625.58µs
+  miniz_oxide/L10   ██ 722.31µs
+  miniz_oxide/L12   ██ 723.54µs
+  miniz_oxide/L9    ██ 723.55µs
+  miniz_oxide/L6    ██ 723.59µs
+  miniz_oxide/L2    ██ 724.41µs
+  miniz_oxide/L4    ██ 725.34µs
+  flate2/L12        ██ 729.21µs
+  flate2/L9         ██ 731.17µs
+  flate2/L10        ██ 732.02µs
+  zlib-rs/L10       ██ 735.79µs
+  zlib-rs/L12       ██ 736.37µs
+  zlib-rs/L9        ██ 736.43µs
+  libdeflate/L2     ██ 740.80µs
+  libdeflate/L4     ██ 749.35µs
+  libdeflate/L9     ██ 750.31µs
+  zenflate/L10      ███ 977.69µs
+  zenflate/L12      ████ 1.10ms
+  libdeflate/L6     ████ 1.19ms
+  libflate/default  ██████ 1.74ms
+  libdeflate/L10    ████████████████████████████ 8.44ms
+  libdeflate/L12    ██████████████████████████████████████████████████ 15.17ms
+
+  compress/mixed  0 rounds ⚠ only 0 rounds
+                       mean ±mad ms  95% CI vs base
+  ├─ zenflate/L1         4.2 ±0.0ms  [4.2–4.2]ms  
+  ├─ libdeflate/L1       4.9 ±0.0ms               
+  ├─ flate2/L1           5.3 ±0.0ms               
+  ├─ miniz_oxide/L1      2.2 ±0.0ms               
+  ├─ zlib-rs/L1          5.3 ±0.0ms               
+  ├─ yazi/L1            12.7 ±0.0ms               
+  ├─ zenflate/L2         4.2 ±0.0ms               
+  ├─ libdeflate/L2       6.2 ±0.0ms               
+  ├─ flate2/L2           9.7 ±0.1ms               
+  ├─ miniz_oxide/L2     11.9 ±0.2ms               
+  ├─ zlib-rs/L2          9.7 ±0.2ms               
+  ├─ yazi/L2            14.1 ±0.0ms               
+  ├─ zenflate/L4         4.2 ±0.0ms               
+  ├─ libdeflate/L4       6.2 ±0.0ms               
+  ├─ flate2/L4          12.0 ±0.6ms               
+  ├─ miniz_oxide/L4     12.1 ±0.2ms               
+  ├─ zlib-rs/L4         11.8 ±0.5ms               
+  ├─ yazi/L4            14.4 ±0.0ms               
+  ├─ zenflate/L6         4.8 ±0.0ms               
+  ├─ libdeflate/L6       7.1 ±0.0ms               
+  ├─ flate2/L6          10.8 ±0.2ms               
+  ├─ miniz_oxide/L6     12.5 ±0.2ms               
+  ├─ zlib-rs/L6         10.7 ±0.2ms               
+  ├─ yazi/L6            14.7 ±0.0ms               
+  ├─ zenflate/L9         4.8 ±0.0ms               
+  ├─ libdeflate/L9       6.9 ±0.0ms               
+  ├─ flate2/L9          13.4 ±0.3ms               
+  ├─ miniz_oxide/L9     12.4 ±0.3ms               
+  ├─ zlib-rs/L9         13.4 ±0.4ms               
+  ├─ yazi/L9            14.7 ±0.1ms               
+  ├─ zenflate/L10        7.7 ±0.1ms               
+  ├─ libdeflate/L10     17.5 ±0.1ms               
+  ├─ flate2/L10         13.4 ±0.3ms               
+  ├─ miniz_oxide/L10    12.4 ±0.2ms               
+  ├─ zlib-rs/L10        13.3 ±0.4ms               
+  ├─ yazi/L10           14.7 ±0.0ms               
+  ├─ zenflate/L12        8.8 ±0.1ms               
+  ├─ libdeflate/L12     18.1 ±0.1ms               
+  ├─ flate2/L12         13.4 ±0.4ms               
+  ├─ miniz_oxide/L12    12.5 ±0.2ms               
+  ├─ zlib-rs/L12        13.4 ±0.4ms               
+  ├─ yazi/L12           14.7 ±0.0ms               
+  ╰─ libflate/default   21.8 ±0.1ms               
+
+  miniz_oxide/L1    █████ 2.22ms
+  zenflate/L1       ██████████ 4.20ms
+  zenflate/L4       ██████████ 4.20ms
+  zenflate/L2       ██████████ 4.21ms
+  zenflate/L9       ███████████ 4.77ms
+  zenflate/L6       ███████████ 4.78ms
+  libdeflate/L1     ████████████ 4.88ms
+  zlib-rs/L1        █████████████ 5.26ms
+  flate2/L1         █████████████ 5.26ms
+  libdeflate/L2     ███████████████ 6.16ms
+  libdeflate/L4     ███████████████ 6.22ms
+  libdeflate/L9     █████████████████ 6.92ms
+  libdeflate/L6     █████████████████ 7.05ms
+  zenflate/L10      ██████████████████ 7.73ms
+  zenflate/L12      █████████████████████ 8.78ms
+  flate2/L2         ███████████████████████ 9.68ms
+  zlib-rs/L2        ███████████████████████ 9.68ms
+  zlib-rs/L6        ██████████████████████████ 10.73ms
+  flate2/L6         ██████████████████████████ 10.77ms
+  zlib-rs/L4        ████████████████████████████ 11.85ms
+  miniz_oxide/L2    ████████████████████████████ 11.92ms
+  flate2/L4         █████████████████████████████ 11.97ms
+  miniz_oxide/L4    █████████████████████████████ 12.12ms
+  miniz_oxide/L9    ██████████████████████████████ 12.37ms
+  miniz_oxide/L10   ██████████████████████████████ 12.45ms
+  miniz_oxide/L6    ██████████████████████████████ 12.50ms
+  miniz_oxide/L12   ██████████████████████████████ 12.50ms
+  yazi/L1           ██████████████████████████████ 12.73ms
+  zlib-rs/L10       ████████████████████████████████ 13.29ms
+  zlib-rs/L12       ████████████████████████████████ 13.35ms
+  zlib-rs/L9        ████████████████████████████████ 13.37ms
+  flate2/L12        ████████████████████████████████ 13.38ms
+  flate2/L9         ████████████████████████████████ 13.40ms
+  flate2/L10        ████████████████████████████████ 13.40ms
+  yazi/L2           ██████████████████████████████████ 14.13ms
+  yazi/L4           ██████████████████████████████████ 14.37ms
+  yazi/L6           ███████████████████████████████████ 14.66ms
+  yazi/L9           ███████████████████████████████████ 14.71ms
+  yazi/L12          ███████████████████████████████████ 14.72ms
+  yazi/L10          ███████████████████████████████████ 14.72ms
+  libdeflate/L10    ██████████████████████████████████████████ 17.51ms
+  libdeflate/L12    ███████████████████████████████████████████ 18.08ms
+  libflate/default  ████████████████████████████████████████████████████ 21.80ms
+
+  compress/photo  0 rounds ⚠ only 0 rounds
+                       mean ±mad ms  95% CI vs base
+  ├─ zenflate/L1         4.4 ±0.0ms  [4.4–4.4]ms  
+  ├─ libdeflate/L1       5.4 ±0.0ms               
+  ├─ flate2/L1           6.3 ±0.1ms               
+  ├─ miniz_oxide/L1      2.5 ±0.0ms               
+  ├─ zlib-rs/L1          6.3 ±0.0ms               
+  ├─ yazi/L1            15.1 ±0.2ms               
+  ├─ zenflate/L2         4.4 ±0.0ms               
+  ├─ libdeflate/L2       7.9 ±0.0ms               
+  ├─ flate2/L2          11.7 ±0.2ms               
+  ├─ miniz_oxide/L2     14.0 ±0.2ms               
+  ├─ zlib-rs/L2         11.7 ±0.2ms               
+  ├─ yazi/L2            17.1 ±0.1ms               
+  ├─ zenflate/L4         4.4 ±0.0ms               
+  ├─ libdeflate/L4       7.9 ±0.0ms               
+  ├─ flate2/L4          13.7 ±0.7ms               
+  ├─ miniz_oxide/L4     14.4 ±0.1ms               
+  ├─ zlib-rs/L4         13.8 ±0.6ms               
+  ├─ yazi/L4            17.5 ±0.1ms               
+  ├─ zenflate/L6         5.1 ±0.0ms               
+  ├─ libdeflate/L6       8.7 ±0.0ms               
+  ├─ flate2/L6          12.7 ±0.1ms               
+  ├─ miniz_oxide/L6     14.3 ±0.1ms               
+  ├─ zlib-rs/L6         12.7 ±0.1ms               
+  ├─ yazi/L6            17.5 ±0.1ms               
+  ├─ zenflate/L9         5.0 ±0.0ms               
+  ├─ libdeflate/L9       8.4 ±0.0ms               
+  ├─ flate2/L9          14.5 ±0.3ms               
+  ├─ miniz_oxide/L9     14.4 ±0.1ms               
+  ├─ zlib-rs/L9         14.6 ±0.2ms               
+  ├─ yazi/L9            17.5 ±0.1ms               
+  ├─ zenflate/L10        9.3 ±0.1ms               
+  ├─ libdeflate/L10     17.5 ±0.1ms               
+  ├─ flate2/L10         14.6 ±0.3ms               
+  ├─ miniz_oxide/L10    14.4 ±0.2ms               
+  ├─ zlib-rs/L10        14.5 ±0.4ms               
+  ├─ yazi/L10           17.5 ±0.1ms               
+  ├─ zenflate/L12       10.5 ±0.0ms               
+  ├─ libdeflate/L12     20.9 ±0.1ms               
+  ├─ flate2/L12         14.6 ±0.3ms               
+  ├─ miniz_oxide/L12    14.3 ±0.1ms               
+  ├─ zlib-rs/L12        14.5 ±0.4ms               
+  ├─ yazi/L12           17.5 ±0.0ms               
+  ╰─ libflate/default   30.5 ±0.3ms               
+
+  miniz_oxide/L1    ████ 2.51ms
+  zenflate/L4       ███████ 4.37ms
+  zenflate/L2       ███████ 4.37ms
+  zenflate/L1       ███████ 4.37ms
+  zenflate/L9       █████████ 5.01ms
+  zenflate/L6       █████████ 5.09ms
+  libdeflate/L1     █████████ 5.40ms
+  zlib-rs/L1        ███████████ 6.25ms
+  flate2/L1         ███████████ 6.27ms
+  libdeflate/L4     ██████████████ 7.93ms
+  libdeflate/L2     ██████████████ 7.94ms
+  libdeflate/L9     ██████████████ 8.43ms
+  libdeflate/L6     ███████████████ 8.70ms
+  zenflate/L10      ████████████████ 9.27ms
+  zenflate/L12      ██████████████████ 10.54ms
+  flate2/L2         ████████████████████ 11.66ms
+  zlib-rs/L2        ████████████████████ 11.68ms
+  flate2/L6         ██████████████████████ 12.67ms
+  zlib-rs/L6        ██████████████████████ 12.70ms
+  flate2/L4         ███████████████████████ 13.66ms
+  zlib-rs/L4        ███████████████████████ 13.77ms
+  miniz_oxide/L2    ████████████████████████ 13.98ms
+  miniz_oxide/L6    ████████████████████████ 14.35ms
+  miniz_oxide/L12   ████████████████████████ 14.35ms
+  miniz_oxide/L4    ████████████████████████ 14.36ms
+  miniz_oxide/L10   █████████████████████████ 14.41ms
+  miniz_oxide/L9    █████████████████████████ 14.44ms
+  zlib-rs/L12       █████████████████████████ 14.49ms
+  zlib-rs/L10       █████████████████████████ 14.51ms
+  flate2/L9         █████████████████████████ 14.51ms
+  flate2/L12        █████████████████████████ 14.60ms
+  zlib-rs/L9        █████████████████████████ 14.62ms
+  flate2/L10        █████████████████████████ 14.65ms
+  yazi/L1           ██████████████████████████ 15.09ms
+  yazi/L2           █████████████████████████████ 17.06ms
+  yazi/L6           ██████████████████████████████ 17.45ms
+  yazi/L9           ██████████████████████████████ 17.50ms
+  yazi/L4           ██████████████████████████████ 17.50ms
+  libdeflate/L10    ██████████████████████████████ 17.53ms
+  yazi/L10          ██████████████████████████████ 17.54ms
+  yazi/L12          ██████████████████████████████ 17.55ms
+  libdeflate/L12    ████████████████████████████████████ 20.87ms
+  libflate/default  ████████████████████████████████████████████████████ 30.50ms
+
+  decompress/sequential  0 rounds ⚠ only 0 rounds
+                     mean ±mad µs  95% CI vs base  
+  ├─ zenflate        42.9 ±0.1µs  [42.8–42.9]µs   
+  ├─ libdeflate      45.9 ±0.2µs                  
+  ├─ fdeflate       112.8 ±1.3µs                  
+  ├─ zlib-rs         65.6 ±0.2µs                  
+  ├─ flate2          41.0 ±0.2µs                  
+  ├─ miniz_oxide    160.8 ±1.7µs                  
+  ├─ zune-inflate    74.7 ±0.6µs                  
+  ├─ yazi            62.3 ±0.4µs                  
+  ╰─ libflate        84.4 ±0.4µs                  
+
+  flate2        ██████████████ 41.04µs
+  zenflate      ██████████████ 42.88µs
+  libdeflate    ███████████████ 45.91µs
+  yazi          █████████████████████ 62.26µs
+  zlib-rs       ██████████████████████ 65.61µs
+  zune-inflate  █████████████████████████ 74.72µs
+  libflate      ████████████████████████████ 84.43µs
+  fdeflate      ██████████████████████████████████████ 112.79µs
+  miniz_oxide   ██████████████████████████████████████████████████████ 160.84µs
+
+  decompress/zeros  0 rounds ⚠ only 0 rounds
+                      mean ±mad µs  95% CI vs base  
+  ├─ zenflate         45.0 ±1.3µs  [43.5–46.3]µs   
+  ├─ libdeflate       40.7 ±0.3µs                  
+  ├─ fdeflate         73.7 ±1.0µs                  
+  ├─ zlib-rs          54.4 ±0.1µs                  
+  ├─ flate2           29.3 ±0.3µs                  
+  ├─ miniz_oxide      63.5 ±0.8µs                  
+  ├─ zune-inflate     66.9 ±0.7µs                  
+  ├─ yazi           469.4 ±23.8µs                  
+  ╰─ libflate        121.7 ±3.8µs                  
+
+  flate2        ███ 29.28µs
+  libdeflate    █████ 40.73µs
+  zenflate      █████ 44.97µs
+  zlib-rs       ██████ 54.39µs
+  miniz_oxide   ███████ 63.49µs
+  zune-inflate  ████████ 66.86µs
+  fdeflate      ████████ 73.69µs
+  libflate      ██████████████ 121.71µs
+  yazi          ██████████████████████████████████████████████████████ 469.40µs
+
+  decompress/mixed  0 rounds ⚠ only 0 rounds
+                   mean ±mad ms  95% CI vs base
+  ├─ zenflate       1.4 ±0.0ms  [1.4–1.4]ms  
+  ├─ libdeflate     1.4 ±0.0ms               
+  ├─ fdeflate       1.6 ±0.0ms               
+  ├─ zlib-rs        1.6 ±0.0ms               
+  ├─ flate2         1.5 ±0.0ms               
+  ├─ miniz_oxide    1.7 ±0.0ms               
+  ├─ zune-inflate   1.9 ±0.0ms               
+  ├─ yazi           2.0 ±0.0ms               
+  ╰─ libflate       3.9 ±0.0ms               
+
+  libdeflate    ████████████████████ 1.38ms
+  zenflate      █████████████████████ 1.42ms
+  flate2        ███████████████████████ 1.55ms
+  zlib-rs       ███████████████████████ 1.58ms
+  fdeflate      ████████████████████████ 1.61ms
+  miniz_oxide   █████████████████████████ 1.71ms
+  zune-inflate  ███████████████████████████ 1.87ms
+  yazi          █████████████████████████████ 1.99ms
+  libflate      █████████████████████████████████████████████████████████ 3.90ms
+
+  decompress/photo  0 rounds ⚠ only 0 rounds
+                   mean ±mad ms  95% CI vs base
+  ├─ zenflate       1.6 ±0.0ms  [1.6–1.6]ms  
+  ├─ libdeflate     1.5 ±0.0ms               
+  ├─ fdeflate       1.7 ±0.0ms               
+  ├─ zlib-rs        2.2 ±0.0ms               
+  ├─ flate2         2.2 ±0.0ms               
+  ├─ miniz_oxide    2.0 ±0.0ms               
+  ├─ zune-inflate   2.1 ±0.0ms               
+  ├─ yazi           2.3 ±0.0ms               
+  ╰─ libflate       5.0 ±0.1ms               
+
+  libdeflate    █████████████████ 1.53ms
+  zenflate      ██████████████████ 1.56ms
+  fdeflate      ███████████████████ 1.70ms
+  miniz_oxide   ███████████████████████ 2.00ms
+  zune-inflate  ███████████████████████ 2.08ms
+  flate2        ████████████████████████ 2.16ms
+  zlib-rs       █████████████████████████ 2.21ms
+  yazi          ██████████████████████████ 2.32ms
+  libflate      █████████████████████████████████████████████████████████ 5.05ms
+
+  stream_decompress/sequential  0 rounds ⚠ only 0 rounds
+                           mean ±mad µs  95% CI vs base  
+  ├─ zenflate_whole        42.7 ±0.2µs  [42.5–42.8]µs   
+  ├─ zenflate_stream       50.6 ±0.2µs                  
+  ├─ zenflate_stream_4k   119.0 ±1.0µs                  
+  ╰─ fdeflate             112.0 ±0.7µs                  
+
+  zenflate_whole      █████████████████ 42.66µs
+  zenflate_stream     ████████████████████ 50.56µs
+  fdeflate            █████████████████████████████████████████████ 112.05µs
+  zenflate_stream_4k  ████████████████████████████████████████████████ 119.00µs
+
+  stream_decompress/zeros  0 rounds ⚠ only 0 rounds
+                           mean ±mad µs  95% CI vs base  
+  ├─ zenflate_whole        40.0 ±1.0µs  [38.8–41.3]µs   
+  ├─ zenflate_stream       58.4 ±1.3µs                  
+  ├─ zenflate_stream_4k   114.4 ±0.9µs                  
+  ╰─ fdeflate              74.6 ±0.9µs                  
+
+  zenflate_whole      █████████████████ 40.03µs
+  zenflate_stream     ████████████████████████ 58.36µs
+  fdeflate            ███████████████████████████████ 74.56µs
+  zenflate_stream_4k  ████████████████████████████████████████████████ 114.41µs
+
+  stream_decompress/mixed  0 rounds ⚠ only 0 rounds
+                         mean ±mad ms  95% CI vs base
+  ├─ zenflate_whole       1.4 ±0.0ms  [1.4–1.4]ms  
+  ├─ zenflate_stream      1.5 ±0.0ms               
+  ├─ zenflate_stream_4k   1.6 ±0.0ms               
+  ╰─ fdeflate             1.6 ±0.0ms               
+
+  zenflate_whole      █████████████████████████████████████████████ 1.42ms
+  zenflate_stream     ████████████████████████████████████████████████ 1.52ms
+  fdeflate            ██████████████████████████████████████████████████ 1.61ms
+  zenflate_stream_4k  ███████████████████████████████████████████████████ 1.62ms
+
+  stream_decompress/photo  0 rounds ⚠ only 0 rounds
+                         mean ±mad ms  95% CI vs base
+  ├─ zenflate_whole       1.6 ±0.0ms  [1.5–1.6]ms  
+  ├─ zenflate_stream      1.7 ±0.0ms               
+  ├─ zenflate_stream_4k   1.8 ±0.0ms               
+  ╰─ fdeflate             1.7 ±0.0ms               
+
+  zenflate_whole      ████████████████████████████████████████████ 1.55ms
+  zenflate_stream     ████████████████████████████████████████████████ 1.68ms
+  fdeflate            █████████████████████████████████████████████████ 1.70ms
+  zenflate_stream_4k  ███████████████████████████████████████████████████ 1.78ms
+
+  checksum/adler32  0 rounds ⚠ only 0 rounds
+                    mean ±mad µs  95% CI vs base  
+  ├─ zenflate       15.7 ±0.1µs  [15.7–15.7]µs   
+  ├─ libdeflate     14.1 ±0.1µs                  
+  ╰─ simd-adler32   21.7 ±0.1µs                  
+
+  libdeflate    ████████████████████████████████████ 14.11µs
+  zenflate      ████████████████████████████████████████ 15.72µs
+  simd-adler32  ███████████████████████████████████████████████████████ 21.69µs
+
+  checksum/crc32  0 rounds ⚠ only 0 rounds
+                  mean ±mad µs  95% CI vs base  
+  ├─ zenflate     19.5 ±0.1µs  [19.4–19.5]µs   
+  ├─ libdeflate   11.9 ±0.2µs                  
+  ╰─ crc32fast    84.0 ±0.2µs                  
+
+  libdeflate  ████████ 11.86µs
+  zenflate    █████████████ 19.48µs
+  crc32fast   █████████████████████████████████████████████████████████ 83.96µs
+
+  parallel/L1  0 rounds ⚠ only 0 rounds
+                    mean ±mad ms  95% CI vs base 
+  ├─ 1T (baseline)   17.0 ±0.0ms  [16.9–17.0]ms  
+  ├─ 2T               8.8 ±0.0ms                 
+  ╰─ 4T               4.6 ±0.0ms                 
+
+  4T             ███████████████ 4.57ms
+  2T             ████████████████████████████ 8.76ms
+  1T (baseline)  ███████████████████████████████████████████████████████ 16.95ms
+
+  parallel/L6  0 rounds ⚠ only 0 rounds
+                    mean ±mad ms  95% CI vs base 
+  ├─ 1T (baseline)   19.5 ±0.0ms  [19.5–19.6]ms  
+  ├─ 2T              10.1 ±0.1ms                 
+  ╰─ 4T               5.2 ±0.0ms                 
+
+  4T             ███████████████ 5.25ms
+  2T             █████████████████████████████ 10.13ms
+  1T (baseline)  ███████████████████████████████████████████████████████ 19.54ms
+
+  parallel/L12  0 rounds ⚠ only 0 rounds
+                    mean ±mad ms  95% CI vs base 
+  ├─ 1T (baseline)   35.6 ±0.2ms  [35.6–35.6]ms  
+  ├─ 2T              18.2 ±0.1ms                 
+  ╰─ 4T               9.4 ±0.0ms                 
+
+  4T             ███████████████ 9.43ms
+  2T             ████████████████████████████ 18.25ms
+  1T (baseline)  ███████████████████████████████████████████████████████ 35.60ms
+[zenbench] calibration: int=0.30ns/iter mem_bw=105.6GiB/s mem_lat=7.5ns
+[zenbench] timer resolution: 41ns, loop overhead: 0.24ns/iter, TSC: 1.000 ticks/ns (invariant)
+[zenbench] results → /var/folders/sc/m9jbk0qj0jz4w09h7gg8v3p80000gn/T/zenbench/zenbench-1785245262-54b8.txt
+
+═══════════════════════════════════════════════════════════════
+  zenbench  1785245262-54b8
+  git: 1fc186474a4a5c5ba0be4b57a723a2035da58658
+═══════════════════════════════════════════════════════════════
+
+  total: 0.0s
+═══════════════════════════════════════════════════════════════
+  filter: cargo bench -- --group=NAME  format: --format=llm|csv|md|json

@@ -1,0 +1,37 @@
+# zenflate checksum SIMD vs scalar on aarch64 (NEON) — first ARM measurement
+date:    2026-07-28
+host:    Apple M4 Pro (12 core), macOS, aarch64
+build:   release, NO -C target-cpu=native
+method:  compile-time A/B on the `simd` cargo feature (this crate gates its SIMD
+         behind a feature rather than a runtime token, so the honest comparison
+         is two builds, not a token toggle):
+           on : cargo bench --bench throughput -- checksum
+           off: cargo bench --bench throughput --no-default-features \
+                  --features std,alloc,compress,threads -- checksum
+
+## Result
+
+| checksum | SIMD (NEON) | scalar    | speedup |
+|----------|-------------|-----------|---------|
+| crc32    |   19.48us   | 405.5us   | 20.8x   |
+| adler32  |   15.72us   | 190.4us   | 12.1x   |
+
+The largest SIMD payoff measured across the zen crates on this host by a wide
+margin (next highest: zenpng 3.6-7.7x, linear-srgb 3.3-6.6x). Expected for
+checksums: CRC32 uses carry-less multiply (PMULL, via the `neon_aes` tier) and
+Adler32 vectorises cleanly, so the scalar path is genuinely bit-at-a-time work.
+
+Harness sanity check: the libdeflate reference row is unchanged across the two
+builds (14.11 -> 14.08us adler32, 11.86 -> 11.80us crc32), so the swing is
+zenflate's own code, not drift between runs.
+
+## Open lead — crc32 is still 1.64x behind libdeflate on ARM
+
+Even with NEON on, zenflate crc32 is 19.48us vs libdeflate's 11.86us on the
+same input. adler32 is much closer (15.72 vs 14.11us, 1.11x). libdeflate's ARM
+CRC32 uses a multi-stream PMULL folding schedule; if CRC throughput matters
+here, that gap is the thing to chase. NOT investigated on this pass — recorded
+so it is not mistaken for parity.
+
+(crc32fast, the pure-Rust reference, is 84.0us — zenflate's NEON path is 4.3x
+faster than it.)
