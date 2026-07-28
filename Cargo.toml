@@ -69,6 +69,11 @@ simd-adler32 = "0.3"
 # libdeflate-sys requires C compilation (needs WASI SDK for wasm32).
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 zenbench = { version = "0.1.2", features = ["criterion-compat"] }
+# DEV-only: lets benches/checksum_tiers.rs disable the baseline SIMD token
+# (NEON on aarch64) so the "scalar" arm is real rather than a second
+# measurement of the SIMD path. Feature unification keeps this to test/bench
+# builds, so consumers are unaffected.
+archmage = { version = "0.9.28", features = ["testable_dispatch"] }
 libdeflater = "1.25.2"
 flate2 = { version = "1.1.9", default-features = false, features = ["zlib-rs"] }
 zlib-rs = "0.6.6"
@@ -134,3 +139,7 @@ required-features = ["compress"]
 [[example]]
 name = "zlib_rs_ratio"
 required-features = ["compress"]
+
+[[bench]]
+name = "checksum_tiers"
+harness = false
