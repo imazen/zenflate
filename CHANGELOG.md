@@ -4,6 +4,23 @@
 
 ### Fixed
 
+- **The `Fuzz regression` CI job could not fail, and replayed nothing.** It ran
+  `cargo test --test fuzz_regression 2>/dev/null || echo "No regression test
+  found…"` inside an `if [ -d fuzz/regression ]` guard. Three separate defects
+  stacked: `|| echo` swallowed the exit status of a genuinely failing suite,
+  `2>/dev/null` hid the reason, and the `ls | wc -l` count matched on
+  `README.md` alone, so the branch was entered and the suite ran over zero
+  seeds. `tests/fuzz_regression.rs` has existed the whole time, so the "no test
+  harness" fallback was masking real failures rather than covering a missing
+  target. The step is now a bare `cargo test --test fuzz_regression`. The
+  harness asserts the corpus directory exists and pins `MIN_SEEDS`, which is
+  **deliberately 0 here** and documented in place: #7 needs a ~19 MB input and
+  is gated by the unit test in `src/compress/full_optimal.rs` instead of a
+  committed seed, so zenflate's empty corpus is now a visible decision rather
+  than an accident. Mutation-verified: renaming `fuzz/regression/` away fails
+  the directory assertion, and a temporary seed plus a panic injected into the
+  `decompress` target fails the replay — both exit 101.
+
 - **FullOptimal (Zopfli) could silently emit a corrupt DEFLATE stream when a
   single block contained a literal run of 2^23+ items** (issue #7, found by
   the 2026-08-26 cross-codec ultracode sweep, adversarially verified). The
