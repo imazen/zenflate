@@ -1703,7 +1703,43 @@ fn calculate_split_cost(
 }
 
 /// Convert an Lz77Store to zenflate's Sequence format and flush through the block encoder.
+///
+/// GUARD (issue #7): a single DEFLATE block here must keep every literal run
+/// strictly below `SEQ_LITRUNLEN_MASK` (2^23 - 1). The run count is packed
+/// into the low 23 bits of `Sequence::litrunlen_and_length`; an overflowing
+/// run bleeds into the 9-bit length field, and the garbage length indexes
+/// codeword slots the Huffman tables never filled — emitted as ZERO bits,
+/// silently corrupting the stream. Matchless data (unique trigrams) parses
+/// as one giant literal run, so any store above the cap is subdivided into
+/// multiple blocks here, at the leaf, where every caller is protected.
+/// DEFLATE permits any block count; the cost is one block header per 2^22
+/// items.
 fn flush_lz77_block(
+    os: &mut OutputBitstream<'_>,
+    input: &[u8],
+    block_start: usize,
+    store: &Lz77Store,
+    is_final_block: bool,
+) {
+    const MAX_ITEMS_PER_BLOCK: usize = 1 << 22;
+    if store.size() > MAX_ITEMS_PER_BLOCK {
+        let mut item_start = 0usize;
+        let mut byte_offset = block_start;
+        while item_start < store.size() {
+            let item_end = (item_start + MAX_ITEMS_PER_BLOCK).min(store.size());
+            let sub = store.sub_store(item_start, item_end);
+            let last = item_end == store.size();
+            flush_lz77_block_one(os, input, byte_offset, &sub, is_final_block && last);
+            byte_offset += sub.litlens.iter().map(|ll| ll.size()).sum::<usize>();
+            item_start = item_end;
+        }
+        return;
+    }
+    flush_lz77_block_one(os, input, block_start, store, is_final_block);
+}
+
+/// Flush exactly one DEFLATE block (store size pre-capped by the wrapper).
+fn flush_lz77_block_one(
     os: &mut OutputBitstream<'_>,
     input: &[u8],
     block_start: usize,
@@ -1782,6 +1818,79 @@ fn flush_lz77_block(
 
 #[cfg(all(test, feature = "std"))]
 mod tests {
+    /// Regression for issue #7: a literal run >= 2^23 items overflowed the
+    /// 23-bit litrunlen field in `Sequence::litrunlen_and_length`, bleeding
+    /// into the 9-bit length field; the garbage length indexed codeword
+    /// slots the Huffman tables never filled and was emitted as ZERO bits —
+    /// a silently corrupt DEFLATE stream returned as success.
+    ///
+    /// Reaching the Sequences emit arm needs the dynamic-Huffman cost to
+    /// beat the uncompressed block (pure incompressible literals pick the
+    /// uncompressed arm and dodge the bug), so the store carries a large
+    /// match-compressible prefix followed by a >2^23-item literal run — the
+    /// shape a real optimal parse produces for repetitive data followed by
+    /// unique-trigram data. The leaf guard in `flush_lz77_block` now
+    /// subdivides oversized stores into multiple blocks.
+    #[test]
+    fn flush_survives_literal_run_over_23_bits() {
+        use super::super::bitstream::OutputBitstream;
+        use super::{Lz77Store, flush_lz77_block};
+
+        const LITS: usize = (1 << 23) + 4096;
+        const MATCHES: usize = 40_000; // x258 bytes of 'A'
+        let match_bytes = 1 + MATCHES * 258;
+
+        let mut input = Vec::with_capacity(match_bytes + LITS);
+        input.resize(match_bytes, b'A');
+        let mut state = 0x2468_ACE1u32;
+        for _ in 0..LITS {
+            state = state.wrapping_mul(1664525).wrapping_add(1013904223);
+            input.push((state >> 24) as u8);
+        }
+
+        let mut store = Lz77Store::with_capacity(MATCHES + LITS + 1);
+        store.litlens.push(super::LitLen::Literal(u16::from(b'A')));
+        for _ in 0..MATCHES {
+            store.litlens.push(super::LitLen::LengthDist(258, 1));
+        }
+        for &b in &input[match_bytes..] {
+            store.litlens.push(super::LitLen::Literal(u16::from(b)));
+        }
+
+        // Matches compress ~10.3 MB to almost nothing; literals stay ~1:1.
+        let mut out = vec![0u8; input.len()];
+        let written = {
+            let mut os = OutputBitstream::new(&mut out);
+            flush_lz77_block(&mut os, &input, 0, &store, true);
+            assert!(!os.overflow, "bitstream overflow");
+            if os.bitcount > 0 {
+                os.buf[os.pos] = os.bitbuf as u8;
+                os.pos += 1;
+            }
+            os.pos
+        };
+        // The ~10.3 MB match prefix must have compressed to almost nothing
+        // (its sub-block takes the dynamic/Sequences arm), leaving roughly
+        // the literal payload. Pre-fix, the whole store went through ONE
+        // Sequences block whose overflowed final sequence corrupted the
+        // stream; post-fix the capped sub-blocks may individually pick the
+        // uncompressed arm for the incompressible literal tail — both are
+        // valid, the roundtrip below is the real oracle.
+        assert!(
+            written < LITS + LITS / 8,
+            "match prefix did not compress (written {written}) — the \
+             Sequences path was not exercised"
+        );
+
+        let mut d = crate::Decompressor::new();
+        let mut round = vec![0u8; input.len()];
+        let res = d
+            .deflate_decompress(&out[..written], &mut round, enough::Unstoppable)
+            .expect("issue #7 stream must decompress");
+        assert_eq!(res.output_written, input.len());
+        assert_eq!(round, input, "roundtrip bytes differ");
+    }
+
     /// The no_std series impl must agree with std's f64::log2 to well below
     /// the precision that could flip a cost-model comparison.
     #[test]

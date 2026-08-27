@@ -25,14 +25,20 @@ type TierToken = archmage::NeonToken;
 type TierToken = archmage::X64V3Token;
 
 #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
-const TIER_NAME: &str = if cfg!(target_arch = "aarch64") { "neon" } else { "v3(avx2)" };
+const TIER_NAME: &str = if cfg!(target_arch = "aarch64") {
+    "neon"
+} else {
+    "v3(avx2)"
+};
 
 #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
 fn set_simd(enabled: bool) -> bool {
     TierToken::dangerously_disable_token_process_wide(!enabled).is_ok()
 }
 #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
-fn set_simd(_e: bool) -> bool { false }
+fn set_simd(_e: bool) -> bool {
+    false
+}
 
 fn data(n: usize) -> Vec<u8> {
     let mut s = 0x9e37_79b9u32;
@@ -63,7 +69,11 @@ fn bench_checksums(suite: &mut Suite) {
                     g.bench(arm, move |b| {
                         b.iter(move || {
                             set_simd(simd);
-                            if is_crc { crc32(0, buf) } else { adler32(1, buf) }
+                            if is_crc {
+                                crc32(0, buf)
+                            } else {
+                                adler32(1, buf)
+                            }
                         })
                     });
                 }

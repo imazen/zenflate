@@ -1137,6 +1137,18 @@ fn flush_block_inner(
 
                 // Output match — single flush for all bits
                 let offset_slot = seq.offset_slot as usize;
+                // A length outside MIN..=MAX indexes codeword slots the
+                // tables never filled; emitting their zero-length codes
+                // writes NOTHING and silently corrupts the stream (the
+                // issue #7 litrunlen-overflow signature).
+                debug_assert!(
+                    (DEFLATE_MIN_MATCH_LEN..=DEFLATE_MAX_MATCH_LEN).contains(&length),
+                    "match length {length} outside DEFLATE range"
+                );
+                debug_assert!(
+                    full_len_lens[length as usize] != 0,
+                    "match length {length} has no codeword"
+                );
                 add_bits!(
                     full_len_codewords[length as usize],
                     full_len_lens[length as usize] as u32

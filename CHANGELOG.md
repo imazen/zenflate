@@ -2,6 +2,23 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **FullOptimal (Zopfli) could silently emit a corrupt DEFLATE stream when a
+  single block contained a literal run of 2^23+ items** (issue #7, found by
+  the 2026-08-26 cross-codec ultracode sweep, adversarially verified). The
+  run count is packed into the low 23 bits of
+  `Sequence::litrunlen_and_length`; an overflowing run (matchless data — e.g.
+  unique-trigram content — after a compressible prefix keeps the dynamic
+  arm selected) bled into the 9-bit length field, and the garbage length hit
+  codeword slots the Huffman tables never filled, emitted as ZERO bits.
+  `flush_lz77_block` now subdivides oversized stores into multiple DEFLATE
+  blocks at the leaf (2^22-item cap; one extra block header per 4M items),
+  and the Sequences emit arm `debug_assert`s every match length is in the
+  DEFLATE range with a nonzero codeword. Regression test drives the flush
+  directly with a 10.3 MB match prefix + 8.4M-literal run and roundtrips;
+  mutation-verified (fails with `BadData` when the cap is disabled).
+
 ## [0.4.0] - 2026-07-14
 
 ### Changed

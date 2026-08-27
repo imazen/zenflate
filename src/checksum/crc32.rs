@@ -707,8 +707,8 @@ fn crc32_slice8(mut crc: u32, data: &[u8]) -> u32 {
         crc = (crc >> 8) ^ table[((crc as u8) ^ b) as usize];
     }
 
-    // Main loop: 8 bytes at a time via chunks_exact
-    for chunk in data[lead..].chunks_exact(8) {
+    // Main loop: 8 bytes at a time via as_chunks
+    for chunk in data[lead..].as_chunks::<8>().0 {
         let v1 = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
         let v2 = u32::from_le_bytes([chunk[4], chunk[5], chunk[6], chunk[7]]);
 
