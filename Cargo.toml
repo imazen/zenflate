@@ -58,12 +58,12 @@ enough = { version = "0.4.3", default-features = false }
 
 [dev-dependencies]
 codec-corpus = "1"
-crc32fast = "1"
+crc32fast = "1.5.1"
 zenutils-fuzz = "0.1.0"
 fdeflate = "0.3.7"
 miniz_oxide = "0.9.1"
-png = "0.18"
-simd-adler32 = "0.3"
+png = "0.18.1"
+simd-adler32 = "0.3.10"
 
 # Comparison benchmarks and bench harness — native only.
 # libdeflate-sys requires C compilation (needs WASI SDK for wasm32).
