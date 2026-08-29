@@ -5,7 +5,7 @@ use std::path::Path;
 use zenflate::{Decompressor, Unstoppable};
 use zenutils_fuzz::RegressionSuite;
 
-/// Lower bound on the replayable seed corpus committed under `fuzz/regression/`.
+/// Exact number of replayable seeds committed under `fuzz/regression/`.
 ///
 /// **This is deliberately zero, and zenflate is the only zen codec where it is.**
 /// The corpus holds no minimized crash inputs yet: #7 (a 2^23+ literal run
@@ -18,8 +18,16 @@ use zenutils_fuzz::RegressionSuite;
 /// `RegressionSuite` silently no-ops on an empty directory, so nothing else in
 /// the chain would tell you the suite replayed nothing.
 ///
+/// Checked with `assert_eq!`, **not** a `>=` floor. A floor of zero is satisfied
+/// by every `usize` that can exist, so it gates nothing — the first version of
+/// this harness shipped exactly that, and clippy's `absurd_extreme_comparisons`
+/// rejected it: an always-true assertion inside the guard written to stop gates
+/// that cannot fail. Equality gates in both directions instead — a deleted seed
+/// fails, and a seed that lands without this constant being raised fails too,
+/// which is what forces the corpus to stay a reviewed decision.
+///
 /// Raise this to the new count the moment a seed lands.
-const MIN_SEEDS: usize = 0;
+const EXPECTED_SEEDS: usize = 0;
 
 /// Count the files `RegressionSuite::run` will actually replay, using its own
 /// filters: recurse into subdirectories, skip dotfiles, `*.md` and `*.txt`.
@@ -50,9 +58,9 @@ fn replayable_seeds(dir: &Path) -> usize {
 
 /// Fail loudly when the corpus this suite exists to replay is not there.
 ///
-/// With `MIN_SEEDS == 0` the count assertion is currently slack, so the
-/// directory check is what carries the weight: a renamed or unchecked-out
-/// `fuzz/regression/` fails here instead of passing silently.
+/// Three distinct ways the replay can silently become a no-op, each checked:
+/// the directory is gone, the directory is there but empty, or the seed count
+/// has drifted from what the repo committed.
 fn assert_corpus_present() {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("fuzz/regression");
     assert!(
@@ -62,11 +70,32 @@ fn assert_corpus_present() {
          suite would replay nothing and still report success",
         dir.display()
     );
-    let found = replayable_seeds(&dir);
+
+    // README.md is the only tracked file in the corpus directory, and therefore
+    // the only reason git materialises the directory at all — git does not track
+    // empty directories. Check it explicitly: with the corpus legitimately empty,
+    // deleting the README is the one mutation that empties `fuzz/regression/`
+    // without tripping either the `is_dir` check above (the directory survives in
+    // a dirty worktree) or the count check below (0 == 0 still holds).
+    let readme = dir.join("README.md");
     assert!(
-        found >= MIN_SEEDS,
-        "{} holds {found} replayable seeds, expected at least {MIN_SEEDS} — \
-         seeds were deleted without lowering MIN_SEEDS",
+        readme.is_file(),
+        "{} is missing — it is the only tracked file in the regression corpus, \
+         so without it git stops materialising {} entirely and every seed added \
+         beside it goes with the directory",
+        readme.display(),
+        dir.display()
+    );
+
+    let found = replayable_seeds(&dir);
+    assert_eq!(
+        found,
+        EXPECTED_SEEDS,
+        "{} holds {found} replayable seeds, but this harness is pinned to \
+         {EXPECTED_SEEDS}. If seeds were added, raise EXPECTED_SEEDS to {found} \
+         so the corpus size stays a reviewed decision. If seeds were deleted, \
+         restore them — the suite replays exactly what is in this directory, so \
+         a missing seed is a regression gate that silently stopped running.",
         dir.display()
     );
 }

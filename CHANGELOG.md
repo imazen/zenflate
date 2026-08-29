@@ -13,13 +13,27 @@
   seeds. `tests/fuzz_regression.rs` has existed the whole time, so the "no test
   harness" fallback was masking real failures rather than covering a missing
   target. The step is now a bare `cargo test --test fuzz_regression`. The
-  harness asserts the corpus directory exists and pins `MIN_SEEDS`, which is
-  **deliberately 0 here** and documented in place: #7 needs a ~19 MB input and
-  is gated by the unit test in `src/compress/full_optimal.rs` instead of a
-  committed seed, so zenflate's empty corpus is now a visible decision rather
-  than an accident. Mutation-verified: renaming `fuzz/regression/` away fails
-  the directory assertion, and a temporary seed plus a panic injected into the
-  `decompress` target fails the replay — both exit 101.
+  harness pins the corpus size at `EXPECTED_SEEDS`, which is **deliberately 0
+  here** and documented in place: #7 needs a ~19 MB input and is gated by the
+  unit test in `src/compress/full_optimal.rs` instead of a committed seed, so
+  zenflate's empty corpus is now a visible decision rather than an accident.
+
+- **The first version of that corpus guard (`c0211d6d`) shipped an assertion
+  that could not fail**, which is the same defect it was written to remove. It
+  read `assert!(found >= MIN_SEEDS)` with `MIN_SEEDS = 0` — true for every
+  `usize` that can exist. Stable clippy rejected it
+  (`absurd_extreme_comparisons`, "because `MIN_SEEDS` is the minimum value for
+  this type, this comparison is always true"), which broke the `Clippy` job and
+  is how it was caught. The vacuity was not only theoretical: with the guard as
+  written, **emptying `fuzz/regression/` left the suite green** — the directory
+  check still saw a directory and `0 >= 0` still held. The bound is now an
+  equality against the committed count, plus an explicit check for the corpus
+  `README.md` (the only tracked file in that directory, and so the only reason
+  git materialises it at all). Mutation-verified, each run to completion:
+  renaming the directory away, emptying it, and adding one unaccounted-for seed
+  each fail with a distinct message (exit 101); restoring passes. The pre-fix
+  harness was re-run against the emptied-directory mutation to confirm it
+  passed — the hole was real, not hypothetical.
 
 - **FullOptimal (Zopfli) could silently emit a corrupt DEFLATE stream when a
   single block contained a literal run of 2^23+ items** (issue #7, found by
