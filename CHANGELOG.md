@@ -4,6 +4,22 @@
 
 ### Fixed
 
+- **The Miri soundness gate was both dead and red; it now guards `main` and
+  passes.** `miri.yml` triggered only on `push: tags: ["v*"]`, so it ran *after*
+  the decision it exists to inform — a soundness regression on `main` could not
+  surface until a release tag had already been cut. It also failed on its last
+  run (2026-07-14, `v0.4.0`, run 29316276934), and stayed failed. That failure
+  was **not** unsoundness: all 84 lib tests passed under Miri, then the run
+  aborted in `tests/fuzz_regression.rs` with `unsupported operation: statx not
+  available when isolation is enabled` — the suite enumerates
+  `fuzz/regression/` from disk, and `zenutils_fuzz::collect_seeds` reaches
+  `Path::exists()`. Filesystem enumeration is outside what Miri models, and the
+  workflow's `--skip` list did not name that test. Added `push: branches:
+  [main]` (tags kept, so a release still re-verifies at the published commit)
+  and `--skip fuzz_regression`, documented in place. No coverage is lost: that
+  test runs on all six platforms in `ci.yml`, twice, and replays zero seeds
+  today.
+
 - **Pushes to `main` now cancel their superseded CI runs.** `ci.yml` and
   `miri.yml` keyed their concurrency group on
   `${{ github.head_ref || github.run_id }}`. `github.head_ref` is populated only
