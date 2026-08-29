@@ -36,6 +36,12 @@ jobs:
   miri:
     name: Miri (unsafe soundness)
     runs-on: ubuntu-latest
+    # A Miri hang used to burn runner time until GitHub killed the machine
+    # ("The runner has received a shutdown signal" at 2h29m on 2026-08-29,
+    # having reached test 27 of 92). Bound it: a full pass was ~51 minutes of
+    # interpretation in July, so 180 minutes is generous headroom, and a job
+    # that exceeds it has a new pathological test rather than a slow day.
+    timeout-minutes: 180
     steps:
       - uses: actions/checkout@v6
 
@@ -60,6 +66,18 @@ jobs:
         # This is what turned the gate red on 2026-07-14 (run 29316276934):
         # all 84 lib tests passed, then the harness aborted here.
         #
+        # `flush_survives_literal_run_over_23_bits` is skipped for the same
+        # reason as the slow ones, but at a different order of magnitude, so it
+        # is called out: it builds a ~19 MB input -- 10.3 MB of 'A' match bytes
+        # plus (1 << 23) + 4096 PRNG literals -- to gate issue #7 (a 2^23+
+        # literal run overflowing litrunlen). That is 8.4 million interpreted
+        # loop iterations before the flush even starts. It landed 2026-08-26 in
+        # 486e04c, AFTER the last Miri run, and on 2026-08-29 it hung this job
+        # for 2h28m (reaching test 27 of 92) until the runner was shut down.
+        # Miri cannot finish it, so including it gates nothing -- it only
+        # prevents the whole soundness run from ever reporting. It still runs
+        # at full strength under plain `cargo test` in ci.yml.
+        #
         # No coverage is lost. `cargo test` and `cargo test --features
         # unchecked` both run this test on all six platforms in ci.yml, and
         # the suite replays zero seeds today (`EXPECTED_SEEDS = 0` in
@@ -75,4 +93,5 @@ jobs:
             --skip parallel --skip compression_improves \
             --skip short_inputs --skip repetitive \
             --skip actually_compresses \
-            --skip fuzz_regression
+            --skip fuzz_regression \
+            --skip flush_survives_literal_run_over_23_bits

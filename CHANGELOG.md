@@ -4,6 +4,20 @@
 
 ### Fixed
 
+- **A second, newer Miri blocker: the gate could not finish at all.** With
+  `fuzz_regression` skipped, the 2026-08-29 run (33259166054) got to test 27 of 92 and
+  then hung **2 hours 28 minutes** on `compress::full_optimal::tests::flush_survives_literal_run_over_23_bits`
+  until GitHub shut the runner down (`The runner has received a shutdown signal`).
+  **No undefined behaviour was reported** — this is a throughput wall, not a soundness
+  finding. That test builds a ~19 MB input (10.3 MB of `'A'` match bytes plus
+  `(1 << 23) + 4096` PRNG literals) to gate issue #7, i.e. 8.4 million interpreted loop
+  iterations before the flush even begins. It landed 2026-08-26 in `486e04c`, *after* the
+  last Miri run, which is why July's run reached the end of the lib tests in 51 minutes
+  and this one could not. Skipped under Miri only — it still runs at full strength under
+  plain `cargo test` on all six platforms in `ci.yml`; including it gated nothing, it only
+  stopped the soundness run from ever reporting. Also added `timeout-minutes: 180` so a
+  future hang fails in bounded time instead of consuming a runner until it is killed.
+
 - **The Miri soundness gate was both dead and red; it now guards `main` and
   passes.** `miri.yml` triggered only on `push: tags: ["v*"]`, so it ran *after*
   the decision it exists to inform — a soundness regression on `main` could not
