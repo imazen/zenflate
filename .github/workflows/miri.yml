@@ -6,7 +6,14 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  # `github.head_ref` is set ONLY on pull_request events, and this workflow
+  # has no pull_request trigger at all — so the group always fell through to
+  # `github.run_id` and `cancel-in-progress` was pure dead configuration.
+  # `github.ref` is populated for both triggers here: `refs/tags/vN` on a tag
+  # push (unique per tag, so release runs never cancel one another) and the
+  # dispatched branch ref on workflow_dispatch (so a re-dispatch supersedes
+  # the run it replaces, which is the point of re-dispatching).
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 env:

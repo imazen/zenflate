@@ -4,6 +4,17 @@
 
 ### Fixed
 
+- **Pushes to `main` now cancel their superseded CI runs.** `ci.yml` and
+  `miri.yml` keyed their concurrency group on
+  `${{ github.head_ref || github.run_id }}`. `github.head_ref` is populated only
+  for `pull_request` events, so on a push it was empty and the group fell through
+  to `github.run_id` — unique per run, so no two runs ever shared a group and
+  `cancel-in-progress` could never fire. Now keyed on `${{ github.ref }}`, which
+  is set for every trigger these workflows use. PR cancellation is unchanged;
+  consecutive pushes to a branch now supersede each other. `miri.yml` runs only
+  on `v*` tags and `workflow_dispatch`, where `github.ref` is the tag ref (unique
+  per tag, so release runs still never cancel one another) or the dispatched
+  branch ref (so a re-dispatch supersedes the run it replaces).
 - **The `Fuzz regression` CI job could not fail, and replayed nothing.** It ran
   `cargo test --test fuzz_regression 2>/dev/null || echo "No regression test
   found…"` inside an `if [ -d fuzz/regression ]` guard. Three separate defects
