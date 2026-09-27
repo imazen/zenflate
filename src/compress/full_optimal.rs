@@ -563,9 +563,19 @@ impl Lz77Store {
         self.pos.push(pos as u32);
     }
 
-    fn greedy(&mut self, in_data: &[u8], instart: usize, inend: usize) {
+    /// Greedy seed parse. `stop` is polled every `STOP_CHECK_INTERVAL` input
+    /// positions. `Cancelled` aborts immediately; `TimedOut` finishes the
+    /// remaining range as literals (the fastest valid store completion) so
+    /// the caller can still return a coherent result.
+    fn greedy(
+        &mut self,
+        in_data: &[u8],
+        instart: usize,
+        inend: usize,
+        stop: &impl enough::Stop,
+    ) -> Result<(), enough::StopReason> {
         if instart == inend {
-            return;
+            return Ok(());
         }
         let windowstart = instart.saturating_sub(WINDOW_SIZE);
         let mut h = ZopfliHash::new();
@@ -580,8 +590,21 @@ impl Lz77Store {
         let mut prev_length: u32 = 0;
         let mut prev_match: u32 = 0;
         let mut match_available = false;
+        let mut next_stop_check = i + super::STOP_CHECK_INTERVAL;
+        let mut literal_tail = false;
 
         while i < inend {
+            if i >= next_stop_check {
+                match stop.check() {
+                    Ok(()) => {}
+                    Err(r) if r.is_cancelled() => return Err(r),
+                    Err(_) => {
+                        literal_tail = true;
+                        break;
+                    }
+                }
+                next_stop_check = i + super::STOP_CHECK_INTERVAL;
+            }
             h.update(arr, i);
             let (leng, dist) = find_longest_match_no_cache(&h, arr, i, inend, MAX_MATCH);
             let lengthscore = get_length_score(i32::from(leng), i32::from(dist));
@@ -633,6 +656,19 @@ impl Lz77Store {
             }
             i += 1;
         }
+
+        if literal_tail {
+            // Flush a pending deferred match as a literal, then fill the rest
+            // of the range so the store still covers [instart, inend).
+            if match_available {
+                self.lit_len_dist(u16::from(arr[i - 1]), 0, i - 1);
+            }
+            while i < inend {
+                self.lit_len_dist(u16::from(arr[i]), 0, i);
+                i += 1;
+            }
+        }
+        Ok(())
     }
 
     fn store_from_path(&mut self, in_data: &[u8], instart: usize, path: &[(u16, u16)]) {
@@ -950,6 +986,8 @@ fn get_cost_model_min_cost(cost_model: &CostModel) -> f64 {
 }
 
 #[allow(clippy::too_many_arguments)]
+/// `stop` is polled every `STOP_CHECK_INTERVAL` input positions; on `Err` the
+/// partial DP state is abandoned (the caller keeps the previous best store).
 fn get_best_lengths(
     lmc: &mut MatchCache,
     in_data: &[u8],
@@ -962,14 +1000,15 @@ fn get_best_lengths(
     dist_array: &mut Vec<u16>,
     sublen: &mut Vec<u16>,
     skip_hash: bool,
-) -> f64 {
+    stop: &impl enough::Stop,
+) -> Result<f64, enough::StopReason> {
     let blocksize = inend - instart;
     length_array.clear();
     length_array.resize(blocksize + 1, 0);
     dist_array.clear();
     dist_array.resize(blocksize + 1, 0);
     if instart == inend {
-        return 0.0;
+        return Ok(0.0);
     }
     let windowstart = instart.saturating_sub(WINDOW_SIZE);
 
@@ -994,8 +1033,13 @@ fn get_best_lengths(
     let mut i = instart;
     sublen.resize(MAX_MATCH + 1, 0);
     let mincost = get_cost_model_min_cost(cost_model);
+    let mut next_stop_check = i + super::STOP_CHECK_INTERVAL;
 
     while i < inend {
+        if i >= next_stop_check {
+            stop.check()?;
+            next_stop_check = i + super::STOP_CHECK_INTERVAL;
+        }
         let mut j = i - instart;
         if !skip_hash {
             h.update(arr, i);
@@ -1060,7 +1104,7 @@ fn get_best_lengths(
         i += 1;
     }
 
-    f64::from(costs[blocksize])
+    Ok(f64::from(costs[blocksize]))
 }
 
 fn trace(size: usize, length_array: &[u16], dist_array: &[u16], path: &mut Vec<(u16, u16)>) {
@@ -1353,10 +1397,11 @@ fn blocksplit(
     inend: usize,
     maxblocks: u16,
     splitpoints: &mut Vec<usize>,
-) {
+    stop: &impl enough::Stop,
+) -> Result<(), enough::StopReason> {
     splitpoints.clear();
     let mut store = Lz77Store::with_capacity(inend - instart);
-    store.greedy(in_data, instart, inend);
+    store.greedy(in_data, instart, inend, stop)?;
 
     let mut lz77splitpoints = Vec::with_capacity(maxblocks as usize);
     blocksplit_lz77(&store, maxblocks, &mut lz77splitpoints);
@@ -1375,6 +1420,7 @@ fn blocksplit(
             pos += length;
         }
     }
+    Ok(())
 }
 
 // ---- Squeeze Loop ----
@@ -1393,7 +1439,9 @@ fn lz77_optimal(
     let mut huff_scratch = HuffmanScratch::new();
 
     // Initial greedy seed
-    currentstore.greedy(in_data, instart, inend);
+    currentstore
+        .greedy(in_data, instart, inend, stop)
+        .map_err(CompressionError::Stopped)?;
     let mut stats = SymbolStats::default();
     stats.get_statistics(&currentstore);
     outputstore.clone_from(&currentstore);
@@ -1460,7 +1508,7 @@ fn lz77_optimal(
         let skip_hash = current_iteration > 0 && lmc.is_sublen_complete();
         // Run DP forward pass + trace without building an Lz77Store.
         // Frequencies and block cost are computed directly from the path.
-        get_best_lengths(
+        match get_best_lengths(
             &mut lmc,
             in_data,
             instart,
@@ -1472,7 +1520,14 @@ fn lz77_optimal(
             &mut dist_array,
             &mut sublen,
             skip_hash,
-        );
+            stop,
+        ) {
+            Ok(_) => {}
+            Err(enough::StopReason::Cancelled) => {
+                return Err(CompressionError::Stopped(enough::StopReason::Cancelled));
+            }
+            Err(_) => break, // Timeout mid-iteration: keep best-so-far
+        }
         trace(inend - instart, &length_array, &dist_array, &mut path_buf);
         let freqs = compute_frequencies_from_path(in_data, instart, &path_buf);
         let cost = f64::from(block_cost_best(&freqs, &mut huff_scratch));
@@ -1503,7 +1558,8 @@ fn lz77_optimal(
                 ultra_stats.calculate_huffman_costs(&beststats, &mut huff_scratch);
                 let cost_model = CostModel::from_stats(&ultra_stats);
                 let ultra_skip_hash = lmc.is_sublen_complete();
-                get_best_lengths(
+                // Final pass; a timeout just skips it.
+                match get_best_lengths(
                     &mut lmc,
                     in_data,
                     instart,
@@ -1515,13 +1571,23 @@ fn lz77_optimal(
                     &mut dist_array,
                     &mut sublen,
                     ultra_skip_hash,
-                );
-                trace(inend - instart, &length_array, &dist_array, &mut path_buf);
-                let ultra_freqs = compute_frequencies_from_path(in_data, instart, &path_buf);
-                let ultra_cost = f64::from(block_cost_best(&ultra_freqs, &mut huff_scratch));
-                if ultra_cost < bestcost {
-                    outputstore.reset();
-                    outputstore.store_from_path(in_data, instart, &path_buf);
+                    stop,
+                ) {
+                    Ok(_) => {
+                        trace(inend - instart, &length_array, &dist_array, &mut path_buf);
+                        let ultra_freqs =
+                            compute_frequencies_from_path(in_data, instart, &path_buf);
+                        let ultra_cost =
+                            f64::from(block_cost_best(&ultra_freqs, &mut huff_scratch));
+                        if ultra_cost < bestcost {
+                            outputstore.reset();
+                            outputstore.store_from_path(in_data, instart, &path_buf);
+                        }
+                    }
+                    Err(enough::StopReason::Cancelled) => {
+                        return Err(CompressionError::Stopped(enough::StopReason::Cancelled));
+                    }
+                    Err(_) => {}
                 }
             }
             break;
@@ -1611,7 +1677,15 @@ pub(crate) fn compress_full_optimal(
     // Phase 1: Initial byte-based block splitting
     let maxblocks = 15u16;
     let mut byte_splitpoints = Vec::new();
-    blocksplit(input, 0, input.len(), maxblocks, &mut byte_splitpoints);
+    blocksplit(
+        input,
+        0,
+        input.len(),
+        maxblocks,
+        &mut byte_splitpoints,
+        stop,
+    )
+    .map_err(CompressionError::Stopped)?;
 
     // Build block boundaries from byte split points
     let mut boundaries = Vec::with_capacity(byte_splitpoints.len() + 2);
@@ -1905,5 +1979,106 @@ mod tests {
             }
         }
         assert!(worst < 1e-7, "worst log2_series error {worst:e}");
+    }
+
+    /// Returns `Err(reason)` on the n-th `check()` call — a deterministic
+    /// stand-in for a cancellation source / deadline firing mid-operation.
+    struct FailAfter {
+        n: u32,
+        count: core::sync::atomic::AtomicU32,
+        reason: enough::StopReason,
+    }
+
+    impl FailAfter {
+        fn new(n: u32, reason: enough::StopReason) -> Self {
+            Self {
+                n,
+                count: core::sync::atomic::AtomicU32::new(0),
+                reason,
+            }
+        }
+        fn count(&self) -> u32 {
+            self.count.load(core::sync::atomic::Ordering::Relaxed)
+        }
+    }
+
+    impl enough::Stop for FailAfter {
+        fn check(&self) -> Result<(), enough::StopReason> {
+            let c = self
+                .count
+                .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            if c >= self.n - 1 {
+                Err(self.reason)
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    /// Cancellation must be observable *inside* the greedy seed parse, not
+    /// only after it completes — the cancel-latency harness measured >1 s
+    /// blind spots at large inputs because the seed ran unpollled.
+    #[test]
+    fn greedy_seed_aborts_on_cancel_mid_parse() {
+        let data: Vec<u8> = (0..256 * 1024).map(|i| (i % 251) as u8).collect();
+        let mut store = super::Lz77Store::with_capacity(data.len());
+        let stop = FailAfter::new(5, enough::StopReason::Cancelled);
+        let res = store.greedy(&data, 0, data.len(), &stop);
+        assert_eq!(
+            res,
+            Err(enough::StopReason::Cancelled),
+            "seed must abort mid-parse on cancel"
+        );
+        assert_eq!(stop.count(), 5, "abort did not propagate immediately");
+    }
+
+    /// A `TimedOut` mid-parse cannot abandon the store half-covered (the
+    /// caller returns it as best-so-far), so greedy must finish the range as
+    /// literals and still report `Ok`.
+    #[test]
+    fn greedy_timeout_completes_store_with_literal_tail() {
+        let data: Vec<u8> = (0..256 * 1024).map(|i| (i % 251) as u8).collect();
+        let mut store = super::Lz77Store::with_capacity(data.len());
+        let stop = FailAfter::new(5, enough::StopReason::TimedOut);
+        store
+            .greedy(&data, 0, data.len(), &stop)
+            .expect("timeout must produce a completed store");
+        let covered: usize = store.litlens.iter().map(|ll| ll.size()).sum();
+        assert_eq!(covered, data.len(), "store does not cover the input range");
+    }
+
+    /// The squeeze loop used to poll once per *iteration*, but one DP pass
+    /// over a large block is the expensive part (hundreds of ms). Polls must
+    /// exist inside `get_best_lengths`'s position loop: with a cancel on the
+    /// 60th poll, `lz77_optimal` must abort mid-iteration rather than needing
+    /// 60 completed iterations (which would take seconds at this size and
+    /// previously returned `Ok` because the poll count was never reached).
+    #[test]
+    fn lz77_optimal_polls_inside_dp_pass() {
+        let data: Vec<u8> = (0..256 * 1024).map(|i| (i % 251) as u8).collect();
+        let stop = FailAfter::new(60, enough::StopReason::Cancelled);
+        let res = super::lz77_optimal(&data, 0, data.len(), 8, &stop);
+        assert!(
+            matches!(
+                res,
+                Err(crate::CompressionError::Stopped(
+                    enough::StopReason::Cancelled
+                ))
+            ),
+            "expected Stopped(Cancelled)"
+        );
+        assert!(stop.count() >= 60);
+    }
+
+    /// A timeout mid-squeeze returns the best store found so far — the
+    /// returned store must still cover the whole input range.
+    #[test]
+    fn lz77_optimal_timeout_returns_covering_store() {
+        let data: Vec<u8> = (0..256 * 1024).map(|i| (i % 251) as u8).collect();
+        let stop = FailAfter::new(40, enough::StopReason::TimedOut);
+        let store = super::lz77_optimal(&data, 0, data.len(), 8, &stop)
+            .expect("timeout must return best-so-far");
+        let covered: usize = store.litlens.iter().map(|ll| ll.size()).sum();
+        assert_eq!(covered, data.len(), "best-so-far store has gaps");
     }
 }
