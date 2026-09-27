@@ -9,6 +9,21 @@
 
 ### Fixed
 
+- **FullOptimal (effort 31-200) could go minutes without honouring cancellation.**
+  `compress_full_optimal` polled `Stop` once per squeeze iteration, but each
+  `get_best_lengths` DP pass is O(block) matchfinding and the block-split search
+  between parse phases was unpolled entirely. The cross-codec cancel-latency
+  harness (enough/dev/cancel-latency) measured a 1.30 s worst gap at 16 MiB.
+  `Stop` is now polled inside the greedy seed parse, the DP forward pass, the
+  hash-chain match search (position-stride plus a cumulative chain-work budget,
+  so adversarial deep-chain regions can't hide between position checks),
+  `blocksplit_lz77`'s `find_minimum` cost search, `SplitHistograms::build`, and
+  the per-iteration glue passes (`trace`, `store_from_path`). Cancelled aborts
+  with an error; TimedOut degrades gracefully to the best-so-far store, keeping
+  a coherent parse (literal-fill for partial coverage, fewer splits for a
+  stopped split search). Harness: 16 MiB effort-200 worst gap 1.30 s → 18 ms,
+  byte-identical output; 256 KiB 80 ms → 7 ms.
+
 - **A second, newer Miri blocker: the gate could not finish at all.** With
   `fuzz_regression` skipped, the 2026-08-29 run (33259166054) got to test 27 of 92 and
   then hung **2 hours 28 minutes** on `compress::full_optimal::tests::flush_survives_literal_run_over_23_bits`
