@@ -451,66 +451,69 @@ fn find_longest_match_loop(
     let mut chain_counter = MAX_CHAIN_HITS;
     let arrayend = pos + limit;
 
-    while dist < WINDOW_SIZE && chain_counter > 0 {
-        // One call can burn the whole MAX_CHAIN_HITS budget; poll per stride.
-        // `> 0` keeps the check off the first step so calls that exit
-        // immediately stay free of per-call poll traffic. A non-cancellation
-        // stop degrades gracefully to the best match found so far.
-        let steps = MAX_CHAIN_HITS - chain_counter;
-        if steps > 0 && steps & (CHAIN_STOP_STRIDE - 1) == 0 {
+    // Bound each batch with the existing chain counter, so individual hash
+    // hits do not need separate polling arithmetic. Short searches never poll.
+    'search: while dist < WINDOW_SIZE && chain_counter > 0 {
+        let batch_end = chain_counter.saturating_sub(CHAIN_STOP_STRIDE);
+        while dist < WINDOW_SIZE && chain_counter > batch_end {
+            let mut currentlength = 0;
+            if dist > 0 {
+                let scan_offset = pos;
+                let match_offset = pos - dist;
+                if pos + bestlength >= size
+                    || array[scan_offset + bestlength] == array[match_offset + bestlength]
+                {
+                    let same0 = h.same[pos & WINDOW_MASK];
+                    let mut so = scan_offset;
+                    let mut mo = match_offset;
+                    if same0 > 2 && array[so] == array[mo] {
+                        let same1 = h.same[(pos - dist) & WINDOW_MASK];
+                        let same = cmp::min(cmp::min(same0, same1), limit as u16) as usize;
+                        so += same;
+                        mo += same;
+                    }
+                    let matched = get_match(&array[so..arrayend], &array[mo..arrayend]);
+                    currentlength = matched + so - pos;
+                }
+                if currentlength > bestlength {
+                    if let Some(ref mut subl) = *sublen {
+                        for sublength in
+                            subl.iter_mut().take(currentlength + 1).skip(bestlength + 1)
+                        {
+                            *sublength = dist as u16;
+                        }
+                    }
+                    bestdist = dist;
+                    bestlength = currentlength;
+                    if currentlength >= limit {
+                        break 'search;
+                    }
+                }
+            }
+
+            if which_hash == WhichHash::Hash1
+                && bestlength >= h.same[hpos] as usize
+                && i32::from(h.val(WhichHash::Hash2)) == h.hash_val_at(p, WhichHash::Hash2)
+            {
+                which_hash = WhichHash::Hash2;
+            }
+
+            pp = p;
+            p = h.prev_at(p, which_hash);
+            if p == pp {
+                break 'search;
+            }
+            dist += if p < pp { pp - p } else { WINDOW_SIZE - p + pp };
+            chain_counter -= 1;
+        }
+        if dist < WINDOW_SIZE && chain_counter > 0 {
             match stop.check() {
                 Ok(()) => {}
                 Err(r) if r.is_cancelled() => return Err(r),
+                // Keep the best match found when the time budget expires.
                 Err(_) => break,
             }
         }
-        let mut currentlength = 0;
-        if dist > 0 {
-            let scan_offset = pos;
-            let match_offset = pos - dist;
-            if pos + bestlength >= size
-                || array[scan_offset + bestlength] == array[match_offset + bestlength]
-            {
-                let same0 = h.same[pos & WINDOW_MASK];
-                let mut so = scan_offset;
-                let mut mo = match_offset;
-                if same0 > 2 && array[so] == array[mo] {
-                    let same1 = h.same[(pos - dist) & WINDOW_MASK];
-                    let same = cmp::min(cmp::min(same0, same1), limit as u16) as usize;
-                    so += same;
-                    mo += same;
-                }
-                let matched = get_match(&array[so..arrayend], &array[mo..arrayend]);
-                currentlength = matched + so - pos;
-            }
-            if currentlength > bestlength {
-                if let Some(ref mut subl) = *sublen {
-                    for sublength in subl.iter_mut().take(currentlength + 1).skip(bestlength + 1) {
-                        *sublength = dist as u16;
-                    }
-                }
-                bestdist = dist;
-                bestlength = currentlength;
-                if currentlength >= limit {
-                    break;
-                }
-            }
-        }
-
-        if which_hash == WhichHash::Hash1
-            && bestlength >= h.same[hpos] as usize
-            && i32::from(h.val(WhichHash::Hash2)) == h.hash_val_at(p, WhichHash::Hash2)
-        {
-            which_hash = WhichHash::Hash2;
-        }
-
-        pp = p;
-        p = h.prev_at(p, which_hash);
-        if p == pp {
-            break;
-        }
-        dist += if p < pp { pp - p } else { WINDOW_SIZE - p + pp };
-        chain_counter -= 1;
     }
     debug_assert!(
         bestlength <= limit,
@@ -1238,18 +1241,18 @@ impl SplitHistograms {
 
         // Sentinel: u16::MAX means "literal, no offset symbol".
         const NO_DIST: u16 = u16::MAX;
-        for (i, &litlen) in store.litlens.iter().enumerate() {
-            if i & 0x3FFFF == 0 {
-                stop.check()?;
-            }
-            match litlen {
-                LitLen::Literal(lit) => {
-                    ll_sym.push(lit);
-                    d_sym.push(NO_DIST);
-                }
-                LitLen::LengthDist(len, dist) => {
-                    ll_sym.push(get_length_symbol(len as usize) as u16);
-                    d_sym.push(get_dist_symbol(dist) as u16);
+        for batch in store.litlens.chunks(1 << 18) {
+            stop.check()?;
+            for &litlen in batch {
+                match litlen {
+                    LitLen::Literal(lit) => {
+                        ll_sym.push(lit);
+                        d_sym.push(NO_DIST);
+                    }
+                    LitLen::LengthDist(len, dist) => {
+                        ll_sym.push(get_length_symbol(len as usize) as u16);
+                        d_sym.push(get_dist_symbol(dist) as u16);
+                    }
                 }
             }
         }
