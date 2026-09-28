@@ -9,6 +9,8 @@ use alloc::{boxed::Box, vec, vec::Vec};
 
 use core::cmp;
 
+use enough::{Stop, StopReason};
+
 use crate::CompressionError;
 use crate::constants::*;
 
@@ -387,6 +389,16 @@ fn get_match(scan_arr: &[u8], match_arr: &[u8]) -> usize {
     max_prefix_len
 }
 
+/// Hash-chain steps between `stop` polls inside `find_longest_match_loop`.
+/// A single call can consume the whole `MAX_CHAIN_HITS` budget on adversarial
+/// input, so the position-stride checks in the callers cannot bound latency
+/// there on their own.
+const CHAIN_STOP_STRIDE: usize = 1024;
+/// Cumulative hash-chain steps between `stop` polls in the callers of
+/// `find_longest_match*`, bounding runs of moderately expensive positions
+/// that individually stay under `CHAIN_STOP_STRIDE`.
+const CHAIN_WORK_BUDGET: usize = 32768;
+
 #[allow(clippy::too_many_arguments)]
 fn find_longest_match(
     lmc: &mut MatchCache,
@@ -397,25 +409,27 @@ fn find_longest_match(
     blockstart: usize,
     limit: usize,
     sublen: &mut Option<&mut [u16]>,
-) -> LongestMatch {
+    stop: Option<&dyn Stop>,
+) -> Result<(LongestMatch, usize), StopReason> {
     let mut longest_match = lmc.try_get(pos, limit, sublen, blockstart);
     if longest_match.from_cache {
-        return longest_match;
+        return Ok((longest_match, 0));
     }
     let mut limit = longest_match.limit;
     if size - pos < MIN_MATCH {
         longest_match.distance = 0;
         longest_match.length = 0;
-        return longest_match;
+        return Ok((longest_match, 0));
     }
     if pos + limit > size {
         limit = size - pos;
     }
-    let (bestlength, bestdist) = find_longest_match_loop(h, array, pos, size, limit, sublen);
+    let (bestlength, bestdist, steps) =
+        find_longest_match_loop(h, array, pos, size, limit, sublen, stop)?;
     lmc.store(pos, limit, sublen, bestdist, bestlength, blockstart);
     longest_match.distance = bestdist;
     longest_match.length = bestlength;
-    longest_match
+    Ok((longest_match, steps))
 }
 
 fn find_longest_match_loop(
@@ -425,7 +439,8 @@ fn find_longest_match_loop(
     size: usize,
     limit: usize,
     sublen: &mut Option<&mut [u16]>,
-) -> (u16, u16) {
+    stop: Option<&dyn Stop>,
+) -> Result<(u16, u16, usize), StopReason> {
     let mut which_hash = WhichHash::Hash1;
     let hpos = pos & WINDOW_MASK;
     let mut pp = hpos;
@@ -436,60 +451,79 @@ fn find_longest_match_loop(
     let mut chain_counter = MAX_CHAIN_HITS;
     let arrayend = pos + limit;
 
-    while dist < WINDOW_SIZE && chain_counter > 0 {
-        let mut currentlength = 0;
-        if dist > 0 {
-            let scan_offset = pos;
-            let match_offset = pos - dist;
-            if pos + bestlength >= size
-                || array[scan_offset + bestlength] == array[match_offset + bestlength]
-            {
-                let same0 = h.same[pos & WINDOW_MASK];
-                let mut so = scan_offset;
-                let mut mo = match_offset;
-                if same0 > 2 && array[so] == array[mo] {
-                    let same1 = h.same[(pos - dist) & WINDOW_MASK];
-                    let same = cmp::min(cmp::min(same0, same1), limit as u16) as usize;
-                    so += same;
-                    mo += same;
+    // Bound each batch with the existing chain counter, so individual hash
+    // hits do not need separate polling arithmetic. Short searches never poll.
+    'search: while dist < WINDOW_SIZE && chain_counter > 0 {
+        let batch_end = chain_counter.saturating_sub(CHAIN_STOP_STRIDE);
+        while dist < WINDOW_SIZE && chain_counter > batch_end {
+            let mut currentlength = 0;
+            if dist > 0 {
+                let scan_offset = pos;
+                let match_offset = pos - dist;
+                if pos + bestlength >= size
+                    || array[scan_offset + bestlength] == array[match_offset + bestlength]
+                {
+                    let same0 = h.same[pos & WINDOW_MASK];
+                    let mut so = scan_offset;
+                    let mut mo = match_offset;
+                    if same0 > 2 && array[so] == array[mo] {
+                        let same1 = h.same[(pos - dist) & WINDOW_MASK];
+                        let same = cmp::min(cmp::min(same0, same1), limit as u16) as usize;
+                        so += same;
+                        mo += same;
+                    }
+                    let matched = get_match(&array[so..arrayend], &array[mo..arrayend]);
+                    currentlength = matched + so - pos;
                 }
-                let matched = get_match(&array[so..arrayend], &array[mo..arrayend]);
-                currentlength = matched + so - pos;
-            }
-            if currentlength > bestlength {
-                if let Some(ref mut subl) = *sublen {
-                    for sublength in subl.iter_mut().take(currentlength + 1).skip(bestlength + 1) {
-                        *sublength = dist as u16;
+                if currentlength > bestlength {
+                    if let Some(ref mut subl) = *sublen {
+                        for sublength in
+                            subl.iter_mut().take(currentlength + 1).skip(bestlength + 1)
+                        {
+                            *sublength = dist as u16;
+                        }
+                    }
+                    bestdist = dist;
+                    bestlength = currentlength;
+                    if currentlength >= limit {
+                        break 'search;
                     }
                 }
-                bestdist = dist;
-                bestlength = currentlength;
-                if currentlength >= limit {
-                    break;
-                }
+            }
+
+            if which_hash == WhichHash::Hash1
+                && bestlength >= h.same[hpos] as usize
+                && i32::from(h.val(WhichHash::Hash2)) == h.hash_val_at(p, WhichHash::Hash2)
+            {
+                which_hash = WhichHash::Hash2;
+            }
+
+            pp = p;
+            p = h.prev_at(p, which_hash);
+            if p == pp {
+                break 'search;
+            }
+            dist += if p < pp { pp - p } else { WINDOW_SIZE - p + pp };
+            chain_counter -= 1;
+        }
+        if dist < WINDOW_SIZE && chain_counter > 0 {
+            match stop.check() {
+                Ok(()) => {}
+                Err(r) if r.is_cancelled() => return Err(r),
+                // Keep the best match found when the time budget expires.
+                Err(_) => break,
             }
         }
-
-        if which_hash == WhichHash::Hash1
-            && bestlength >= h.same[hpos] as usize
-            && i32::from(h.val(WhichHash::Hash2)) == h.hash_val_at(p, WhichHash::Hash2)
-        {
-            which_hash = WhichHash::Hash2;
-        }
-
-        pp = p;
-        p = h.prev_at(p, which_hash);
-        if p == pp {
-            break;
-        }
-        dist += if p < pp { pp - p } else { WINDOW_SIZE - p + pp };
-        chain_counter -= 1;
     }
     debug_assert!(
         bestlength <= limit,
         "find_longest_match_loop: bestlength={bestlength} > limit={limit}"
     );
-    (bestlength as u16, bestdist as u16)
+    Ok((
+        bestlength as u16,
+        bestdist as u16,
+        MAX_CHAIN_HITS - chain_counter,
+    ))
 }
 
 // ---- LZ77 Store ----
@@ -563,9 +597,19 @@ impl Lz77Store {
         self.pos.push(pos as u32);
     }
 
-    fn greedy(&mut self, in_data: &[u8], instart: usize, inend: usize) {
+    /// Greedy seed parse. `stop` is polled every `STOP_CHECK_INTERVAL` input
+    /// positions. `Cancelled` aborts immediately; `TimedOut` finishes the
+    /// remaining range as literals (the fastest valid store completion) so
+    /// the caller can still return a coherent result.
+    fn greedy(
+        &mut self,
+        in_data: &[u8],
+        instart: usize,
+        inend: usize,
+        stop: &impl enough::Stop,
+    ) -> Result<(), enough::StopReason> {
         if instart == inend {
-            return;
+            return Ok(());
         }
         let windowstart = instart.saturating_sub(WINDOW_SIZE);
         let mut h = ZopfliHash::new();
@@ -580,10 +624,45 @@ impl Lz77Store {
         let mut prev_length: u32 = 0;
         let mut prev_match: u32 = 0;
         let mut match_available = false;
+        let mut next_stop_check = i + super::STOP_CHECK_INTERVAL;
+        let mut literal_tail = false;
+        let stop_opt: Option<&dyn enough::Stop> = if stop.may_stop() { Some(stop) } else { None };
+        let mut chain_work = 0usize;
 
         while i < inend {
+            if i >= next_stop_check {
+                match stop.check() {
+                    Ok(()) => {}
+                    Err(r) if r.is_cancelled() => return Err(r),
+                    Err(_) => {
+                        literal_tail = true;
+                        break;
+                    }
+                }
+                next_stop_check = i + super::STOP_CHECK_INTERVAL;
+            }
             h.update(arr, i);
-            let (leng, dist) = find_longest_match_no_cache(&h, arr, i, inend, MAX_MATCH);
+            let (leng, dist, steps) =
+                match find_longest_match_no_cache(&h, arr, i, inend, MAX_MATCH, stop_opt) {
+                    Ok(v) => v,
+                    Err(r) if r.is_cancelled() => return Err(r),
+                    Err(_) => {
+                        literal_tail = true;
+                        break;
+                    }
+                };
+            chain_work += steps;
+            if chain_work >= CHAIN_WORK_BUDGET {
+                chain_work = 0;
+                match stop.check() {
+                    Ok(()) => {}
+                    Err(r) if r.is_cancelled() => return Err(r),
+                    Err(_) => {
+                        literal_tail = true;
+                        break;
+                    }
+                }
+            }
             let lengthscore = get_length_score(i32::from(leng), i32::from(dist));
             let prevlengthscore = get_length_score(prev_length as i32, prev_match as i32);
 
@@ -633,6 +712,19 @@ impl Lz77Store {
             }
             i += 1;
         }
+
+        if literal_tail {
+            // Flush a pending deferred match as a literal, then fill the rest
+            // of the range so the store still covers [instart, inend).
+            if match_available {
+                self.lit_len_dist(u16::from(arr[i - 1]), 0, i - 1);
+            }
+            while i < inend {
+                self.lit_len_dist(u16::from(arr[i]), 0, i);
+                i += 1;
+            }
+        }
+        Ok(())
     }
 
     fn store_from_path(&mut self, in_data: &[u8], instart: usize, path: &[(u16, u16)]) {
@@ -654,13 +746,14 @@ fn find_longest_match_no_cache(
     pos: usize,
     size: usize,
     limit: usize,
-) -> (u16, u16) {
+    stop: Option<&dyn Stop>,
+) -> Result<(u16, u16, usize), StopReason> {
     if size - pos < MIN_MATCH {
-        return (0, 0);
+        return Ok((0, 0, 0));
     }
     let limit = cmp::min(limit, size - pos);
     // Returns (length, dist)
-    find_longest_match_loop(h, array, pos, size, limit, &mut None)
+    find_longest_match_loop(h, array, pos, size, limit, &mut None, stop)
 }
 
 const fn get_length_score(length: i32, distance: i32) -> i32 {
@@ -950,6 +1043,8 @@ fn get_cost_model_min_cost(cost_model: &CostModel) -> f64 {
 }
 
 #[allow(clippy::too_many_arguments)]
+/// `stop` is polled every `STOP_CHECK_INTERVAL` input positions; on `Err` the
+/// partial DP state is abandoned (the caller keeps the previous best store).
 fn get_best_lengths(
     lmc: &mut MatchCache,
     in_data: &[u8],
@@ -962,14 +1057,15 @@ fn get_best_lengths(
     dist_array: &mut Vec<u16>,
     sublen: &mut Vec<u16>,
     skip_hash: bool,
-) -> f64 {
+    stop: &impl enough::Stop,
+) -> Result<f64, enough::StopReason> {
     let blocksize = inend - instart;
     length_array.clear();
     length_array.resize(blocksize + 1, 0);
     dist_array.clear();
     dist_array.resize(blocksize + 1, 0);
     if instart == inend {
-        return 0.0;
+        return Ok(0.0);
     }
     let windowstart = instart.saturating_sub(WINDOW_SIZE);
 
@@ -991,11 +1087,18 @@ fn get_best_lengths(
     }
     costs[0] = 0.0;
 
+    let stop_opt: Option<&dyn enough::Stop> = if stop.may_stop() { Some(stop) } else { None };
     let mut i = instart;
     sublen.resize(MAX_MATCH + 1, 0);
     let mincost = get_cost_model_min_cost(cost_model);
+    let mut next_stop_check = i + super::STOP_CHECK_INTERVAL;
+    let mut chain_work = 0usize;
 
     while i < inend {
+        if i >= next_stop_check {
+            stop.check()?;
+            next_stop_check = i + super::STOP_CHECK_INTERVAL;
+        }
         let mut j = i - instart;
         if !skip_hash {
             h.update(arr, i);
@@ -1020,7 +1123,7 @@ fn get_best_lengths(
             }
         }
 
-        let longest_match = find_longest_match(
+        let (longest_match, steps) = find_longest_match(
             lmc,
             h,
             arr,
@@ -1029,7 +1132,13 @@ fn get_best_lengths(
             instart,
             MAX_MATCH,
             &mut Some(sublen.as_mut_slice()),
-        );
+            stop_opt,
+        )?;
+        chain_work += steps;
+        if chain_work >= CHAIN_WORK_BUDGET {
+            stop.check()?;
+            chain_work = 0;
+        }
         let leng = longest_match.length;
 
         // Literal.
@@ -1060,7 +1169,7 @@ fn get_best_lengths(
         i += 1;
     }
 
-    f64::from(costs[blocksize])
+    Ok(f64::from(costs[blocksize]))
 }
 
 fn trace(size: usize, length_array: &[u16], dist_array: &[u16], path: &mut Vec<(u16, u16)>) {
@@ -1125,22 +1234,25 @@ struct SplitHistograms {
 const SPLIT_CHUNK: usize = 64;
 
 impl SplitHistograms {
-    fn build(store: &Lz77Store) -> Self {
+    fn build(store: &Lz77Store, stop: Option<&dyn Stop>) -> Result<Self, StopReason> {
         let n = store.size();
         let mut ll_sym = Vec::with_capacity(n);
         let mut d_sym = Vec::with_capacity(n);
 
         // Sentinel: u16::MAX means "literal, no offset symbol".
         const NO_DIST: u16 = u16::MAX;
-        for &litlen in &store.litlens {
-            match litlen {
-                LitLen::Literal(lit) => {
-                    ll_sym.push(lit);
-                    d_sym.push(NO_DIST);
-                }
-                LitLen::LengthDist(len, dist) => {
-                    ll_sym.push(get_length_symbol(len as usize) as u16);
-                    d_sym.push(get_dist_symbol(dist) as u16);
+        for batch in store.litlens.chunks(1 << 18) {
+            stop.check()?;
+            for &litlen in batch {
+                match litlen {
+                    LitLen::Literal(lit) => {
+                        ll_sym.push(lit);
+                        d_sym.push(NO_DIST);
+                    }
+                    LitLen::LengthDist(len, dist) => {
+                        ll_sym.push(get_length_symbol(len as usize) as u16);
+                        d_sym.push(get_dist_symbol(dist) as u16);
+                    }
                 }
             }
         }
@@ -1155,6 +1267,9 @@ impl SplitHistograms {
         let mut d_running = [0u32; NUM_D];
 
         for c in 0..num_chunks {
+            if c & 1023 == 0 {
+                stop.check()?;
+            }
             let start = c * SPLIT_CHUNK;
             let end = core::cmp::min(start + SPLIT_CHUNK, n);
             for i in start..end {
@@ -1169,12 +1284,12 @@ impl SplitHistograms {
             d_prefix[offset_d..offset_d + NUM_D].copy_from_slice(&d_running);
         }
 
-        Self {
+        Ok(Self {
             ll_sym,
             d_sym,
             ll_prefix,
             d_prefix,
-        }
+        })
     }
 
     /// Get the histogram for range [lstart, lend).
@@ -1243,18 +1358,26 @@ impl SplitHistograms {
     }
 }
 
-fn find_minimum<F: FnMut(usize) -> f64>(mut f: F, start: usize, end: usize) -> (usize, f64) {
+fn find_minimum<F: FnMut(usize) -> f64>(
+    mut f: F,
+    start: usize,
+    end: usize,
+    stop: Option<&dyn Stop>,
+) -> Result<(usize, f64), StopReason> {
     if end - start < 1024 {
         let mut best = f64::INFINITY;
         let mut result = start;
-        for i in start..end {
+        for (n, i) in (start..end).enumerate() {
+            if n & 31 == 0 {
+                stop.check()?;
+            }
             let v = f(i);
             if v < best {
                 best = v;
                 result = i;
             }
         }
-        (result, best)
+        Ok((result, best))
     } else {
         let mut start = start;
         let mut end = end;
@@ -1270,6 +1393,9 @@ fn find_minimum<F: FnMut(usize) -> f64>(mut f: F, start: usize, end: usize) -> (
             let multiplier = (end - start) / (NUM + 1);
             for i in 0..NUM {
                 p[i] = start + (i + 1) * multiplier;
+                // Each probe evaluates two block_cost passes over the current
+                // range — O(range) work per call.
+                stop.check()?;
                 vp[i] = f(p[i]);
                 if vp[i] < best {
                     best = vp[i];
@@ -1284,17 +1410,28 @@ fn find_minimum<F: FnMut(usize) -> f64>(mut f: F, start: usize, end: usize) -> (
             pos = p[besti];
             lastbest = best;
         }
-        (pos, lastbest)
+        Ok((pos, lastbest))
     }
 }
 
-fn blocksplit_lz77(lz77: &Lz77Store, maxblocks: u16, splitpoints: &mut Vec<usize>) {
+fn blocksplit_lz77(
+    lz77: &Lz77Store,
+    maxblocks: u16,
+    splitpoints: &mut Vec<usize>,
+    stop: &dyn Stop,
+) -> Result<(), StopReason> {
     if lz77.size() < 10 {
-        return;
+        return Ok(());
     }
+    let stop = stop.may_stop().then_some(stop);
 
     // Precompute symbol arrays and chunked prefix histograms for O(CHUNK) range queries.
-    let histograms = SplitHistograms::build(lz77);
+    let histograms = match SplitHistograms::build(lz77, stop) {
+        Ok(h) => h,
+        Err(r) if r.is_cancelled() => return Err(r),
+        // Non-cancellation stop: no splits — caller encodes one block.
+        Err(_) => return Ok(()),
+    };
     let mut freqs = DeflateFreqs::default();
 
     let mut numblocks = 1u32;
@@ -1304,14 +1441,27 @@ fn blocksplit_lz77(lz77: &Lz77Store, maxblocks: u16, splitpoints: &mut Vec<usize
     let mut scratch = HuffmanScratch::new();
 
     while maxblocks != 0 && numblocks < u32::from(maxblocks) {
-        let (llpos, splitcost) = find_minimum(
+        match stop.check() {
+            Ok(()) => {}
+            Err(r) if r.is_cancelled() => return Err(r),
+            // Keep the splits found so far (valid stream, fewer blocks).
+            Err(_) => return Ok(()),
+        }
+        let (llpos, splitcost) = match find_minimum(
             |i| {
                 histograms.block_cost(lstart, i, &mut freqs, &mut scratch)
                     + histograms.block_cost(i, lend, &mut freqs, &mut scratch)
             },
             lstart + 1,
             lend,
-        );
+            stop,
+        ) {
+            Ok(v) => v,
+            Err(r) if r.is_cancelled() => return Err(r),
+            // Non-cancellation stop: keep the splits found so far (degraded
+            // compression, still a valid stream).
+            Err(_) => return Ok(()),
+        };
         let origcost = histograms.block_cost(lstart, lend, &mut freqs, &mut scratch);
 
         if splitcost > origcost || llpos == lstart + 1 || llpos == lend {
@@ -1345,6 +1495,7 @@ fn blocksplit_lz77(lz77: &Lz77Store, maxblocks: u16, splitpoints: &mut Vec<usize
             break;
         }
     }
+    Ok(())
 }
 
 fn blocksplit(
@@ -1353,13 +1504,20 @@ fn blocksplit(
     inend: usize,
     maxblocks: u16,
     splitpoints: &mut Vec<usize>,
-) {
+    stop: &impl enough::Stop,
+) -> Result<(), enough::StopReason> {
     splitpoints.clear();
     let mut store = Lz77Store::with_capacity(inend - instart);
-    store.greedy(in_data, instart, inend);
+    store.greedy(in_data, instart, inend, stop)?;
 
     let mut lz77splitpoints = Vec::with_capacity(maxblocks as usize);
-    blocksplit_lz77(&store, maxblocks, &mut lz77splitpoints);
+    match blocksplit_lz77(&store, maxblocks, &mut lz77splitpoints, stop) {
+        Ok(()) => {}
+        Err(r) if r.is_cancelled() => return Err(r),
+        // Non-cancellation stop: proceed with no split points — a single
+        // unsplit block is a valid, if larger, encoding.
+        Err(_) => {}
+    }
 
     let nlz77points = lz77splitpoints.len();
     let mut pos = instart;
@@ -1375,6 +1533,7 @@ fn blocksplit(
             pos += length;
         }
     }
+    Ok(())
 }
 
 // ---- Squeeze Loop ----
@@ -1393,7 +1552,9 @@ fn lz77_optimal(
     let mut huff_scratch = HuffmanScratch::new();
 
     // Initial greedy seed
-    currentstore.greedy(in_data, instart, inend);
+    currentstore
+        .greedy(in_data, instart, inend, stop)
+        .map_err(CompressionError::Stopped)?;
     let mut stats = SymbolStats::default();
     stats.get_statistics(&currentstore);
     outputstore.clone_from(&currentstore);
@@ -1460,7 +1621,7 @@ fn lz77_optimal(
         let skip_hash = current_iteration > 0 && lmc.is_sublen_complete();
         // Run DP forward pass + trace without building an Lz77Store.
         // Frequencies and block cost are computed directly from the path.
-        get_best_lengths(
+        match get_best_lengths(
             &mut lmc,
             in_data,
             instart,
@@ -1472,7 +1633,21 @@ fn lz77_optimal(
             &mut dist_array,
             &mut sublen,
             skip_hash,
-        );
+            stop,
+        ) {
+            Ok(_) => {}
+            Err(enough::StopReason::Cancelled) => {
+                return Err(CompressionError::Stopped(enough::StopReason::Cancelled));
+            }
+            Err(_) => break, // Timeout mid-iteration: keep best-so-far
+        }
+        match stop.check() {
+            Ok(()) => {}
+            Err(enough::StopReason::Cancelled) => {
+                return Err(CompressionError::Stopped(enough::StopReason::Cancelled));
+            }
+            Err(_) => break, // Timeout in post-pass glue: keep best-so-far
+        }
         trace(inend - instart, &length_array, &dist_array, &mut path_buf);
         let freqs = compute_frequencies_from_path(in_data, instart, &path_buf);
         let cost = f64::from(block_cost_best(&freqs, &mut huff_scratch));
@@ -1482,6 +1657,13 @@ fn lz77_optimal(
             // Build full store only on improvement (needed for block splitting later)
             outputstore.reset();
             outputstore.store_from_path(in_data, instart, &path_buf);
+            match stop.check() {
+                Ok(()) => {}
+                Err(enough::StopReason::Cancelled) => {
+                    return Err(CompressionError::Stopped(enough::StopReason::Cancelled));
+                }
+                Err(_) => break,
+            }
             beststats = stats;
             bestcost = cost;
 
@@ -1503,7 +1685,8 @@ fn lz77_optimal(
                 ultra_stats.calculate_huffman_costs(&beststats, &mut huff_scratch);
                 let cost_model = CostModel::from_stats(&ultra_stats);
                 let ultra_skip_hash = lmc.is_sublen_complete();
-                get_best_lengths(
+                // Final pass; a timeout just skips it.
+                match get_best_lengths(
                     &mut lmc,
                     in_data,
                     instart,
@@ -1515,13 +1698,32 @@ fn lz77_optimal(
                     &mut dist_array,
                     &mut sublen,
                     ultra_skip_hash,
-                );
-                trace(inend - instart, &length_array, &dist_array, &mut path_buf);
-                let ultra_freqs = compute_frequencies_from_path(in_data, instart, &path_buf);
-                let ultra_cost = f64::from(block_cost_best(&ultra_freqs, &mut huff_scratch));
-                if ultra_cost < bestcost {
-                    outputstore.reset();
-                    outputstore.store_from_path(in_data, instart, &path_buf);
+                    stop,
+                ) {
+                    Ok(_) => {
+                        match stop.check() {
+                            Ok(()) => {}
+                            Err(enough::StopReason::Cancelled) => {
+                                return Err(CompressionError::Stopped(
+                                    enough::StopReason::Cancelled,
+                                ));
+                            }
+                            Err(_) => break,
+                        }
+                        trace(inend - instart, &length_array, &dist_array, &mut path_buf);
+                        let ultra_freqs =
+                            compute_frequencies_from_path(in_data, instart, &path_buf);
+                        let ultra_cost =
+                            f64::from(block_cost_best(&ultra_freqs, &mut huff_scratch));
+                        if ultra_cost < bestcost {
+                            outputstore.reset();
+                            outputstore.store_from_path(in_data, instart, &path_buf);
+                        }
+                    }
+                    Err(enough::StopReason::Cancelled) => {
+                        return Err(CompressionError::Stopped(enough::StopReason::Cancelled));
+                    }
+                    Err(_) => {}
                 }
             }
             break;
@@ -1611,7 +1813,15 @@ pub(crate) fn compress_full_optimal(
     // Phase 1: Initial byte-based block splitting
     let maxblocks = 15u16;
     let mut byte_splitpoints = Vec::new();
-    blocksplit(input, 0, input.len(), maxblocks, &mut byte_splitpoints);
+    blocksplit(
+        input,
+        0,
+        input.len(),
+        maxblocks,
+        &mut byte_splitpoints,
+        stop,
+    )
+    .map_err(CompressionError::Stopped)?;
 
     // Build block boundaries from byte split points
     let mut boundaries = Vec::with_capacity(byte_splitpoints.len() + 2);
@@ -1646,12 +1856,34 @@ pub(crate) fn compress_full_optimal(
     let npoints = byte_splitpoints.len();
     if npoints > 1 {
         let mut splitpoints2 = Vec::with_capacity(npoints);
-        blocksplit_lz77(&combined_lz77, maxblocks, &mut splitpoints2);
+        match blocksplit_lz77(&combined_lz77, maxblocks, &mut splitpoints2, stop) {
+            Ok(()) => {}
+            Err(r) if r.is_cancelled() => {
+                return Err(CompressionError::Stopped(r));
+            }
+            // Non-cancellation stop: keep the phase-2 split (valid output).
+            Err(_) => splitpoints2.clear(),
+        }
 
         // Compare costs of both splits
         let mut scratch = HuffmanScratch::new();
-        let cost1 = calculate_split_cost(&combined_lz77, &lz77_splitpoints, &mut scratch);
-        let cost2 = calculate_split_cost(&combined_lz77, &splitpoints2, &mut scratch);
+        let stop_opt: Option<&dyn Stop> = if stop.may_stop() { Some(stop) } else { None };
+        let cost1 =
+            match calculate_split_cost(&combined_lz77, &lz77_splitpoints, &mut scratch, stop_opt) {
+                Ok(c) => c,
+                Err(r) if r.is_cancelled() => {
+                    return Err(CompressionError::Stopped(r));
+                }
+                Err(_) => f64::INFINITY,
+            };
+        let cost2 =
+            match calculate_split_cost(&combined_lz77, &splitpoints2, &mut scratch, stop_opt) {
+                Ok(c) => c,
+                Err(r) if r.is_cancelled() => {
+                    return Err(CompressionError::Stopped(r));
+                }
+                Err(_) => f64::INFINITY,
+            };
 
         if cost2 < cost1 {
             lz77_splitpoints = splitpoints2;
@@ -1689,8 +1921,9 @@ fn calculate_split_cost(
     lz77: &Lz77Store,
     splitpoints: &[usize],
     scratch: &mut HuffmanScratch,
-) -> f64 {
-    let histograms = SplitHistograms::build(lz77);
+    stop: Option<&dyn Stop>,
+) -> Result<f64, StopReason> {
+    let histograms = SplitHistograms::build(lz77, stop)?;
     let mut freqs = DeflateFreqs::default();
     let mut cost = 0.0;
     let mut last = 0;
@@ -1699,7 +1932,7 @@ fn calculate_split_cost(
         last = sp;
     }
     cost += histograms.block_cost(last, lz77.size(), &mut freqs, scratch);
-    cost
+    Ok(cost)
 }
 
 /// Convert an Lz77Store to zenflate's Sequence format and flush through the block encoder.
@@ -1905,5 +2138,106 @@ mod tests {
             }
         }
         assert!(worst < 1e-7, "worst log2_series error {worst:e}");
+    }
+
+    /// Returns `Err(reason)` on the n-th `check()` call — a deterministic
+    /// stand-in for a cancellation source / deadline firing mid-operation.
+    struct FailAfter {
+        n: u32,
+        count: core::sync::atomic::AtomicU32,
+        reason: enough::StopReason,
+    }
+
+    impl FailAfter {
+        fn new(n: u32, reason: enough::StopReason) -> Self {
+            Self {
+                n,
+                count: core::sync::atomic::AtomicU32::new(0),
+                reason,
+            }
+        }
+        fn count(&self) -> u32 {
+            self.count.load(core::sync::atomic::Ordering::Relaxed)
+        }
+    }
+
+    impl enough::Stop for FailAfter {
+        fn check(&self) -> Result<(), enough::StopReason> {
+            let c = self
+                .count
+                .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            if c >= self.n - 1 {
+                Err(self.reason)
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    /// Cancellation must be observable *inside* the greedy seed parse, not
+    /// only after it completes — the cancel-latency harness measured >1 s
+    /// blind spots at large inputs because the seed ran unpollled.
+    #[test]
+    fn greedy_seed_aborts_on_cancel_mid_parse() {
+        let data: Vec<u8> = (0..256 * 1024).map(|i| (i % 251) as u8).collect();
+        let mut store = super::Lz77Store::with_capacity(data.len());
+        let stop = FailAfter::new(5, enough::StopReason::Cancelled);
+        let res = store.greedy(&data, 0, data.len(), &stop);
+        assert_eq!(
+            res,
+            Err(enough::StopReason::Cancelled),
+            "seed must abort mid-parse on cancel"
+        );
+        assert_eq!(stop.count(), 5, "abort did not propagate immediately");
+    }
+
+    /// A `TimedOut` mid-parse cannot abandon the store half-covered (the
+    /// caller returns it as best-so-far), so greedy must finish the range as
+    /// literals and still report `Ok`.
+    #[test]
+    fn greedy_timeout_completes_store_with_literal_tail() {
+        let data: Vec<u8> = (0..256 * 1024).map(|i| (i % 251) as u8).collect();
+        let mut store = super::Lz77Store::with_capacity(data.len());
+        let stop = FailAfter::new(5, enough::StopReason::TimedOut);
+        store
+            .greedy(&data, 0, data.len(), &stop)
+            .expect("timeout must produce a completed store");
+        let covered: usize = store.litlens.iter().map(|ll| ll.size()).sum();
+        assert_eq!(covered, data.len(), "store does not cover the input range");
+    }
+
+    /// The squeeze loop used to poll once per *iteration*, but one DP pass
+    /// over a large block is the expensive part (hundreds of ms). Polls must
+    /// exist inside `get_best_lengths`'s position loop: with a cancel on the
+    /// 60th poll, `lz77_optimal` must abort mid-iteration rather than needing
+    /// 60 completed iterations (which would take seconds at this size and
+    /// previously returned `Ok` because the poll count was never reached).
+    #[test]
+    fn lz77_optimal_polls_inside_dp_pass() {
+        let data: Vec<u8> = (0..256 * 1024).map(|i| (i % 251) as u8).collect();
+        let stop = FailAfter::new(60, enough::StopReason::Cancelled);
+        let res = super::lz77_optimal(&data, 0, data.len(), 8, &stop);
+        assert!(
+            matches!(
+                res,
+                Err(crate::CompressionError::Stopped(
+                    enough::StopReason::Cancelled
+                ))
+            ),
+            "expected Stopped(Cancelled)"
+        );
+        assert!(stop.count() >= 60);
+    }
+
+    /// A timeout mid-squeeze returns the best store found so far — the
+    /// returned store must still cover the whole input range.
+    #[test]
+    fn lz77_optimal_timeout_returns_covering_store() {
+        let data: Vec<u8> = (0..256 * 1024).map(|i| (i % 251) as u8).collect();
+        let stop = FailAfter::new(40, enough::StopReason::TimedOut);
+        let store = super::lz77_optimal(&data, 0, data.len(), 8, &stop)
+            .expect("timeout must return best-so-far");
+        let covered: usize = store.litlens.iter().map(|ll| ll.size()).sum();
+        assert_eq!(covered, data.len(), "best-so-far store has gaps");
     }
 }
