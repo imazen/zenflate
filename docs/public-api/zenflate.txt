@@ -6,30 +6,31 @@
 # impls omitted; re-export duplicates annotated `[also: path]`.
 # DO NOT EDIT BY HAND — commit regenerated changes with the code.
 #
-# files: zenflate.txt 199 lines (supported surface) | zenflate.features.txt 0 added (features: alloc,avx512,compress,simd,std,threads,unchecked) | zenflate.internal.txt 8 lines (8 hidden + 0 excluded-feature)
+# files: zenflate.txt 218 lines (supported surface) | zenflate.features.txt 0 added (features: alloc,avx512,compress,simd,std,threads,unchecked) | zenflate.internal.txt 8 lines (8 hidden + 0 excluded-feature)
 
 ## summary
 #
-#   pub modules                                 6
-#   pub types (struct/enum/trait/alias)        28
+#   pub modules                                 7
+#   pub types (struct/enum/trait/alias)        30
 #   pub consts/statics                          2
 #   free functions                              8
-#   inherent methods                          126
+#   inherent methods                          139
 #   struct fields                               4
 #   enum variants                              22
 #   re-exports                                  3
-#   trait roster entries (type × trait)        54
-#   auto-trait-complete types                   9
-#   auto-trait exceptions                       3
+#   trait roster entries (type × trait)        57
+#   auto-trait-complete types                  10
+#   auto-trait exceptions                       4
 #
 # per-module pub lines:
-#   (root)                           72
+#   (root)                           73
 #   checksum                          6
 #   compress                         55
 #   decompress                       52
 #   error                            14
+#   png                              15
 
-## items (181 lines)
+## items (197 lines)
 
 pub mod zenflate
 pub use Stop
@@ -117,6 +118,22 @@ pub error::DecompressionError::StallLimitExceeded
 pub error::DecompressionError::Stopped(enough::reason::StopReason)
 pub error::StreamError::Decompress(error::DecompressionError)
 pub error::StreamError::Source(E)
+pub mod png
+pub struct png::StripCompressor
+pub fn png::StripCompressor::bound(usize) -> usize
+pub fn png::StripCompressor::compress(&mut self, &[u8], bool, &mut [u8], impl enough::Stop) -> core::result::Result<usize, error::CompressionError>
+pub fn png::StripCompressor::new(compress::CompressionLevel) -> Self
+pub fn png::StripCompressor::zlib_header(&self) -> [u8; 2]
+pub struct png::StripDecoder<S>
+pub fn png::StripDecoder<S>::adler32(&mut self) -> u32
+pub fn png::StripDecoder<S>::advance(&mut self, usize)
+pub fn png::StripDecoder<S>::ended_at_strip_boundary(&self) -> bool
+pub fn png::StripDecoder<S>::fill(&mut self) -> core::result::Result<&[u8], error::StreamError<<S as decompress::streaming::InputSource>::Error>>
+pub fn png::StripDecoder<S>::into_inner(self) -> S
+pub fn png::StripDecoder<S>::is_done(&self) -> bool
+pub fn png::StripDecoder<S>::new(S, bool, usize) -> Self
+pub fn png::StripDecoder<S>::peek(&self) -> &[u8]
+pub fn png::StripDecoder<S>::trailer(&self) -> core::option::Option<u32>
 #[non_exhaustive] pub enum CompressionError [also: error]
 pub CompressionError::InsufficientSpace
 pub CompressionError::Stopped(enough::reason::StopReason)
@@ -213,7 +230,7 @@ pub fn adler32_combine(u32, u32, usize) -> u32 [also: checksum]
 pub fn crc32(u32, &[u8]) -> u32 [also: checksum]
 pub fn crc32_combine(u32, u32, usize) -> u32 [also: checksum]
 
-## trait impls (14 types)
+## trait impls (16 types)
 
 &[u8]: decompress::streaming::InputSource
 Adler32Hasher: Clone, Debug, Default, Hasher
@@ -229,10 +246,13 @@ decompress::streaming::StreamDecompressor<decompress::streaming::BufReadSource<R
 error::CompressionError: Clone, Copy, Debug, Display, Eq, Error, From<enough::reason::StopReason>, PartialEq
 error::DecompressionError: Clone, Copy, Debug, Display, Eq, Error, From<enough::reason::StopReason>, PartialEq
 error::StreamError<E>: Debug, Display, Error, From<error::DecompressionError>
+png::StripCompressor: Clone, Debug
+png::StripDecoder<S>: Debug
 
 ## auto traits
 
-9 types implement all of: Freeze, RefUnwindSafe, Send, Sync, Unpin, UnwindSafe
+10 types implement all of: Freeze, RefUnwindSafe, Send, Sync, Unpin, UnwindSafe
 decompress::streaming::BufReadSource<R>: !Freeze !RefUnwindSafe !Send !Sync !Unpin !UnwindSafe
 decompress::streaming::StreamDecompressor<S>: !Freeze !RefUnwindSafe !Send !Sync !Unpin !UnwindSafe
 error::StreamError<E>: !Freeze !RefUnwindSafe !Send !Sync !Unpin !UnwindSafe
+png::StripDecoder<S>: !Freeze !RefUnwindSafe !Send !Sync !Unpin !UnwindSafe

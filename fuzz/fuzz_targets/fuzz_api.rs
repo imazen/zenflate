@@ -11,7 +11,9 @@
 //! - after either, the same compressor matches a fresh one byte for byte;
 //! - incremental compression at fuzz-chosen cut points decodes back, and
 //!   unsupported levels return an error;
-//! - parallel gzip at 1-8 threads decodes back.
+//! - parallel gzip at 1-8 threads decodes back;
+//! - independent segments (PNG iDOT layout) at fuzz-chosen ends decode back
+//!   as one zlib stream and do not depend on compressor reuse.
 
 #![no_main]
 use libfuzzer_sys::fuzz_target;

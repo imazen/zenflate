@@ -232,7 +232,74 @@ pub fn check(input: &Input) {
                 "{name}: parallel content"
             );
         }
-        // Reserved (5..=7).
+        5 => {
+            // Independent segments at fuzz-chosen ends: one reused compressor
+            // must match fresh ones, the zlib-framed stream decodes back, and
+            // each strip decodes alone with StripDecoder.
+            let mut ends: Vec<usize> = input
+                .cuts
+                .iter()
+                .take(16)
+                .map(|&c| c as usize % (data.len() + 1))
+                .collect();
+            ends.push(data.len());
+            ends.sort_unstable();
+            let mut reused = zenflate::png::StripCompressor::new(level);
+            let mut z = reused.zlib_header().to_vec();
+            let mut start = 0;
+            let mut cuts = Vec::new();
+            for (k, &end) in ends.iter().enumerate() {
+                let seg = &data[start..end];
+                let last = k + 1 == ends.len();
+                let bound = zenflate::png::StripCompressor::bound(seg.len());
+                let mut out = vec![0u8; bound];
+                let n = reused
+                    .compress(seg, last, &mut out, Unstoppable)
+                    .unwrap_or_else(|e| panic!("{name}: segment {k}: {e:?}"));
+                let mut fresh = vec![0u8; bound];
+                let m = zenflate::png::StripCompressor::new(level)
+                    .compress(seg, last, &mut fresh, Unstoppable)
+                    .unwrap();
+                assert!(
+                    out[..n] == fresh[..m],
+                    "{name}: segment {k} depends on reuse"
+                );
+                z.extend_from_slice(&out[..n]);
+                cuts.push(z.len());
+                start = end;
+            }
+            z.extend_from_slice(&zenflate::adler32(1, &data).to_be_bytes());
+            *cuts.last_mut().unwrap() = z.len();
+            zlib_decodes_to(&z, &data, &format!("{name} segments"));
+
+            let mut prev = 0;
+            let mut dstart = 0;
+            let mut adler = 1;
+            let mut trailer = None;
+            for (k, (&cend, &dend)) in cuts.iter().zip(&ends).enumerate() {
+                let mut d = zenflate::png::StripDecoder::new(&z[prev..cend], k == 0, 1 << 12);
+                let mut got = Vec::new();
+                while !d.is_done() {
+                    let o = d
+                        .fill()
+                        .unwrap_or_else(|e| panic!("{name}: strip decoder {k}: {e:?}"));
+                    let m = o.len();
+                    got.extend_from_slice(o);
+                    d.advance(m);
+                }
+                assert!(got == data[dstart..dend], "{name}: strip decoder {k}");
+                assert!(
+                    d.ended_at_strip_boundary() == (k + 1 < ends.len()),
+                    "{name}: strip decoder {k} boundary"
+                );
+                adler = zenflate::adler32_combine(adler, d.adler32(), got.len());
+                trailer = d.trailer();
+                prev = cend;
+                dstart = dend;
+            }
+            assert!(trailer == Some(adler), "{name}: strip decoder trailer");
+        }
+        // Reserved (6..=7).
         _ => {}
     }
 }

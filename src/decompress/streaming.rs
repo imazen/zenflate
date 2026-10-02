@@ -245,6 +245,17 @@ pub struct StreamDecompressor<S> {
 
     // Stall detection: blocks processed without output progress
     blocks_without_output: u64,
+
+    // Segment mode: end cleanly when input runs out at a byte-aligned block
+    // boundary (see `with_segment_end`).
+    segment_end: bool,
+    ended_at_segment_boundary: bool,
+
+    // zlib continuation: the header was consumed elsewhere and the footer is
+    // recorded (not verified), because this decoder's checksum covers only
+    // its own part of the stream.
+    verify_footer: bool,
+    footer_checksum: Option<u32>,
 }
 
 impl<S: core::fmt::Debug> core::fmt::Debug for StreamDecompressor<S> {
@@ -289,6 +300,45 @@ impl<S> StreamDecompressor<S> {
     #[must_use]
     pub fn checksum_matched(&self) -> Option<bool> {
         self.checksum_matched
+    }
+
+    /// Decode one *segment* of a larger DEFLATE stream.
+    ///
+    /// When enabled, running out of input exactly at a block boundary that is
+    /// byte-aligned — with no unread bits left and no BFINAL block seen —
+    /// ends the stream cleanly instead of reporting truncation:
+    /// [`is_done()`](Self::is_done) and
+    /// [`ended_at_segment_boundary()`](Self::ended_at_segment_boundary) both
+    /// return true. This is the shape a zlib full flush (`00 00 ff ff`) or
+    /// a non-final PNG strip produces. Public through
+    /// [`png::StripDecoder`](crate::png::StripDecoder).
+    ///
+    /// The check is strict on purpose: if the segment ends mid-block, or
+    /// with leftover bits, a decoder reading the whole stream serially would
+    /// continue the current block (or read the next block header from those
+    /// bits) rather than start fresh at the next segment's first byte. Such
+    /// input still errors, so a caller that decodes segments independently
+    /// can rely on "every non-final segment ended at a segment boundary"
+    /// meaning its concatenated output equals a serial decode — provided each
+    /// later segment is also decoded with this decompressor, which rejects
+    /// back-references to data before its own start.
+    ///
+    /// A stream that reaches its BFINAL block ends normally (the wrapper
+    /// footer is still read) and `ended_at_segment_boundary()` stays false.
+    /// With the zlib wrapper, a segment end skips the Adler-32 footer, so
+    /// [`checksum_matched()`](Self::checksum_matched) stays `None`.
+    #[must_use]
+    pub(crate) fn with_segment_end(mut self, enable: bool) -> Self {
+        self.segment_end = enable;
+        self
+    }
+
+    /// True when the stream ended at a segment boundary (see
+    /// [`with_segment_end`](Self::with_segment_end)) rather than at a BFINAL
+    /// block.
+    #[must_use]
+    pub(crate) fn ended_at_segment_boundary(&self) -> bool {
+        self.ended_at_segment_boundary
     }
 
     /// Set a maximum output size limit for decompression.
@@ -347,6 +397,10 @@ impl<S: InputSource> StreamDecompressor<S> {
             max_output_size: None,
             total_decompressed: 0,
             blocks_without_output: 0,
+            segment_end: false,
+            ended_at_segment_boundary: false,
+            verify_footer: true,
+            footer_checksum: None,
         }
     }
 
@@ -372,6 +426,44 @@ impl<S: InputSource> StreamDecompressor<S> {
     /// Panics if `capacity` is 0.
     pub fn zlib(source: S, capacity: usize) -> Self {
         Self::new(source, capacity, WrapperFormat::Zlib)
+    }
+
+    /// Create a streaming decompressor for the *tail* of a zlib stream whose
+    /// 2-byte header (and earlier segments) were consumed elsewhere — for
+    /// example the last of several independently decoded segments.
+    ///
+    /// Decoding starts at a block header. The Adler-32 footer is read but
+    /// not verified, since this decoder only sees part of the stream: it is
+    /// reported by [`footer_checksum()`](Self::footer_checksum), and this
+    /// decoder's own Adler-32 (starting from 1, over its output only) by
+    /// [`running_checksum()`](Self::running_checksum). Join the per-segment
+    /// values with [`adler32_combine`](crate::adler32_combine) to verify.
+    /// [`checksum_matched()`](Self::checksum_matched) stays `None`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `capacity` is 0.
+    pub(crate) fn zlib_continuation(source: S, capacity: usize) -> Self {
+        let mut d = Self::new(source, capacity, WrapperFormat::Zlib);
+        d.state = StreamState::BlockHeader;
+        d.verify_footer = false;
+        d
+    }
+
+    /// The checksum (Adler-32 for zlib, CRC-32 for gzip) of all output this
+    /// decoder has produced so far, including output not yet consumed via
+    /// [`advance()`](Self::advance). Always 0 for raw DEFLATE.
+    pub(crate) fn running_checksum(&mut self) -> u32 {
+        self.flush_checksum();
+        self.checksum
+    }
+
+    /// The checksum stored in the stream's footer, once the footer has been
+    /// read (zlib: the big-endian Adler-32; gzip: the CRC-32). `None` before
+    /// the footer, for raw DEFLATE, and after a segment-boundary end.
+    #[must_use]
+    pub(crate) fn footer_checksum(&self) -> Option<u32> {
+        self.footer_checksum
     }
 
     /// Create a streaming decompressor for gzip-wrapped data.
@@ -435,12 +527,14 @@ impl<S: InputSource> StreamDecompressor<S> {
         self.bitbuf = 0;
         self.bitsleft = 0;
         self.overread_count = 0;
-        self.state = if wrapper == WrapperFormat::Raw {
+        self.state = if wrapper == WrapperFormat::Raw || !self.verify_footer {
             StreamState::BlockHeader
         } else {
             StreamState::WrapperHeader
         };
         self.is_final_block = false;
+        self.ended_at_segment_boundary = false;
+        self.footer_checksum = None;
         self.pending_match = None;
         self.pending_literal = None;
         self.checksum = checksum_init;
@@ -574,7 +668,16 @@ impl<S: InputSource> StreamDecompressor<S> {
                 }
                 StreamState::BlockHeader => {
                     self.fill_input().map_err(StreamError::Source)?;
-                    self.parse_block_header()?;
+                    if self.segment_end
+                        && self.input_pos >= self.input_len
+                        && self.bitsleft as usize == 8 * self.overread_count
+                    {
+                        // Input exhausted at a byte-aligned block boundary.
+                        self.ended_at_segment_boundary = true;
+                        self.state = StreamState::Done;
+                    } else {
+                        self.parse_block_header()?;
+                    }
                 }
                 StreamState::DynamicPrecodeLens {
                     num_litlen_syms,
@@ -1631,6 +1734,14 @@ impl<S: InputSource> StreamDecompressor<S> {
             WrapperFormat::Raw => unreachable!(),
         };
 
+        self.footer_checksum = Some(match self.wrapper {
+            WrapperFormat::Zlib => u32::from_be_bytes([footer[0], footer[1], footer[2], footer[3]]),
+            _ => u32::from_le_bytes([footer[0], footer[1], footer[2], footer[3]]),
+        });
+        if !self.verify_footer {
+            self.state = StreamState::Done;
+            return Ok(());
+        }
         self.checksum_matched = Some(matched);
         if !matched && !self.skip_checksum {
             return Err(DecompressionError::ChecksumMismatch.into());

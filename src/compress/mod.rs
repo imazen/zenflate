@@ -980,34 +980,10 @@ impl Compressor {
         output: &mut [u8],
         stop: impl enough::Stop,
     ) -> Result<usize, CompressionError> {
-        // zlib header: CMF=0x78, FLG level hint depends on compression level.
-        // Matches C libdeflate's mapping: <2 fastest, <6 fast, <8 default, >=8 slowest.
-        let level = self.level.level();
-        let level_hint: u8 = if level < 2 {
-            0 // ZLIB_FASTEST_COMPRESSION
-        } else if level < 6 {
-            1 // ZLIB_FAST_COMPRESSION
-        } else if level < 8 {
-            2 // ZLIB_DEFAULT_COMPRESSION
-        } else {
-            3 // ZLIB_SLOWEST_COMPRESSION
-        };
-        let flg = level_hint << 6;
-        // CMF = 0x78 (deflate, window size 32K)
-        let cmf = 0x78u8;
-        // Adjust FLG so (CMF*256 + FLG) % 31 == 0
-        let check = ((cmf as u16) * 256 + flg as u16) % 31;
-        let flg = if check == 0 {
-            flg
-        } else {
-            flg + (31 - check) as u8
-        };
-
         if output.len() < 6 {
             return Err(CompressionError::InsufficientSpace);
         }
-        output[0] = cmf;
-        output[1] = flg;
+        output[..2].copy_from_slice(&zlib_header(self.level));
 
         let compressed_size = self.deflate_compress(input, &mut output[2..], stop)?;
         let total = 2 + compressed_size;
@@ -1072,6 +1048,28 @@ impl Compressor {
         // Worst case: uncompressed blocks (5 bytes overhead each).
         // Static Huffman blocks roll back to uncompressed if they expand.
         5 * max_blocks + input_len
+    }
+
+    /// One independent segment of a larger raw DEFLATE stream: no history
+    /// from earlier segments, and with `is_last` false no BFINAL block and a
+    /// byte-aligned end (an empty stored block, `00 00 ff ff`). Public
+    /// through [`png::StripCompressor`](crate::png::StripCompressor).
+    pub(crate) fn deflate_compress_segment(
+        &mut self,
+        input: &[u8],
+        is_last: bool,
+        output: &mut [u8],
+        stop: impl enough::Stop,
+    ) -> Result<usize, CompressionError> {
+        self.deflate_compress_chunk(input, 0, is_last, output, &stop)
+    }
+
+    /// Upper bound on [`deflate_compress_segment`](Self::deflate_compress_segment)
+    /// output: [`deflate_compress_bound`](Self::deflate_compress_bound) plus
+    /// the 5-byte flush marker and one byte of bit padding.
+    #[must_use]
+    pub(crate) fn deflate_compress_segment_bound(input_len: usize) -> usize {
+        Self::deflate_compress_bound(input_len) + 6
     }
 
     /// Compute the maximum compressed size for zlib output.
@@ -3360,7 +3358,6 @@ impl Compressor {
     ///
     /// If `is_last_chunk` is false, a sync flush (empty stored block) is appended
     /// to byte-align the output for concatenation with subsequent chunks.
-    #[cfg(feature = "threads")]
     fn deflate_compress_chunk(
         &mut self,
         input: &[u8],
@@ -3369,8 +3366,13 @@ impl Compressor {
         output: &mut [u8],
         stop: &impl enough::Stop,
     ) -> Result<usize, CompressionError> {
-        // Store: no matchfinder, just uncompressed blocks of the data portion.
-        if self.level.strategy() == InternalStrategy::Store {
+        // Store, empty, or below the passthrough threshold: uncompressed
+        // blocks of the data portion (always byte-aligned at the end).
+        let data_len = input.len() - chunk_start;
+        if self.level.strategy() == InternalStrategy::Store
+            || data_len == 0
+            || (chunk_start == 0 && data_len <= self.max_passthrough_size)
+        {
             return deflate_compress_none_chunk(&input[chunk_start..], output, is_last_chunk);
         }
 
@@ -3390,7 +3392,20 @@ impl Compressor {
             InternalStrategy::NearOptimal => self.compress_near_optimal(&mut os, input, stop),
             InternalStrategy::Png(params) => self.compress_png(&mut os, input, params, stop),
             InternalStrategy::PngUltra => self.compress_png_ultra(&mut os, input, stop),
-            InternalStrategy::Store | InternalStrategy::FullOptimal => unreachable!(),
+            InternalStrategy::FullOptimal => {
+                // FullOptimal has no dictionary warm-up; only independent
+                // segments (`chunk_start == 0`) reach here.
+                debug_assert_eq!(chunk_start, 0);
+                let iterations = self.full_optimal.as_ref().unwrap().iterations();
+                full_optimal::compress_full_optimal(
+                    &mut os,
+                    &input[chunk_start..],
+                    iterations,
+                    is_last_chunk,
+                    stop,
+                )
+            }
+            InternalStrategy::Store => unreachable!(),
         };
         if let Err(e) = result {
             self.chunk_start = 0;
@@ -3703,7 +3718,6 @@ fn deflate_compress_none(input: &[u8], output: &mut [u8]) -> Result<usize, Compr
 }
 
 /// Level 0 chunk variant: output uncompressed blocks with BFINAL control.
-#[cfg(feature = "threads")]
 fn deflate_compress_none_chunk(
     input: &[u8],
     output: &mut [u8],
@@ -3830,6 +3844,31 @@ fn choose_max_block_end(block_begin: usize, in_end: usize, soft_max_len: usize) 
     } else {
         block_begin + soft_max_len
     }
+}
+
+/// The 2-byte zlib header: deflate, 32 KiB window, a level hint matching
+/// C libdeflate's mapping.
+pub(crate) fn zlib_header(level: CompressionLevel) -> [u8; 2] {
+    let level = level.level();
+    let level_hint: u8 = if level < 2 {
+        0 // ZLIB_FASTEST_COMPRESSION
+    } else if level < 6 {
+        1 // ZLIB_FAST_COMPRESSION
+    } else if level < 8 {
+        2 // ZLIB_DEFAULT_COMPRESSION
+    } else {
+        3 // ZLIB_SLOWEST_COMPRESSION
+    };
+    let cmf = 0x78u8; // deflate, 32 KiB window
+    let flg = level_hint << 6;
+    // FCHECK: (CMF*256 + FLG) % 31 == 0
+    let check = ((cmf as u16) * 256 + flg as u16) % 31;
+    let flg = if check == 0 {
+        flg
+    } else {
+        flg + (31 - check) as u8
+    };
+    [cmf, flg]
 }
 
 #[cfg(test)]
