@@ -931,6 +931,46 @@ impl Compressor {
         5 * max_blocks + input_len
     }
 
+    /// Compress `input` as one independent segment of a larger raw DEFLATE
+    /// stream.
+    ///
+    /// Segments produced this way can be compressed in parallel and then
+    /// concatenated in order to form one valid DEFLATE stream:
+    ///
+    /// - The segment uses no history from earlier segments (an empty
+    ///   window), so it can also be *decompressed* independently — see
+    ///   [`StreamDecompressor::with_segment_end`](crate::StreamDecompressor::with_segment_end).
+    /// - When `is_last` is false, no block has BFINAL set and the output ends
+    ///   byte-aligned on a block boundary: compressed segments end with an
+    ///   empty stored block (the zlib full-flush marker, `00 00 ff ff` after
+    ///   alignment); stored-only segments are byte-aligned already.
+    /// - When `is_last` is true, the final block has BFINAL set, exactly as
+    ///   [`deflate_compress`](Self::deflate_compress) would end.
+    ///
+    /// For a zlib stream, prefix the first segment with a zlib header and
+    /// append the big-endian Adler-32 of the whole uncompressed input (use
+    /// [`adler32_combine`](crate::adler32_combine) to join per-segment
+    /// checksums).
+    ///
+    /// Size `output` with [`deflate_compress_segment_bound`](Self::deflate_compress_segment_bound).
+    pub fn deflate_compress_segment(
+        &mut self,
+        input: &[u8],
+        is_last: bool,
+        output: &mut [u8],
+        stop: impl enough::Stop,
+    ) -> Result<usize, CompressionError> {
+        self.deflate_compress_chunk(input, 0, is_last, output, &stop)
+    }
+
+    /// Upper bound on the output of
+    /// [`deflate_compress_segment`](Self::deflate_compress_segment):
+    /// [`deflate_compress_bound`](Self::deflate_compress_bound) plus the
+    /// 5-byte flush marker, plus one byte of bit padding.
+    pub fn deflate_compress_segment_bound(input_len: usize) -> usize {
+        Self::deflate_compress_bound(input_len) + 6
+    }
+
     /// Compute the maximum compressed size for zlib output.
     #[must_use]
     pub fn zlib_compress_bound(input_len: usize) -> usize {
@@ -3004,7 +3044,6 @@ impl Compressor {
     ///
     /// If `is_last_chunk` is false, a sync flush (empty stored block) is appended
     /// to byte-align the output for concatenation with subsequent chunks.
-    #[cfg(feature = "threads")]
     fn deflate_compress_chunk(
         &mut self,
         input: &[u8],
@@ -3013,8 +3052,13 @@ impl Compressor {
         output: &mut [u8],
         stop: &impl enough::Stop,
     ) -> Result<usize, CompressionError> {
-        // Store: no matchfinder, just uncompressed blocks of the data portion.
-        if self.level.strategy() == InternalStrategy::Store {
+        // Store, empty, or below the passthrough threshold: uncompressed
+        // blocks of the data portion (always byte-aligned at the end).
+        let data_len = input.len() - chunk_start;
+        if self.level.strategy() == InternalStrategy::Store
+            || data_len == 0
+            || (chunk_start == 0 && data_len <= self.max_passthrough_size)
+        {
             return deflate_compress_none_chunk(&input[chunk_start..], output, is_last_chunk);
         }
 
@@ -3032,7 +3076,20 @@ impl Compressor {
             InternalStrategy::Lazy => self.compress_lazy_generic(&mut os, input, false, stop),
             InternalStrategy::Lazy2 => self.compress_lazy_generic(&mut os, input, true, stop),
             InternalStrategy::NearOptimal => self.compress_near_optimal(&mut os, input, stop),
-            InternalStrategy::Store | InternalStrategy::FullOptimal => unreachable!(),
+            InternalStrategy::FullOptimal => {
+                // FullOptimal has no dictionary warm-up; only independent
+                // segments (`chunk_start == 0`) reach here.
+                debug_assert_eq!(chunk_start, 0);
+                let iterations = self.full_optimal.as_ref().unwrap().iterations();
+                full_optimal::compress_full_optimal(
+                    &mut os,
+                    &input[chunk_start..],
+                    iterations,
+                    is_last_chunk,
+                    stop,
+                )
+            }
+            InternalStrategy::Store => unreachable!(),
         };
         if let Err(e) = result {
             self.chunk_start = 0;
@@ -3339,7 +3396,6 @@ fn deflate_compress_none(input: &[u8], output: &mut [u8]) -> Result<usize, Compr
 }
 
 /// Level 0 chunk variant: output uncompressed blocks with BFINAL control.
-#[cfg(feature = "threads")]
 fn deflate_compress_none_chunk(
     input: &[u8],
     output: &mut [u8],
