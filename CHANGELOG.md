@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+### Added
+
+- **Independent DEFLATE segments** for parallel encode and decode (e.g. Apple's `iDOT` PNG layout).
+  `Compressor::deflate_compress_segment(input, is_last, out, stop)` compresses one segment with an
+  empty window; non-final segments end byte-aligned with a full-flush marker and no BFINAL, so
+  segments concatenate into one valid stream. Every strategy is supported, including FullOptimal.
+  `StreamDecompressor::with_segment_end(true)` plus `ended_at_segment_boundary()` decode one segment
+  and end cleanly only at a byte-aligned block boundary with no leftover bits; a segment ending
+  mid-block (the "ambiguous PNG" construction) still errors, so independent decode equals serial
+  decode. `StreamDecompressor::zlib_continuation` decodes the tail of a zlib stream whose header was
+  consumed elsewhere, recording (not verifying) the footer; `running_checksum()` and
+  `footer_checksum()` let the caller verify the whole stream with `adler32_combine`.
+  Additive; existing output is unchanged.
+
 ### Changed
 
 - Refreshed `Cargo.lock` within the existing requirements, third-party only (d0a7aef). `zenbench` was pinned back to 0.1.8 — the one zen-family crate the refresh wanted to move — and every other zen-family entry was already at its ceiling. Movers include `cc` 1.2.67 → 1.4.4, `libdeflater`/`libdeflate-sys` 1.25.2 → 1.26.0, `flate2` 1.1.9 → 1.1.10, `zlib-rs` 0.6.6 → 0.6.7, `libflate` 2.3.0 → 2.3.1, `crc32fast` 1.5.0 → 1.5.1, `simd-adler32` 0.3.9 → 0.3.10, and the proc-macro chain `proc-macro2` 1.0.106 → 1.0.107 / `quote` 1.0.46 → 1.0.47 / `syn` 2.0.118 → 2.0.119. **Compressed output is byte-identical**: the library's own graph (`cargo tree -e normal`) is only `archmage` and `enough` plus `safe_unaligned_simd` and the archmage-macros proc-macro chain, and while `safe_unaligned_simd` did not move, the proc-macro chain did — and that is what the SIMD dispatch expands through, so it was verified rather than assumed. An out-of-tree harness compressed 6,048 cases (6 content kinds × 24 sizes straddling the window and block boundaries, from 0 to 300,000 bytes × 14 efforts from 0 to 30 × deflate/zlib/gzip) against both dependency sets: identical per-case hashes and identical 56,097,603-byte blob (`fnv1a64 8ec4518507d570ce`) either way.
