@@ -239,8 +239,10 @@ native AVX-512+VNNI+VPCLMULQDQ), no `target-cpu=native`. Full data:
 
 Each strategy takes its matchfinder / near-optimal state out of `Compressor`
 (`self.x.take()`) so it can call `&mut self` helpers, and used to put it back
-only on the success path. Any early return (a `Stop` firing, `InsufficientSpace`)
-left the field `None`, so the compressor's next call panicked on `unwrap()`.
+only on the success path. An early return (a `Stop` firing; output overflow is
+reported after the strategy returns, so it never triggered this) left the field
+`None`, so the compressor's next call panicked on `unwrap()` (verified at
+`new(1..=30)` and `libdeflate(1..=12)` on 844cb8a).
 Fixed by splitting each strategy into a wrapper that always restores the state
 and an `_inner` body that receives it. Any new strategy that takes state out
 must do the same. Guarded by `tests/conformance.rs` (`recovery_*`: stop after
