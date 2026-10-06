@@ -216,6 +216,49 @@ size (lower is better). Speed = compression throughput.
 For most uses, `balanced()` (effort 15) is a good default. Use `fast()` (effort 10)
 when speed matters more than the last few percent of compression.
 
+### PNG image data
+
+`CompressionLevel::png(effort)` is tuned for PNG IDAT streams: filtered
+scanlines with long byte runs and literal-heavy residuals.
+
+- `png(1)` is an ultra-fast encoder: literals and zero runs, one Huffman table
+  per stream, built from the input's token counts (sampled above 64 KiB).
+- `png(2)` encodes runs only, with exact Huffman tables per block.
+- `png(3)` adds hashed repeats of 8+ bytes, `png(4..=5)` repeats of 5+ bytes.
+- `png(6..=12)` use hash chains of growing depth.
+- From effort 13 up it is the same as `new(effort)`.
+
+Each hash effort also parses every block runs-only and keeps the cheaper
+result, so it never loses to runs-only on flat-colour art.
+
+```rust
+use zenflate::{Compressor, CompressionLevel, Unstoppable};
+
+let mut compressor = Compressor::new(CompressionLevel::png(6));
+let mut idat = vec![0u8; Compressor::zlib_compress_bound(filtered_rows.len())];
+let size = compressor.zlib_compress(&filtered_rows, &mut idat, Unstoppable)?;
+```
+
+Measured on 146 held-out imazen-26 images at their native sizes, adaptively
+filtered, each against the nearest `new()` effort or fdeflate level:
+
+| Effort | Ratio | MiB/s | Comparison |
+|--------|-------|-------|------------|
+| `png(1)` | 2.237 | 2780 | fdeflate ultra-fast: 2.087 @ 1273 |
+| `png(2)` | 2.329 | 1161 | |
+| `png(3)` | 2.428 | 531 | fdeflate L1: 2.438 @ 399 |
+| `png(4)` | 2.502 | 365 | `new(1)`: 2.438 @ 315 |
+| `png(9)` | 2.564 | 181 | `new(10)`: 2.533 @ 158 |
+| `png(12)` | 2.579 | 123 | `new(12)`: 2.572 @ 128 |
+
+On unfiltered rows (filter None, typical for palette images) and on small
+images, `new(10..)` compresses better than `png(10..=12)` at similar speed.
+On 64×64 images every level up to `png(17)` takes under 0.1 ms, and `png(2)`
+is as fast as `png(1)` and compresses smaller.
+Per-level statistics (mean ± CI, per-image inversions) and the fallbacks
+that keep higher efforts from producing larger files:
+[`benchmarks/png_mode_2026-10-06.md`](https://github.com/imazen/zenflate/blob/main/benchmarks/png_mode_2026-10-06.md).
+
 ### Parallel gzip compression
 
 ```rust

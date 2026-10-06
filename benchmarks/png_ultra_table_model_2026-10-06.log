@@ -1,0 +1,120 @@
+# png(1) table model, held-out evaluation. zenflate png-mode (this commit), host i265, 2026-10-06.
+# cmd: tables/train_tables.py hist_train.tsv hist_holdout.tsv (inputs: token_hist over make_dense.py variants;
+#      data: ~/data/zenflate/png-mode-2026-10-06/ultra-tables/, sha256 in SHA256SUMS)
+train 8908 streams (5789 small), holdout 5076 streams (3383 small)
+per-stream tables (holdout)...
+codebook K=2...
+codebook K=4...
+codebook K=8...
+codebook K=16...
+
+## holdout, streams < small limit (fixed table applies) (n=3383)
+method                                    KiB  vs fdeflate     sd  vs exact     sd worse-than-fd
+fdeflate fixed                        23060.7       +0.00%   0.00   +14.77%  18.93      0
+static (BTYPE=01)                     33974.0      +51.21%  27.40   +73.55%  30.16   3250
+per-stream exact                      20931.6      -12.87%  18.93    +0.00%   0.00     63
+table from first-8K sample            21357.7       -9.03%  13.72    +4.40%   8.67    489
+table from first-2K sample            22224.4       -4.50%  13.22    +9.60%  15.01   1146
+global (all train)                    22809.4       -0.73%   4.30   +13.93%  17.18   1327
+global (small train)                  22767.3       -0.89%   4.31   +13.74%  17.25   1274
+per-channel-count (small train)       22639.0       -1.11%   5.07   +13.49%  17.55   1200
+codebook K=2 oracle                   21852.2       -4.42%   5.97    +9.70%  16.37   1033
+codebook K=2 pick@8K                  21944.8       -4.27%   6.16    +9.87%  16.34   1075
+codebook K=2 pick@2K                  22064.2       -3.52%   7.06   +10.73%  17.83   1197
+codebook K=4 oracle                   21667.5       -5.98%   7.74    +7.91%  13.70    794
+codebook K=4 pick@8K                  21781.4       -5.78%   7.93    +8.14%  13.67    854
+codebook K=4 pick@2K                  21962.8       -5.24%   8.43    +8.75%  13.64   1016
+codebook K=8 oracle                   21415.9       -8.32%  10.96    +5.23%   9.65    542
+codebook K=8 pick@8K                  21639.5       -7.80%  11.57    +5.82%  10.01    652
+codebook K=8 pick@2K                  21998.8       -6.68%  12.83    +7.10%  10.70    844
+codebook K=16 oracle                  21337.1       -9.14%  13.14    +4.28%   7.83    338
+codebook K=16 pick@8K                 21596.0       -8.51%  13.88    +5.00%   8.67    452
+codebook K=16 pick@2K                 22006.6       -7.12%  15.27    +6.60%  10.47    648
+
+## holdout, streams >= small limit (sampled table today) (n=1693)
+method                                    KiB  vs fdeflate     sd  vs exact     sd worse-than-fd
+fdeflate fixed                       433122.5       +0.00%   0.00   +15.91%  21.73      0
+static (BTYPE=01)                    684533.6      +61.85%  26.99   +87.60%  31.54   1677
+per-stream exact                     398577.8      -13.73%  21.73    +0.00%   0.00      0
+table from first-8K sample           421928.1       -4.40%  19.01   +10.82%  17.17    495
+table from first-2K sample           438923.4       +2.69%  19.25   +19.02%  23.80    821
+global (all train)                   433375.7       -0.66%   5.80   +15.15%  18.10    749
+global (small train)                 432905.0       +0.17%   4.40   +16.11%  20.44    761
+per-channel-count (small train)      429604.9       +0.22%   5.45   +16.17%  21.08    754
+codebook K=2 oracle                  417420.7       -3.24%   5.43   +12.16%  19.27    597
+codebook K=2 pick@8K                 421621.1       -2.63%   6.17   +12.86%  19.16    678
+codebook K=2 pick@2K                 426041.0       +0.66%   9.13   +16.68%  25.73    903
+codebook K=4 oracle                  413436.2       -4.43%   7.43   +10.78%  16.91    528
+codebook K=4 pick@8K                 417533.9       -3.35%   8.34   +12.02%  16.75    668
+codebook K=4 pick@2K                 421130.0       -0.93%   9.35   +14.84%  22.33    803
+codebook K=8 oracle                  408177.9       -6.43%   9.76    +8.46%  14.99    400
+codebook K=8 pick@8K                 421182.0       -2.41%  15.02   +13.11%  17.21    646
+codebook K=8 pick@2K                 422318.5       -1.39%  15.68   +14.30%  17.87    734
+codebook K=16 oracle                 404633.6       -7.30%  10.79    +7.45%  13.86    161
+codebook K=16 pick@8K                418170.6       -2.98%  15.95   +12.46%  17.17    472
+codebook K=16 pick@2K                423663.3       +0.20%  16.37   +16.14%  22.04    635
+
+## holdout small, 1 channel(s) (n=1929)
+method                                    KiB  vs fdeflate     sd  vs exact     sd worse-than-fd
+fdeflate fixed                        11337.4       +0.00%   0.00   +15.46%  19.80      0
+static (BTYPE=01)                     16853.7      +51.08%  27.49   +74.43%  31.26   1857
+per-stream exact                      10288.4      -13.39%  19.80    +0.00%   0.00     39
+table from first-8K sample            10499.5       -9.39%  14.48    +4.61%   8.53    293
+table from first-2K sample            10907.7       -5.35%  13.52    +9.28%  14.58    613
+global (all train)                    11222.9       -0.70%   4.12   +14.64%  18.24    747
+global (small train)                  11201.2       -0.98%   4.30   +14.32%  18.04    713
+per-channel-count (small train)       11196.9       -1.26%   4.36   +14.00%  17.80    678
+codebook K=2 oracle                   10762.2       -4.44%   6.01   +10.34%  17.17    576
+codebook K=2 pick@8K                  10810.5       -4.31%   6.20   +10.48%  17.15    599
+codebook K=2 pick@2K                  10861.4       -3.82%   6.80   +11.05%  17.98    655
+codebook K=4 oracle                   10681.9       -5.99%   7.91    +8.54%  14.44    457
+codebook K=4 pick@8K                  10738.4       -5.82%   8.07    +8.73%  14.41    486
+codebook K=4 pick@2K                  10809.9       -5.44%   8.46    +9.17%  14.38    559
+codebook K=8 oracle                   10542.7       -8.56%  11.31    +5.57%  10.18    303
+codebook K=8 pick@8K                  10640.1       -8.19%  11.71    +6.00%  10.31    352
+codebook K=8 pick@2K                  10788.0       -7.26%  12.78    +7.07%  10.90    437
+codebook K=16 oracle                  10503.0       -9.41%  13.68    +4.59%   8.28    193
+codebook K=16 pick@8K                 10631.8       -8.87%  14.34    +5.21%   8.96    253
+codebook K=16 pick@2K                 10841.3       -7.69%  15.61    +6.58%  10.37    347
+
+## holdout small, 3 channel(s) (n=1454)
+method                                    KiB  vs fdeflate     sd  vs exact     sd worse-than-fd
+fdeflate fixed                        11723.2       +0.00%   0.00   +13.86%  17.69      0
+static (BTYPE=01)                     17120.3      +51.39%  27.28   +72.38%  28.63   1393
+per-stream exact                      10643.2      -12.18%  17.69    +0.00%   0.00     24
+table from first-8K sample            10858.2       -8.55%  12.63    +4.13%   8.86    196
+table from first-2K sample            11316.7       -3.37%  12.73   +10.03%  15.57    533
+global (all train)                    11586.5       -0.76%   4.52   +13.00%  15.63    580
+global (small train)                  11566.2       -0.78%   4.31   +12.98%  16.12    561
+per-channel-count (small train)       11442.1       -0.92%   5.87   +12.82%  17.20    522
+codebook K=2 oracle                   11089.9       -4.39%   5.92    +8.86%  15.20    457
+codebook K=2 pick@8K                  11134.3       -4.22%   6.12    +9.06%  15.17    476
+codebook K=2 pick@2K                  11202.9       -3.12%   7.36   +10.31%  17.64    542
+codebook K=4 oracle                   10985.5       -5.96%   7.52    +7.08%  12.61    337
+codebook K=4 pick@8K                  11043.0       -5.72%   7.74    +7.35%  12.60    368
+codebook K=4 pick@2K                  11152.9       -4.98%   8.39    +8.20%  12.57    457
+codebook K=8 oracle                   10873.3       -7.99%  10.47    +4.77%   8.89    239
+codebook K=8 pick@8K                  10999.4       -7.27%  11.35    +5.59%   9.60    300
+codebook K=8 pick@2K                  11210.8       -5.91%  12.85    +7.14%  10.43    407
+codebook K=16 oracle                  10834.1       -8.77%  12.39    +3.87%   7.18    145
+codebook K=16 pick@8K                 10964.1       -8.03%  13.24    +4.72%   8.26    199
+codebook K=16 pick@2K                 11165.3       -6.35%  14.77    +6.63%  10.59    301
+
+## small holdout by target size: mean change vs fdeflate fixed
+  size    n static (BTYPE= per-stream exa global (small  per-channel-co codebook K=4 p codebook K=8 p codebook K=16 
+    24  296        +35.37%        -11.63%         -0.68%         -1.18%         -6.24%         -8.07%         -8.83%
+    32  296        +42.30%        -11.75%         -0.86%         -1.09%         -6.09%         -8.12%         -8.59%
+    40  296        +46.40%        -11.94%         -0.89%         -1.33%         -5.78%         -7.55%         -8.21%
+    48  296        +48.74%        -12.44%         -1.06%         -1.36%         -5.81%         -7.54%         -8.31%
+    56  296        +50.77%        -12.62%         -1.11%         -1.48%         -5.60%         -7.27%         -7.95%
+    64  296        +52.58%        -13.08%         -1.06%         -1.42%         -5.37%         -6.88%         -7.57%
+    80  296        +54.38%        -13.17%         -0.88%         -1.15%         -5.02%         -6.67%         -6.74%
+    96  290        +55.84%        -13.07%         -0.80%         -0.89%         -4.93%         -5.74%         -6.52%
+   112  290        +56.82%        -13.10%         -0.71%         -0.91%         -4.40%         -5.32%         -5.47%
+   128  290        +57.76%        -13.69%         -0.92%         -0.85%         -4.34%         -5.20%         -5.29%
+   160  147        +59.94%        -13.91%         -1.17%         -0.81%         -4.72%         -6.31%         -6.65%
+   192  140        +62.24%        -14.48%         -1.01%         -0.59%         -4.67%         -5.75%         -5.48%
+   224  135        +63.69%        -13.78%         +0.03%         -0.41%         -3.81%         -4.49%         -3.88%
+native   19        +28.36%        -20.48%         -3.82%         -3.55%         -4.78%         -5.60%         -6.51%
+
+wrote /home/lilith/tmp/tables/tables_v2.json

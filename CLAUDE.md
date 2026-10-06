@@ -48,7 +48,13 @@ Pure Rust DEFLATE/zlib/gzip compression and decompression.
   build (`--no-default-features --features std`): 1 dep (enough), cold build
   0.28s debug / 0.30s release vs 3.2s/3.4s full-default, 105 lib tests.
   BREAKING for default-features=false users: add `compress`/`simd` as needed.
-
+- [x] Phase 11 (unreleased): `CompressionLevel::png(effort)` (src/compress/png_mode.rs,
+  src/compress/png_ultra.rs). png(1) = ultra-fast (literals + zero runs, one table per
+  stream, counted from the whole input up to 64 KiB, sampled above; pair LUT from
+  512 KiB); png(2) runs-only;
+  png(3) hash min match 8; png(4..12) min match 5, chains; png(13..) = new(13..).
+  Skip-ahead step capped at 256. Validated on 146-150 held-out K300 reps at 3 sizes:
+  `benchmarks/png_mode_2026-10-06.md`, tooling in `benchmarks/harnesses/png-mode/validation/`.
 
 ## Performance (0.4.0)
 
@@ -234,6 +240,40 @@ native AVX-512+VNNI+VPCLMULQDQ), no `target-cpu=native`. Full data:
   as a standalone checksum library.
 - **Decision (user, 2026-07-14):** keep `avx512` in default. Opt-in removes
   nothing measurable and costs 4.3× standalone CRC. Don't revisit without new data.
+
+### PNG mode design notes (2026-10-06, `benchmarks/png_mode_2026-10-06.md`)
+
+- Aggregate Pareto picks hid per-image inversions of up to 10% (runs-only → hash on
+  flat-colour clipart). Always check per-image monotonicity across effort ladders,
+  not just corpus totals; `png-mode` harness + `ladder.py` do this.
+- A greedy bit-cost model (reject matches dearer than their literals) did NOT fix it,
+  cost 15-25% speed, and its order-0 first-block estimate hurt small inputs. Removed.
+- Demoting hashed matches to literals is not a proxy for the runs-only parse: hashed
+  matches swallow run starts. Only a real runs-only parse catches it (the guard).
+- Changing min match between rungs causes inversions; keep knobs monotone.
+- Center crops at 256x256 are denser than 1 MP crops; deep chains were 3-4x slower per
+  byte there until backward extension went forward-first + 8-byte compares.
+- fdeflate main (a713d02) L3 is larger than its L2 on 13/35 1 MP filtered images (up to 2.14%).
+- Tuning-set ladders don't survive held-out data unchanged: the 150-image held-out check
+  (K300 reps, validate+test splits, minus tuning images) found a skip-ahead runaway bug
+  (uncapped step jumped whole compressible regions; fixed with a 256-byte cap), showed the
+  deep chain levels dominated by new(13..), and that ultra's sampled table loses to
+  runs-only on 64x64 inputs. Validate ladders with paired per-image stats (mean +- CI,
+  inversion counts) on held-out data before shipping.
+- Ultra tables (2026-10-06, `tables/` in the png-mode harness): fdeflate's fixed table is
+  near the best single table for filtered PNG (a trained one: -0.9%, per channel count:
+  -1.1%, modeled on held-out streams under 64 KiB). Per-image counted tables are -12.9%;
+  codebooks of 4-16 tables picked from a 2 KiB prefix get only -5 to -7%. Counted tables
+  need priors only where the count can miss a symbol (literal 0, EOB, lengths): giving
+  every symbol a code inflates the header (+2.6-4.4% at 64x64).
+- Ultra stored fallback must compare end positions in bits, including the extra header
+  byte write_uncompressed adds when pending bits spill over: the old byte check let a
+  block land 1-2 bytes past zlib_compress_bound (tight below 5000 bytes).
+- Without the runs-only guard, even long-match-only (12-24+ byte) hash levels make
+  34-48/146 images larger than runs-only (up to 12%): any offset code beyond distance 1
+  lengthens the run codes. The guard is required for every hash level.
+- Min match 8 -> 5 is a real strategy boundary (27-38 images larger, up to 6.5%); keep it a
+  single switch with a monotonicity_fallback, don't step through 7 and 6.
 
 ### Strategy state must survive early returns (2026-10-06)
 

@@ -1,0 +1,19 @@
+[package]
+name = "png-mode-bench"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Standalone: not part of the zenflate package or any workspace.
+[workspace]
+
+[dependencies]
+zenflate = { path = "../../.." }
+# fdeflate main (unreleased 0.4 compressor), the revision measured in
+# benchmarks/png_mode_2026-10-06.md.
+fdeflate = { git = "https://github.com/image-rs/fdeflate", rev = "a713d02c560526c82e2b97519ed6720bdbc8a47a" }
+png = "0.18.1"
+zlib-rs = "0.6.6"
+
+[profile.release]
+debug = true
