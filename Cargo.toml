@@ -147,3 +147,7 @@ required-features = ["compress"]
 [[bench]]
 name = "checksum_tiers"
 harness = false
+
+[[example]]
+name = "stop_latency"
+required-features = ["compress"]

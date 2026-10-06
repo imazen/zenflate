@@ -1,0 +1,14 @@
+# Stop poll latency, zenflate main a1063124ac81 + examples/stop_latency.rs, host i265 (Core Ultra 7 265K), 2026-10-06
+# cmd: cargo run --release --example stop_latency -- 16
+16 MiB input; worst gap between polls (ms), polls, total ms
+e1    worst     0.70  polls    1025  total      43.2
+e5    worst     0.67  polls    1025  total      50.1
+e10   worst     0.65  polls    2047  total      96.2
+e15   worst     0.81  polls    2047  total     115.9
+e20   worst     0.69  polls    2047  total     126.2
+e24   worst     1.04  polls    2727  total     687.9
+e30   worst     2.02  polls    2727  total    2361.3
+e31   worst    22.74  polls   38070  total   22364.3
+l1    worst     0.84  polls     256  total      41.7
+l6    worst     0.66  polls    2047  total     116.7
+l12   worst     1.12  polls    2727  total     869.2
