@@ -14,6 +14,9 @@ use crate::error::DecompressionError;
 
 pub(crate) const PRECODE_TABLEBITS: u32 = 7;
 const PRECODE_ENOUGH: usize = 128;
+// 12 bits (fdeflate's choice) measured no faster with double literals on
+// zenpng's 106 PNG inputs (median 1.045 vs 1.036 of fdeflate's time) and
+// slower on small images, where the bigger table costs more to build.
 pub(crate) const LITLEN_TABLEBITS: u32 = 11;
 const LITLEN_ENOUGH: usize = 2342;
 pub(crate) const OFFSET_TABLEBITS: u32 = 8;
@@ -24,6 +27,11 @@ pub(crate) const HUFFDEC_LITERAL: u32 = 0x8000_0000;
 pub(crate) const HUFFDEC_EXCEPTIONAL: u32 = 0x0000_8000;
 pub(crate) const HUFFDEC_SUBTABLE_POINTER: u32 = 0x0000_4000;
 pub(crate) const HUFFDEC_END_OF_BLOCK: u32 = 0x0000_2000;
+/// Litlen entry holding two literals: the first in bits 16-23, the second in
+/// bits 8-15, the combined codeword length in bits 0-7. Always set together
+/// with `HUFFDEC_LITERAL`; bits 8-15 then overlap the exceptional flags, so
+/// test `HUFFDEC_LITERAL` before any of them.
+pub(crate) const HUFFDEC_DOUBLE_LITERAL: u32 = 0x4000_0000;
 
 // Bitstream constants (64-bit)
 pub(crate) const CONSUMABLE_NBITS: u32 = 56; // MAX_BITSLEFT(63) - 7
@@ -31,8 +39,10 @@ pub(crate) const CONSUMABLE_NBITS: u32 = 56; // MAX_BITSLEFT(63) - 7
 // Fastloop safety margins — how many bytes the fastloop can read/write per iteration.
 // Max bytes that can be written past the nominal match end in one fastloop iteration.
 // Word copies (8 bytes) can overrun by at most 7 bytes; RLE uses fill() (exact length).
+// Up to two litlen entries (each writes two bytes, one of which may be scratch
+// for a single literal) precede a match in one iteration.
 pub(crate) const FASTLOOP_MAX_BYTES_WRITTEN: usize =
-    2 + crate::constants::DEFLATE_MAX_MATCH_LEN as usize + 7;
+    4 + crate::constants::DEFLATE_MAX_MATCH_LEN as usize + 7;
 // Input: worst-case bytes consumed per iteration + 8-byte read-ahead for branchless refill
 pub(crate) const FASTLOOP_MAX_BYTES_READ: usize = 32;
 
@@ -217,6 +227,8 @@ pub struct Decompressor {
     pub(crate) sorted_syms: [u16; DEFLATE_MAX_NUM_SYMS],
     pub(crate) static_codes_loaded: bool,
     pub(crate) litlen_tablebits: u32,
+    /// The litlen table holds double-literal entries (see `add_double_literals`).
+    pub(crate) litlen_doubles: bool,
     skip_checksum: bool,
     checksum_matched: Option<bool>,
     max_output_size: Option<usize>,
@@ -251,6 +263,7 @@ impl Decompressor {
             sorted_syms: [0; DEFLATE_MAX_NUM_SYMS],
             static_codes_loaded: false,
             litlen_tablebits: 0,
+            litlen_doubles: false,
             skip_checksum: false,
             checksum_matched: None,
             max_output_size: None,
@@ -568,10 +581,83 @@ pub(crate) fn table_lookup(table: &[u32], idx: u64) -> u32 {
     table[idx as usize]
 }
 
-/// Store a literal byte to the output buffer.
+/// Store a litlen entry's literal(s) and return how many: one store when the
+/// table has no double entries (no dependency of `pos` on the entry), else
+/// [`store_lits`]. Fastloop only.
 #[inline(always)]
-fn store_lit(output: &mut [u8], pos: usize, byte: u8) {
-    output[pos] = byte;
+pub(crate) fn put_lits(output: &mut [u8], pos: usize, entry: u32, doubles: bool) -> usize {
+    if doubles {
+        store_lits(output, pos, entry)
+    } else {
+        output[pos] = (entry >> 16) as u8;
+        1
+    }
+}
+
+/// Store the one or two literals of a litlen entry and return how many.
+///
+/// Always writes two bytes (the second is scratch for a single literal), so
+/// `pos + 1` must be in bounds: fastloop only.
+#[inline(always)]
+pub(crate) fn store_lits(output: &mut [u8], pos: usize, entry: u32) -> usize {
+    output[pos] = (entry >> 16) as u8;
+    output[pos + 1] = (entry >> 8) as u8;
+    1 + ((entry >> 30) & 1) as usize
+}
+
+/// Build double-literal entries only when at least this much compressed input
+/// is left: the pass touches every main-table entry, which costs more than it
+/// saves on small streams (64x64 PNGs decoded 10% slower one-shot on
+/// Neoverse-N1 with an unconditional pass; 256x256 and up were 3-25% faster).
+///
+/// Unit tests and fuzzing use 0 so double entries are exercised on every
+/// stream; integration tests run the real threshold.
+#[cfg(not(any(test, fuzzing)))]
+pub(crate) const DOUBLE_LITERAL_MIN_INPUT: usize = 16 * 1024;
+#[cfg(any(test, fuzzing))]
+pub(crate) const DOUBLE_LITERAL_MIN_INPUT: usize = 0;
+
+/// Whether a table built with `remaining` compressed bytes left should get
+/// double-literal entries.
+#[inline]
+#[allow(clippy::absurd_extreme_comparisons)] // the threshold is 0 under test/fuzzing
+pub(crate) fn wants_double_literals(remaining: usize) -> bool {
+    remaining >= DOUBLE_LITERAL_MIN_INPUT
+}
+
+/// Turn primary litlen entries whose codeword is followed, within
+/// `table_bits`, by a second literal's whole codeword into double-literal
+/// entries (see [`HUFFDEC_DOUBLE_LITERAL`]).
+///
+/// Filtered PNG rows are mostly literals, so this halves the table lookups
+/// there (the trick image-rs's fdeflate uses). Entries are visited from the
+/// top down: `i >> len1 < i` for every `i > 0`, so the entry read for the
+/// second literal is still its single-literal form.
+pub(crate) fn add_double_literals(table: &mut [u32], table_bits: u32) {
+    let size = 1usize << table_bits;
+    for i in (0..size).rev() {
+        let e1 = table[i];
+        if e1 & HUFFDEC_LITERAL == 0 {
+            continue;
+        }
+        let len1 = e1 & 0xFF;
+        if len1 >= table_bits {
+            continue;
+        }
+        let e2 = table[i >> len1];
+        if e2 & (HUFFDEC_LITERAL | HUFFDEC_DOUBLE_LITERAL) != HUFFDEC_LITERAL {
+            continue;
+        }
+        let len2 = e2 & 0xFF;
+        if len1 + len2 > table_bits {
+            continue;
+        }
+        table[i] = HUFFDEC_LITERAL
+            | HUFFDEC_DOUBLE_LITERAL
+            | (e1 & 0x00FF_0000)
+            | ((e2 >> 8) & 0xFF00)
+            | (len1 + len2);
+    }
 }
 
 /// Read a single byte from the output buffer (for match copy source).
@@ -978,6 +1064,10 @@ impl Decompressor {
                 ) {
                     return Err(bad);
                 }
+                self.litlen_doubles = wants_double_literals(input.len() - in_pos);
+                if self.litlen_doubles {
+                    add_double_literals(&mut self.litlen_decode_table, self.litlen_tablebits);
+                }
             } else if block_type == DEFLATE_BLOCKTYPE_UNCOMPRESSED {
                 // --- Uncompressed block ---
                 bitsleft -= 3;
@@ -1068,6 +1158,10 @@ impl Decompressor {
                     ) {
                         return Err(bad);
                     }
+                    self.litlen_doubles = wants_double_literals(input.len() - in_pos);
+                    if self.litlen_doubles {
+                        add_double_literals(&mut self.litlen_decode_table, self.litlen_tablebits);
+                    }
                 }
             } else {
                 return Err(bad);
@@ -1075,6 +1169,7 @@ impl Decompressor {
 
             // --- Fastloop + generic decode loop (literals and matches) ---
             let litlen_tablemask = bitmask(self.litlen_tablebits);
+            let doubles = self.litlen_doubles;
             let in_fastloop_end = input.len().saturating_sub(FASTLOOP_MAX_BYTES_READ);
             let out_fastloop_end = out_limit.saturating_sub(FASTLOOP_MAX_BYTES_WRITTEN);
 
@@ -1094,32 +1189,29 @@ impl Decompressor {
                     bitbuf >>= (entry & 0xFF) as u64;
                     bitsleft -= entry & 0xFF;
 
-                    // --- Fast literal path: decode up to 3 literals ---
+                    // --- Fast literal path: up to 3 entries of 1-2 literals ---
                     if entry & HUFFDEC_LITERAL != 0 {
-                        // 1st literal (the primary item)
-                        let lit = (entry >> 16) as u8;
+                        // 1st entry (the primary item)
+                        let lits = entry;
                         entry = table_lookup(&self.litlen_decode_table, bitbuf & litlen_tablemask);
                         saved_bitbuf = bitbuf;
                         bitbuf >>= (entry & 0xFF) as u64;
                         bitsleft -= entry & 0xFF;
-                        store_lit(output, out_pos, lit);
-                        out_pos += 1;
+                        out_pos += put_lits(output, out_pos, lits, doubles);
 
                         if entry & HUFFDEC_LITERAL != 0 {
-                            // 2nd literal (extra)
-                            let lit = (entry >> 16) as u8;
+                            // 2nd entry
+                            let lits = entry;
                             entry =
                                 table_lookup(&self.litlen_decode_table, bitbuf & litlen_tablemask);
                             saved_bitbuf = bitbuf;
                             bitbuf >>= (entry & 0xFF) as u64;
                             bitsleft -= entry & 0xFF;
-                            store_lit(output, out_pos, lit);
-                            out_pos += 1;
+                            out_pos += put_lits(output, out_pos, lits, doubles);
 
                             if entry & HUFFDEC_LITERAL != 0 {
-                                // 3rd literal (replaces primary for next iter)
-                                store_lit(output, out_pos, (entry >> 16) as u8);
-                                out_pos += 1;
+                                // 3rd entry (replaces primary for next iter)
+                                out_pos += put_lits(output, out_pos, entry, doubles);
                                 entry = table_lookup(
                                     &self.litlen_decode_table,
                                     bitbuf & litlen_tablemask,
@@ -1150,8 +1242,8 @@ impl Decompressor {
                         bitsleft -= entry & 0xFF;
 
                         if entry & HUFFDEC_LITERAL != 0 {
-                            // Literal from subtable
-                            store_lit(output, out_pos, (entry >> 16) as u8);
+                            // Literal from subtable (never a double)
+                            output[out_pos] = (entry >> 16) as u8;
                             out_pos += 1;
                             entry =
                                 table_lookup(&self.litlen_decode_table, bitbuf & litlen_tablemask);
@@ -1251,8 +1343,11 @@ impl Decompressor {
                     bitbuf >>= (entry & 0xFF) as u64;
                     bitsleft -= entry & 0xFF;
 
-                    // Resolve subtable if needed
-                    if entry & HUFFDEC_SUBTABLE_POINTER != 0 {
+                    // Resolve subtable if needed (a double literal's second
+                    // byte overlaps the flag bits, so rule out literals first)
+                    if entry & (HUFFDEC_LITERAL | HUFFDEC_SUBTABLE_POINTER)
+                        == HUFFDEC_SUBTABLE_POINTER
+                    {
                         entry = table_lookup(
                             &self.litlen_decode_table,
                             (entry >> 16) as u64 + extract_varbits(bitbuf, (entry >> 8) & 0x3F),
@@ -1264,13 +1359,20 @@ impl Decompressor {
 
                     let value = entry >> 16;
 
-                    // Literal?
+                    // Literal (one, or two for a double entry)?
                     if entry & HUFFDEC_LITERAL != 0 {
                         if out_pos >= out_limit {
                             return Err(no_space);
                         }
                         output[out_pos] = value as u8;
                         out_pos += 1;
+                        if entry & HUFFDEC_DOUBLE_LITERAL != 0 {
+                            if out_pos >= out_limit {
+                                return Err(no_space);
+                            }
+                            output[out_pos] = (entry >> 8) as u8;
+                            out_pos += 1;
+                        }
                         continue;
                     }
 

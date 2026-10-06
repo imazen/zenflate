@@ -21,11 +21,12 @@ use super::{
     DEFLATE_BLOCKTYPE_UNCOMPRESSED, DEFLATE_MAX_PRE_CODEWORD_LEN, DEFLATE_NUM_PRECODE_SYMS,
     DEFLATE_PRECODE_LENS_PERMUTATION, Decompressor, FASTLOOP_MAX_BYTES_READ,
     FASTLOOP_MAX_BYTES_WRITTEN, GZIP_CM_DEFLATE, GZIP_FCOMMENT, GZIP_FEXTRA, GZIP_FHCRC,
-    GZIP_FNAME, GZIP_FRESERVED, GZIP_ID1, GZIP_ID2, HUFFDEC_END_OF_BLOCK, HUFFDEC_EXCEPTIONAL,
-    HUFFDEC_LITERAL, HUFFDEC_SUBTABLE_POINTER, LITLEN_DECODE_RESULTS, LITLEN_TABLEBITS,
-    OFFSET_DECODE_RESULTS, OFFSET_TABLEBITS, PRECODE_DECODE_RESULTS, PRECODE_TABLEBITS,
-    ZLIB_CINFO_32K_WINDOW, ZLIB_CM_DEFLATE, bitmask, build_decode_table, extract_varbits,
-    extract_varbits8, refill_bits, refill_bits_fast, table_lookup,
+    GZIP_FNAME, GZIP_FRESERVED, GZIP_ID1, GZIP_ID2, HUFFDEC_DOUBLE_LITERAL, HUFFDEC_END_OF_BLOCK,
+    HUFFDEC_EXCEPTIONAL, HUFFDEC_LITERAL, HUFFDEC_SUBTABLE_POINTER, LITLEN_DECODE_RESULTS,
+    LITLEN_TABLEBITS, OFFSET_DECODE_RESULTS, OFFSET_TABLEBITS, PRECODE_DECODE_RESULTS,
+    PRECODE_TABLEBITS, ZLIB_CINFO_32K_WINDOW, ZLIB_CM_DEFLATE, add_double_literals, bitmask,
+    build_decode_table, extract_varbits, extract_varbits8, put_lits, refill_bits, refill_bits_fast,
+    table_lookup, wants_double_literals,
 };
 
 // ---------------------------------------------------------------------------
@@ -133,7 +134,9 @@ struct PendingMatch {
 // ---------------------------------------------------------------------------
 
 /// Size of the internal input staging buffer.
-const INPUT_BUF_SIZE: usize = 512;
+// 512 bytes made the fastloop exit and refill every ~480 compressed bytes;
+// 32 KiB measured 3% faster streaming on zenpng's 106 PNG inputs (4 KiB: 2.9%).
+const INPUT_BUF_SIZE: usize = 32 * 1024;
 
 /// Minimum lookback required for match references (32KB window).
 const LOOKBACK_SIZE: usize = 32 * 1024;
@@ -224,6 +227,13 @@ pub struct StreamDecompressor<S> {
     is_final_block: bool,
     pending_match: Option<PendingMatch>,
     pending_literal: Option<u8>,
+    /// Second literal of a double-literal entry that did not fit either;
+    /// written after `pending_literal`.
+    pending_literal2: Option<u8>,
+    /// The current block's litlen table has no double-literal entries yet;
+    /// the compressed-data loop adds them once enough input is staged
+    /// (see `DOUBLE_LITERAL_MIN_INPUT`).
+    doubles_pending: bool,
 
     // Wrapper format
     wrapper: WrapperFormat,
@@ -388,6 +398,8 @@ impl<S: InputSource> StreamDecompressor<S> {
             is_final_block: false,
             pending_match: None,
             pending_literal: None,
+            pending_literal2: None,
+            doubles_pending: false,
             wrapper,
             checksum: checksum_init,
             total_output: 0,
@@ -537,6 +549,8 @@ impl<S: InputSource> StreamDecompressor<S> {
         self.footer_checksum = None;
         self.pending_match = None;
         self.pending_literal = None;
+        self.pending_literal2 = None;
+        self.doubles_pending = false;
         self.checksum = checksum_init;
         self.total_output = 0;
         self.checksum_watermark = LOOKBACK_SIZE;
@@ -966,6 +980,9 @@ impl<S: InputSource> StreamDecompressor<S> {
                 ) {
                     return Err(bad.into());
                 }
+                // Double literals are added once enough input is staged.
+                self.doubles_pending = true;
+                self.inner.litlen_doubles = false;
             }
 
             self.state = StreamState::CompressedData;
@@ -1132,6 +1149,9 @@ impl<S: InputSource> StreamDecompressor<S> {
         ) {
             return Err(bad.into());
         }
+        // Double literals are added once enough input is staged.
+        self.doubles_pending = true;
+        self.inner.litlen_doubles = false;
 
         self.state = StreamState::CompressedData;
         Ok(())
@@ -1168,8 +1188,8 @@ impl<S: InputSource> StreamDecompressor<S> {
             }
         }
 
-        // Handle pending literal from previous fill() (buffer was full)
-        if let Some(lit) = self.pending_literal.take() {
+        // Handle pending literals from previous fill() (buffer was full)
+        while let Some(lit) = self.pending_literal.take() {
             if self.write_pos >= self.buffer.len() {
                 self.pending_literal = Some(lit);
                 return Ok(());
@@ -1177,6 +1197,7 @@ impl<S: InputSource> StreamDecompressor<S> {
             self.buffer[self.write_pos] = lit;
             self.write_pos += 1;
             self.lookback_valid = (self.lookback_valid + 1).min(LOOKBACK_SIZE);
+            self.pending_literal = self.pending_literal2.take();
             if self.peek_len() >= self.capacity {
                 return Ok(());
             }
@@ -1193,6 +1214,15 @@ impl<S: InputSource> StreamDecompressor<S> {
         'refill: loop {
             // Refill staging buffer from source
             self.fill_input().map_err(StreamError::Source)?;
+            if self.doubles_pending && wants_double_literals(self.input_len - self.input_pos) {
+                // Same decodes, fewer lookups: safe to switch mid-block.
+                add_double_literals(
+                    &mut self.inner.litlen_decode_table,
+                    self.inner.litlen_tablebits,
+                );
+                self.doubles_pending = false;
+                self.inner.litlen_doubles = true;
+            }
 
             let input = &self.input_buf[..self.input_len];
             let in_fastloop_end = input.len().saturating_sub(FASTLOOP_MAX_BYTES_READ);
@@ -1207,10 +1237,12 @@ impl<S: InputSource> StreamDecompressor<S> {
                 let mut bitsleft = self.bitsleft;
                 let mut in_pos = self.input_pos;
                 let mut out_pos = self.write_pos;
-                // Local mirror of `self.lookback_valid` updated as we emit
-                // literals/matches in the fastloop. Saturates at LOOKBACK_SIZE
-                // so it never overflows the legal back-ref range.
-                let mut lookback_valid = self.lookback_valid;
+                // Every byte from `real_start` to `out_pos` is real output (the
+                // buffer holds zero-fill before the stream's first byte), so a
+                // back-reference is valid iff `offset <= out_pos - real_start`.
+                // Fixed for the whole fastloop: no per-symbol bookkeeping.
+                let real_start = out_pos - self.lookback_valid;
+                let doubles = self.inner.litlen_doubles;
 
                 refill_bits_fast(&mut bitbuf, &mut bitsleft, input, &mut in_pos);
                 let mut entry =
@@ -1231,7 +1263,7 @@ impl<S: InputSource> StreamDecompressor<S> {
                         bitsleft -= entry & 0xFF;
 
                         if entry & HUFFDEC_LITERAL != 0 {
-                            let lit = (entry >> 16) as u8;
+                            let lits = entry;
                             entry = table_lookup(
                                 &self.inner.litlen_decode_table,
                                 bitbuf & litlen_tablemask,
@@ -1239,12 +1271,11 @@ impl<S: InputSource> StreamDecompressor<S> {
                             saved_bitbuf = bitbuf;
                             bitbuf >>= (entry & 0xFF) as u64;
                             bitsleft -= entry & 0xFF;
-                            self.buffer[out_pos] = lit;
-                            out_pos += 1;
-                            lookback_valid = (lookback_valid + 1).min(LOOKBACK_SIZE);
+                            let n = put_lits(&mut self.buffer, out_pos, lits, doubles);
+                            out_pos += n;
 
                             if entry & HUFFDEC_LITERAL != 0 {
-                                let lit = (entry >> 16) as u8;
+                                let lits = entry;
                                 entry = table_lookup(
                                     &self.inner.litlen_decode_table,
                                     bitbuf & litlen_tablemask,
@@ -1252,14 +1283,12 @@ impl<S: InputSource> StreamDecompressor<S> {
                                 saved_bitbuf = bitbuf;
                                 bitbuf >>= (entry & 0xFF) as u64;
                                 bitsleft -= entry & 0xFF;
-                                self.buffer[out_pos] = lit;
-                                out_pos += 1;
-                                lookback_valid = (lookback_valid + 1).min(LOOKBACK_SIZE);
+                                let n = put_lits(&mut self.buffer, out_pos, lits, doubles);
+                                out_pos += n;
 
                                 if entry & HUFFDEC_LITERAL != 0 {
-                                    self.buffer[out_pos] = (entry >> 16) as u8;
-                                    out_pos += 1;
-                                    lookback_valid = (lookback_valid + 1).min(LOOKBACK_SIZE);
+                                    let n = put_lits(&mut self.buffer, out_pos, entry, doubles);
+                                    out_pos += n;
                                     entry = table_lookup(
                                         &self.inner.litlen_decode_table,
                                         bitbuf & litlen_tablemask,
@@ -1293,7 +1322,6 @@ impl<S: InputSource> StreamDecompressor<S> {
                             if entry & HUFFDEC_LITERAL != 0 {
                                 self.buffer[out_pos] = (entry >> 16) as u8;
                                 out_pos += 1;
-                                lookback_valid = (lookback_valid + 1).min(LOOKBACK_SIZE);
                                 entry = table_lookup(
                                     &self.inner.litlen_decode_table,
                                     bitbuf & litlen_tablemask,
@@ -1350,7 +1378,7 @@ impl<S: InputSource> StreamDecompressor<S> {
                         // start the output buffer holds `LOOKBACK_SIZE` bytes
                         // of zero-fill that are NOT real lookback. Track the
                         // count of real bytes immediately behind `out_pos`.
-                        if offset == 0 || offset > lookback_valid {
+                        if offset == 0 || offset > out_pos - real_start {
                             break 'fastloop Exit::BadData;
                         }
 
@@ -1372,7 +1400,6 @@ impl<S: InputSource> StreamDecompressor<S> {
                             offset,
                         );
                         out_pos += length;
-                        lookback_valid = (lookback_valid + length).min(LOOKBACK_SIZE);
 
                         if in_pos >= in_fastloop_end || out_pos >= out_fastloop_end {
                             break 'fastloop Exit::Bounds;
@@ -1385,7 +1412,7 @@ impl<S: InputSource> StreamDecompressor<S> {
                 self.bitsleft = bitsleft;
                 self.input_pos = in_pos;
                 self.write_pos = out_pos;
-                self.lookback_valid = lookback_valid;
+                self.lookback_valid = (out_pos - real_start).min(LOOKBACK_SIZE);
 
                 match exit {
                     Exit::EndOfBlock => {
@@ -1442,7 +1469,10 @@ impl<S: InputSource> StreamDecompressor<S> {
                 self.bitbuf >>= (entry & 0xFF) as u64;
                 self.bitsleft -= entry & 0xFF;
 
-                if entry & HUFFDEC_SUBTABLE_POINTER != 0 {
+                // A double literal's second byte overlaps the flag bits, so
+                // rule out literals before testing for a subtable pointer.
+                if entry & (HUFFDEC_LITERAL | HUFFDEC_SUBTABLE_POINTER) == HUFFDEC_SUBTABLE_POINTER
+                {
                     entry = table_lookup(
                         &self.inner.litlen_decode_table,
                         (entry >> 16) as u64 + extract_varbits(self.bitbuf, (entry >> 8) & 0x3F),
@@ -1455,14 +1485,26 @@ impl<S: InputSource> StreamDecompressor<S> {
                 let value = entry >> 16;
 
                 if entry & HUFFDEC_LITERAL != 0 {
+                    let second =
+                        (entry & HUFFDEC_DOUBLE_LITERAL != 0).then_some((entry >> 8) as u8);
                     if self.write_pos >= self.buffer.len() {
-                        // Output buffer full — save literal and return to let fill() compact.
+                        // Output buffer full — save literals and return to let fill() compact.
                         self.pending_literal = Some(value as u8);
+                        self.pending_literal2 = second;
                         return Ok(());
                     }
                     self.buffer[self.write_pos] = value as u8;
                     self.write_pos += 1;
                     self.lookback_valid = (self.lookback_valid + 1).min(LOOKBACK_SIZE);
+                    if let Some(lit) = second {
+                        if self.write_pos >= self.buffer.len() {
+                            self.pending_literal = Some(lit);
+                            return Ok(());
+                        }
+                        self.buffer[self.write_pos] = lit;
+                        self.write_pos += 1;
+                        self.lookback_valid = (self.lookback_valid + 1).min(LOOKBACK_SIZE);
+                    }
                     if self.peek_len() >= self.capacity {
                         return Ok(());
                     }

@@ -152,3 +152,8 @@ harness = false
 [[example]]
 name = "stop_latency"
 required-features = ["compress"]
+
+[lints.rust]
+# cargo-fuzz builds with `--cfg fuzzing` (src/decompress/mod.rs lowers a
+# double-literal threshold so fuzzing exercises that path on small inputs).
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(fuzzing)"] }
