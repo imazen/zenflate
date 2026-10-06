@@ -399,6 +399,19 @@ const CHAIN_STOP_STRIDE: usize = 1024;
 /// that individually stay under `CHAIN_STOP_STRIDE`.
 const CHAIN_WORK_BUDGET: usize = 32768;
 
+/// Full-optimal's stop policy. `Cancelled` aborts the call; any other reason
+/// (a deadline) asks for the best result found so far, so callers finish the
+/// current step cheaply and return a valid stream. `Ok(None)` means "finish
+/// now".
+#[inline]
+fn soft<T>(r: Result<T, StopReason>) -> Result<Option<T>, StopReason> {
+    match r {
+        Ok(v) => Ok(Some(v)),
+        Err(r) if r.is_cancelled() => Err(r),
+        Err(_) => Ok(None),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn find_longest_match(
     lmc: &mut MatchCache,
@@ -506,13 +519,9 @@ fn find_longest_match_loop(
             dist += if p < pp { pp - p } else { WINDOW_SIZE - p + pp };
             chain_counter -= 1;
         }
-        if dist < WINDOW_SIZE && chain_counter > 0 {
-            match stop.check() {
-                Ok(()) => {}
-                Err(r) if r.is_cancelled() => return Err(r),
-                // Keep the best match found when the time budget expires.
-                Err(_) => break,
-            }
+        // On a deadline, keep the best match found so far.
+        if dist < WINDOW_SIZE && chain_counter > 0 && soft(stop.check())?.is_none() {
+            break;
         }
     }
     debug_assert!(
@@ -631,36 +640,22 @@ impl Lz77Store {
 
         while i < inend {
             if i >= next_stop_check {
-                match stop.check() {
-                    Ok(()) => {}
-                    Err(r) if r.is_cancelled() => return Err(r),
-                    Err(_) => {
-                        literal_tail = true;
-                        break;
-                    }
+                if soft(stop.check())?.is_none() {
+                    literal_tail = true;
+                    break;
                 }
                 next_stop_check = i + super::STOP_CHECK_INTERVAL;
             }
             h.update(arr, i);
+            // A deadline inside the chain search returns the best match so far.
             let (leng, dist, steps) =
-                match find_longest_match_no_cache(&h, arr, i, inend, MAX_MATCH, stop_opt) {
-                    Ok(v) => v,
-                    Err(r) if r.is_cancelled() => return Err(r),
-                    Err(_) => {
-                        literal_tail = true;
-                        break;
-                    }
-                };
+                find_longest_match_no_cache(&h, arr, i, inend, MAX_MATCH, stop_opt)?;
             chain_work += steps;
             if chain_work >= CHAIN_WORK_BUDGET {
                 chain_work = 0;
-                match stop.check() {
-                    Ok(()) => {}
-                    Err(r) if r.is_cancelled() => return Err(r),
-                    Err(_) => {
-                        literal_tail = true;
-                        break;
-                    }
+                if soft(stop.check())?.is_none() {
+                    literal_tail = true;
+                    break;
                 }
             }
             let lengthscore = get_length_score(i32::from(leng), i32::from(dist));
@@ -1426,11 +1421,9 @@ fn blocksplit_lz77(
     let stop = stop.may_stop().then_some(stop);
 
     // Precompute symbol arrays and chunked prefix histograms for O(CHUNK) range queries.
-    let histograms = match SplitHistograms::build(lz77, stop) {
-        Ok(h) => h,
-        Err(r) if r.is_cancelled() => return Err(r),
-        // Non-cancellation stop: no splits — caller encodes one block.
-        Err(_) => return Ok(()),
+    // On a deadline: no splits (one block is a valid encoding).
+    let Some(histograms) = soft(SplitHistograms::build(lz77, stop))? else {
+        return Ok(());
     };
     let mut freqs = DeflateFreqs::default();
 
@@ -1441,13 +1434,11 @@ fn blocksplit_lz77(
     let mut scratch = HuffmanScratch::new();
 
     while maxblocks != 0 && numblocks < u32::from(maxblocks) {
-        match stop.check() {
-            Ok(()) => {}
-            Err(r) if r.is_cancelled() => return Err(r),
-            // Keep the splits found so far (valid stream, fewer blocks).
-            Err(_) => return Ok(()),
+        // On a deadline, keep the splits found so far.
+        if soft(stop.check())?.is_none() {
+            return Ok(());
         }
-        let (llpos, splitcost) = match find_minimum(
+        let Some((llpos, splitcost)) = soft(find_minimum(
             |i| {
                 histograms.block_cost(lstart, i, &mut freqs, &mut scratch)
                     + histograms.block_cost(i, lend, &mut freqs, &mut scratch)
@@ -1455,12 +1446,9 @@ fn blocksplit_lz77(
             lstart + 1,
             lend,
             stop,
-        ) {
-            Ok(v) => v,
-            Err(r) if r.is_cancelled() => return Err(r),
-            // Non-cancellation stop: keep the splits found so far (degraded
-            // compression, still a valid stream).
-            Err(_) => return Ok(()),
+        ))?
+        else {
+            return Ok(());
         };
         let origcost = histograms.block_cost(lstart, lend, &mut freqs, &mut scratch);
 
@@ -1511,13 +1499,8 @@ fn blocksplit(
     store.greedy(in_data, instart, inend, stop)?;
 
     let mut lz77splitpoints = Vec::with_capacity(maxblocks as usize);
-    match blocksplit_lz77(&store, maxblocks, &mut lz77splitpoints, stop) {
-        Ok(()) => {}
-        Err(r) if r.is_cancelled() => return Err(r),
-        // Non-cancellation stop: proceed with no split points — a single
-        // unsplit block is a valid, if larger, encoding.
-        Err(_) => {}
-    }
+    // Only cancellation errors; a deadline returns the splits found so far.
+    blocksplit_lz77(&store, maxblocks, &mut lz77splitpoints, stop)?;
 
     let nlz77points = lz77splitpoints.len();
     let mut pos = instart;
@@ -1602,12 +1585,9 @@ fn lz77_optimal(
 
     loop {
         // Check cooperative cancellation
-        match stop.check() {
-            Ok(()) => {}
-            Err(enough::StopReason::Cancelled) => {
-                return Err(CompressionError::Stopped(enough::StopReason::Cancelled));
-            }
-            Err(_) => break, // Timeout: return best-so-far
+        // A deadline returns the best store so far.
+        if soft(stop.check())?.is_none() {
+            break;
         }
 
         // Enhanced: milestone RLE at iteration 29
@@ -1621,7 +1601,7 @@ fn lz77_optimal(
         let skip_hash = current_iteration > 0 && lmc.is_sublen_complete();
         // Run DP forward pass + trace without building an Lz77Store.
         // Frequencies and block cost are computed directly from the path.
-        match get_best_lengths(
+        if soft(get_best_lengths(
             &mut lmc,
             in_data,
             instart,
@@ -1634,19 +1614,11 @@ fn lz77_optimal(
             &mut sublen,
             skip_hash,
             stop,
-        ) {
-            Ok(_) => {}
-            Err(enough::StopReason::Cancelled) => {
-                return Err(CompressionError::Stopped(enough::StopReason::Cancelled));
-            }
-            Err(_) => break, // Timeout mid-iteration: keep best-so-far
-        }
-        match stop.check() {
-            Ok(()) => {}
-            Err(enough::StopReason::Cancelled) => {
-                return Err(CompressionError::Stopped(enough::StopReason::Cancelled));
-            }
-            Err(_) => break, // Timeout in post-pass glue: keep best-so-far
+        ))?
+        .is_none()
+            || soft(stop.check())?.is_none()
+        {
+            break;
         }
         trace(inend - instart, &length_array, &dist_array, &mut path_buf);
         let freqs = compute_frequencies_from_path(in_data, instart, &path_buf);
@@ -1657,12 +1629,8 @@ fn lz77_optimal(
             // Build full store only on improvement (needed for block splitting later)
             outputstore.reset();
             outputstore.store_from_path(in_data, instart, &path_buf);
-            match stop.check() {
-                Ok(()) => {}
-                Err(enough::StopReason::Cancelled) => {
-                    return Err(CompressionError::Stopped(enough::StopReason::Cancelled));
-                }
-                Err(_) => break,
+            if soft(stop.check())?.is_none() {
+                break;
             }
             beststats = stats;
             bestcost = cost;
@@ -1685,8 +1653,8 @@ fn lz77_optimal(
                 ultra_stats.calculate_huffman_costs(&beststats, &mut huff_scratch);
                 let cost_model = CostModel::from_stats(&ultra_stats);
                 let ultra_skip_hash = lmc.is_sublen_complete();
-                // Final pass; a timeout just skips it.
-                match get_best_lengths(
+                // Final pass; a deadline skips it.
+                if soft(get_best_lengths(
                     &mut lmc,
                     in_data,
                     instart,
@@ -1699,31 +1667,17 @@ fn lz77_optimal(
                     &mut sublen,
                     ultra_skip_hash,
                     stop,
-                ) {
-                    Ok(_) => {
-                        match stop.check() {
-                            Ok(()) => {}
-                            Err(enough::StopReason::Cancelled) => {
-                                return Err(CompressionError::Stopped(
-                                    enough::StopReason::Cancelled,
-                                ));
-                            }
-                            Err(_) => break,
-                        }
-                        trace(inend - instart, &length_array, &dist_array, &mut path_buf);
-                        let ultra_freqs =
-                            compute_frequencies_from_path(in_data, instart, &path_buf);
-                        let ultra_cost =
-                            f64::from(block_cost_best(&ultra_freqs, &mut huff_scratch));
-                        if ultra_cost < bestcost {
-                            outputstore.reset();
-                            outputstore.store_from_path(in_data, instart, &path_buf);
-                        }
+                ))?
+                .is_some()
+                    && soft(stop.check())?.is_some()
+                {
+                    trace(inend - instart, &length_array, &dist_array, &mut path_buf);
+                    let ultra_freqs = compute_frequencies_from_path(in_data, instart, &path_buf);
+                    let ultra_cost = f64::from(block_cost_best(&ultra_freqs, &mut huff_scratch));
+                    if ultra_cost < bestcost {
+                        outputstore.reset();
+                        outputstore.store_from_path(in_data, instart, &path_buf);
                     }
-                    Err(enough::StopReason::Cancelled) => {
-                        return Err(CompressionError::Stopped(enough::StopReason::Cancelled));
-                    }
-                    Err(_) => {}
                 }
             }
             break;
@@ -1856,36 +1810,28 @@ pub(crate) fn compress_full_optimal(
     let npoints = byte_splitpoints.len();
     if npoints > 1 {
         let mut splitpoints2 = Vec::with_capacity(npoints);
-        match blocksplit_lz77(&combined_lz77, maxblocks, &mut splitpoints2, stop) {
-            Ok(()) => {}
-            Err(r) if r.is_cancelled() => {
-                return Err(CompressionError::Stopped(r));
-            }
-            // Non-cancellation stop: keep the phase-2 split (valid output).
-            Err(_) => splitpoints2.clear(),
-        }
+        // Only cancellation errors; a deadline returns the splits found so far.
+        blocksplit_lz77(&combined_lz77, maxblocks, &mut splitpoints2, stop)?;
 
         // Compare costs of both splits
         let mut scratch = HuffmanScratch::new();
         let stop_opt: Option<&dyn Stop> = if stop.may_stop() { Some(stop) } else { None };
-        let cost1 =
-            match calculate_split_cost(&combined_lz77, &lz77_splitpoints, &mut scratch, stop_opt) {
-                Ok(c) => c,
-                Err(r) if r.is_cancelled() => {
-                    return Err(CompressionError::Stopped(r));
-                }
-                Err(_) => f64::INFINITY,
-            };
-        let cost2 =
-            match calculate_split_cost(&combined_lz77, &splitpoints2, &mut scratch, stop_opt) {
-                Ok(c) => c,
-                Err(r) if r.is_cancelled() => {
-                    return Err(CompressionError::Stopped(r));
-                }
-                Err(_) => f64::INFINITY,
-            };
-
-        if cost2 < cost1 {
+        // On a deadline the costs come back as None and the phase-2 split stays.
+        let cost1 = soft(calculate_split_cost(
+            &combined_lz77,
+            &lz77_splitpoints,
+            &mut scratch,
+            stop_opt,
+        ))?;
+        let cost2 = soft(calculate_split_cost(
+            &combined_lz77,
+            &splitpoints2,
+            &mut scratch,
+            stop_opt,
+        ))?;
+        if let (Some(cost1), Some(cost2)) = (cost1, cost2)
+            && cost2 < cost1
+        {
             lz77_splitpoints = splitpoints2;
         }
     }

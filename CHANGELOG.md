@@ -16,21 +16,7 @@
 - `gzip_compress_parallel` panicked in every worker thread at efforts 31-200 (full-optimal parsing has no chunk dictionary warm-up). Those efforts now compress on one thread (dd28ead).
 - A compressor whose call was stopped by its `Stop` token (cancellation or deadline) panicked on its next call, at `new(1..=30)` and `libdeflate(1..=12)`: each strategy took its matchfinder or near-optimal state out and only put it back on success (1383ac5). The state is now restored on every path. Too-small output buffers were not affected (overflow is reported after the strategy returns). `tests/conformance.rs` checks that a reused compressor matches a fresh one after stops and short buffers, across every level and entry point.
 - Near-optimal compression (efforts 23-30) discarded its 32 KiB dictionary at every chunk boundary: the binary-tree matchfinder's first window slide came one window late, wrapping its 16-bit positions so the first 32 KiB of each chunk found no matches (14017cc). `gzip_compress_parallel` at these efforts lost about 0.7% of the output per chunk on filtered images (+4.2% at 8 chunks); it is now within 0.3% of single-threaded output.
-
-- **FullOptimal (effort 31-200) could go minutes without honouring cancellation.**
-  `compress_full_optimal` polled `Stop` once per squeeze iteration, but each
-  `get_best_lengths` DP pass is O(block) matchfinding and the block-split search
-  between parse phases was unpolled entirely. The cross-codec cancel-latency
-  harness (enough/dev/cancel-latency) measured a 1.30 s worst gap at 16 MiB.
-  `Stop` is now polled inside the greedy seed parse, the DP forward pass, the
-  hash-chain match search (position-stride plus a cumulative chain-work budget,
-  so adversarial deep-chain regions can't hide between position checks),
-  `blocksplit_lz77`'s `find_minimum` cost search, `SplitHistograms::build`, and
-  the per-iteration glue passes (`trace`, `store_from_path`). Cancelled aborts
-  with an error; TimedOut degrades gracefully to the best-so-far store, keeping
-  a coherent parse (literal-fill for partial coverage, fewer splits for a
-  stopped split search). Harness: 16 MiB effort-200 worst gap 1.30 s → 18 ms,
-  byte-identical output; 256 KiB 80 ms → 7 ms.
+- Full-optimal parsing (efforts 31-200) could run 1.3 s between `Stop` polls on a 16 MiB input: it polled once per squeeze iteration. It now polls inside the greedy seed parse, the DP pass, the hash-chain search and the block-split search (worst gap 18 ms, output byte-identical, speed within ±1%). `Cancelled` returns an error; a deadline (`TimedOut`) still returns the best parse found so far (46966b4, 1d62cb7, fb272d5).
 
 - **A second, newer Miri blocker: the gate could not finish at all.** With
   `fuzz_regression` skipped, the 2026-08-29 run (33259166054) got to test 27 of 92 and

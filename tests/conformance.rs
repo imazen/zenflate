@@ -453,13 +453,19 @@ fn conformance_libdeflate_levels() {
 }
 
 /// Stops after `n` successful checks.
-struct StopAfter(std::sync::atomic::AtomicUsize);
+struct StopAfter(std::sync::atomic::AtomicUsize, enough::StopReason);
+
+impl StopAfter {
+    fn new(n: usize, reason: enough::StopReason) -> Self {
+        Self(n.into(), reason)
+    }
+}
 
 impl enough::Stop for StopAfter {
     fn check(&self) -> Result<(), enough::StopReason> {
         use std::sync::atomic::Ordering::Relaxed;
         match self.0.load(Relaxed) {
-            0 => Err(enough::StopReason::Cancelled),
+            0 => Err(self.1),
             n => {
                 self.0.store(n - 1, Relaxed);
                 Ok(())
@@ -483,6 +489,8 @@ fn recovery_inputs() -> Vec<(String, Vec<u8>)> {
 
 /// After a cancelled call or one that ran out of output space, the same
 /// compressor must produce exactly what a fresh one does.
+use enough::StopReason::{Cancelled, TimedOut};
+
 fn check_recovery(filter: impl Fn(Family) -> bool) {
     for (lname, family, level) in levels().into_iter().filter(|(_, f, _)| filter(*f)) {
         for (iname, data) in recovery_inputs() {
@@ -497,14 +505,32 @@ fn check_recovery(filter: impl Fn(Family) -> bool) {
             let fresh = &fresh[..n];
             let mut c = Compressor::new(level);
             let mut out = vec![0u8; Compressor::zlib_compress_bound(data.len())];
-            for stop_after in [0usize, 1, 2, 5, 20] {
-                let stop = StopAfter(stop_after.into());
+            for (stop_after, reason) in [0usize, 1, 2, 5, 20]
+                .into_iter()
+                .flat_map(|n| [(n, Cancelled), (n, TimedOut)])
+            {
+                let stop = StopAfter::new(stop_after, reason);
                 match c.zlib_compress(&data, &mut out, &stop) {
+                    // A completed call must be the normal output, except that
+                    // full-optimal parsing finishes a timed-out call with its
+                    // best-so-far parse: any valid stream.
+                    Ok(m) if reason == TimedOut && level.effort() >= 31 => {
+                        let mut back = vec![0u8; data.len()];
+                        let r = Decompressor::new()
+                            .zlib_decompress(&out[..m], &mut back, Unstoppable)
+                            .unwrap_or_else(|e| panic!("{name}: timed-out output: {e:?}"));
+                        assert!(
+                            r.output_written == data.len() && back == data,
+                            "{name}: timed-out content"
+                        );
+                    }
                     Ok(m) => assert!(
                         out[..m] == *fresh,
-                        "{name}: stop {stop_after} completed differently"
+                        "{name}: stop {stop_after} ({reason:?}) completed differently"
                     ),
-                    Err(zenflate::CompressionError::Stopped(_)) => {}
+                    Err(zenflate::CompressionError::Stopped(r)) => {
+                        assert_eq!(r, reason, "{name}: stop reason")
+                    }
                     Err(e) => panic!("{name}: stop {stop_after}: {e:?}"),
                 }
                 let m = c.zlib_compress(&data, &mut out, Unstoppable).unwrap();
