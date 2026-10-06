@@ -9,6 +9,11 @@ mod api {
     #![allow(dead_code)]
     include!("../fuzz/fuzz_targets/api_check.rs");
 }
+/// The `fuzz_inflate_diff` target's check, replayed here on stable.
+mod inflate_diff {
+    #![allow(dead_code)]
+    include!("../fuzz/fuzz_targets/inflate_diff_check.rs");
+}
 use zenutils_fuzz::RegressionSuite;
 
 /// Exact number of replayable seeds committed under `fuzz/regression/`.
@@ -113,6 +118,7 @@ fn fuzz_regression() {
             let _ = d.zlib_decompress(data, &mut output, Unstoppable);
             let _ = d.gzip_decompress(data, &mut output, Unstoppable);
         })
+        .target("fuzz_inflate_diff", inflate_diff::check)
         .target("fuzz_api", |data| {
             use arbitrary::Arbitrary;
             if let Ok(input) = api::Input::arbitrary_take_rest(arbitrary::Unstructured::new(data)) {
