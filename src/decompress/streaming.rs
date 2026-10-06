@@ -1265,10 +1265,17 @@ impl<S: InputSource> StreamDecompressor<S> {
                 // Fixed for the whole fastloop: no per-symbol bookkeeping.
                 let real_start = out_pos - self.lookback_valid;
                 let doubles = self.inner.litlen_doubles;
+                let litlen_tablebits = self.inner.litlen_tablebits;
+                // Locals, not `self.` paths: through `&mut self` LLVM can't
+                // prove the stores leave the Vec header and tables alone, and
+                // reloads them every iteration.
+                let litlen_table = &self.inner.litlen_decode_table;
+                let offset_table = &self.inner.offset_decode_table;
+                let buf = &mut self.buffer[..];
 
                 refill_bits_fast(&mut bitbuf, &mut bitsleft, input, &mut in_pos);
                 let mut entry =
-                    table_lookup(&self.inner.litlen_decode_table, bitbuf & litlen_tablemask);
+                    table_lookup(litlen_table, bitbuf & litlen_tablemask);
 
                 // Fastloop exit reason (avoids early returns that skip write-back)
                 #[derive(PartialEq)]
@@ -1287,32 +1294,32 @@ impl<S: InputSource> StreamDecompressor<S> {
                         if entry & HUFFDEC_LITERAL != 0 {
                             let lits = entry;
                             entry = table_lookup(
-                                &self.inner.litlen_decode_table,
+                                litlen_table,
                                 bitbuf & litlen_tablemask,
                             );
                             saved_bitbuf = bitbuf;
                             bitbuf >>= (entry & 0xFF) as u64;
                             bitsleft -= entry & 0xFF;
-                            let n = put_lits(&mut self.buffer, out_pos, lits, doubles);
+                            let n = put_lits(buf, out_pos, lits, doubles);
                             out_pos += n;
 
                             if entry & HUFFDEC_LITERAL != 0 {
                                 let lits = entry;
                                 entry = table_lookup(
-                                    &self.inner.litlen_decode_table,
+                                    litlen_table,
                                     bitbuf & litlen_tablemask,
                                 );
                                 saved_bitbuf = bitbuf;
                                 bitbuf >>= (entry & 0xFF) as u64;
                                 bitsleft -= entry & 0xFF;
-                                let n = put_lits(&mut self.buffer, out_pos, lits, doubles);
+                                let n = put_lits(buf, out_pos, lits, doubles);
                                 out_pos += n;
 
                                 if entry & HUFFDEC_LITERAL != 0 {
-                                    let n = put_lits(&mut self.buffer, out_pos, entry, doubles);
+                                    let n = put_lits(buf, out_pos, entry, doubles);
                                     out_pos += n;
                                     entry = table_lookup(
-                                        &self.inner.litlen_decode_table,
+                                        litlen_table,
                                         bitbuf & litlen_tablemask,
                                     );
                                     refill_bits_fast(
@@ -1334,7 +1341,7 @@ impl<S: InputSource> StreamDecompressor<S> {
                                 break 'fastloop Exit::EndOfBlock;
                             }
                             entry = table_lookup(
-                                &self.inner.litlen_decode_table,
+                                litlen_table,
                                 (entry >> 16) as u64 + extract_varbits(bitbuf, (entry >> 8) & 0x3F),
                             );
                             saved_bitbuf = bitbuf;
@@ -1342,10 +1349,10 @@ impl<S: InputSource> StreamDecompressor<S> {
                             bitsleft -= entry & 0xFF;
 
                             if entry & HUFFDEC_LITERAL != 0 {
-                                self.buffer[out_pos] = (entry >> 16) as u8;
+                                buf[out_pos] = (entry >> 16) as u8;
                                 out_pos += 1;
                                 entry = table_lookup(
-                                    &self.inner.litlen_decode_table,
+                                    litlen_table,
                                     bitbuf & litlen_tablemask,
                                 );
                                 refill_bits_fast(&mut bitbuf, &mut bitsleft, input, &mut in_pos);
@@ -1366,14 +1373,14 @@ impl<S: InputSource> StreamDecompressor<S> {
 
                         // Decode match offset
                         let mut oentry = table_lookup(
-                            &self.inner.offset_decode_table,
+                            offset_table,
                             bitbuf & bitmask(OFFSET_TABLEBITS),
                         );
 
                         // Conditional refill: after a multi-literal chain +
                         // length decode, bitsleft may be too low to consume
                         // the full offset entry and preload next litlen.
-                        if bitsleft < 28 + self.inner.litlen_tablebits {
+                        if bitsleft < 28 + litlen_tablebits {
                             refill_bits_fast(&mut bitbuf, &mut bitsleft, input, &mut in_pos);
                         }
 
@@ -1381,7 +1388,7 @@ impl<S: InputSource> StreamDecompressor<S> {
                             bitbuf >>= OFFSET_TABLEBITS as u64;
                             bitsleft -= OFFSET_TABLEBITS;
                             oentry = table_lookup(
-                                &self.inner.offset_decode_table,
+                                offset_table,
                                 (oentry >> 16) as u64
                                     + extract_varbits(bitbuf, (oentry >> 8) & 0x3F),
                             );
@@ -1409,12 +1416,12 @@ impl<S: InputSource> StreamDecompressor<S> {
                         // bits for the table lookup.
                         refill_bits_fast(&mut bitbuf, &mut bitsleft, input, &mut in_pos);
                         entry = table_lookup(
-                            &self.inner.litlen_decode_table,
+                            litlen_table,
                             bitbuf & litlen_tablemask,
                         );
 
                         super::fastloop_match_copy(
-                            &mut self.buffer,
+                            buf,
                             out_pos,
                             out_pos - offset,
                             length,
