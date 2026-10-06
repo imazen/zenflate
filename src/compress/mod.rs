@@ -1132,8 +1132,30 @@ impl Compressor {
         lens_offset: &[u8],
         stop: &impl enough::Stop,
     ) -> Result<u64, CompressionError> {
-        let mut mf = self.ht_mf.take().unwrap();
+        let mut mf = self.ht_mf.take().expect("ht_mf is present between calls");
+        let result = self.estimate_cost_incremental_ht_inner(
+            &mut mf,
+            input,
+            new_start,
+            lens_litlen,
+            lens_offset,
+            stop,
+        );
+        // Restore on every path: an early return (stop, full output) must
+        // leave the compressor reusable.
+        self.ht_mf = Some(mf);
+        result
+    }
 
+    fn estimate_cost_incremental_ht_inner(
+        &mut self,
+        mf: &mut HtMatchfinder,
+        input: &[u8],
+        new_start: usize,
+        lens_litlen: &[u8],
+        lens_offset: &[u8],
+        stop: &impl enough::Stop,
+    ) -> Result<u64, CompressionError> {
         if new_start == 0 {
             mf.init();
             self.incremental_base_offset = 0;
@@ -1201,7 +1223,6 @@ impl Compressor {
         }
 
         self.incremental_base_offset = in_base_offset;
-        self.ht_mf = Some(mf);
         Ok(cost)
     }
 
@@ -1214,8 +1235,30 @@ impl Compressor {
         lens_offset: &[u8],
         stop: &impl enough::Stop,
     ) -> Result<u64, CompressionError> {
-        let mut mf = self.hc_mf.take().unwrap();
+        let mut mf = self.hc_mf.take().expect("hc_mf is present between calls");
+        let result = self.estimate_cost_incremental_hc_inner(
+            &mut mf,
+            input,
+            new_start,
+            lens_litlen,
+            lens_offset,
+            stop,
+        );
+        // Restore on every path: an early return (stop, full output) must
+        // leave the compressor reusable.
+        self.hc_mf = Some(mf);
+        result
+    }
 
+    fn estimate_cost_incremental_hc_inner(
+        &mut self,
+        mf: &mut HcMatchfinder,
+        input: &[u8],
+        new_start: usize,
+        lens_litlen: &[u8],
+        lens_offset: &[u8],
+        stop: &impl enough::Stop,
+    ) -> Result<u64, CompressionError> {
         if new_start == 0 {
             mf.init();
             self.incremental_base_offset = 0;
@@ -1392,7 +1435,6 @@ impl Compressor {
         }
 
         self.incremental_base_offset = in_base_offset;
-        self.hc_mf = Some(mf);
         Ok(cost)
     }
 
@@ -1409,8 +1451,24 @@ impl Compressor {
         is_final: bool,
         stop: &impl enough::Stop,
     ) -> Result<(), CompressionError> {
-        let mut mf = self.ht_mf.take().unwrap();
+        let mut mf = self.ht_mf.take().expect("ht_mf is present between calls");
+        let result =
+            self.compress_incremental_ht_inner(&mut mf, os, input, new_start, is_final, stop);
+        // Restore on every path: an early return (stop, full output) must
+        // leave the compressor reusable.
+        self.ht_mf = Some(mf);
+        result
+    }
 
+    fn compress_incremental_ht_inner(
+        &mut self,
+        mf: &mut HtMatchfinder,
+        os: &mut OutputBitstream<'_>,
+        input: &[u8],
+        new_start: usize,
+        is_final: bool,
+        stop: &impl enough::Stop,
+    ) -> Result<(), CompressionError> {
         if new_start == 0 {
             mf.init();
             self.incremental_base_offset = 0;
@@ -1504,7 +1562,6 @@ impl Compressor {
         }
 
         self.incremental_base_offset = in_base_offset;
-        self.ht_mf = Some(mf);
         Ok(())
     }
 
@@ -1520,8 +1577,24 @@ impl Compressor {
         is_final: bool,
         stop: &impl enough::Stop,
     ) -> Result<(), CompressionError> {
-        let mut mf = self.hc_mf.take().unwrap();
+        let mut mf = self.hc_mf.take().expect("hc_mf is present between calls");
+        let result =
+            self.compress_incremental_hc_inner(&mut mf, os, input, new_start, is_final, stop);
+        // Restore on every path: an early return (stop, full output) must
+        // leave the compressor reusable.
+        self.hc_mf = Some(mf);
+        result
+    }
 
+    fn compress_incremental_hc_inner(
+        &mut self,
+        mf: &mut HcMatchfinder,
+        os: &mut OutputBitstream<'_>,
+        input: &[u8],
+        new_start: usize,
+        is_final: bool,
+        stop: &impl enough::Stop,
+    ) -> Result<(), CompressionError> {
         if new_start == 0 {
             mf.init();
             self.incremental_base_offset = 0;
@@ -1739,7 +1812,6 @@ impl Compressor {
         }
 
         self.incremental_base_offset = in_base_offset;
-        self.hc_mf = Some(mf);
         Ok(())
     }
 
@@ -1753,7 +1825,21 @@ impl Compressor {
         input: &[u8],
         stop: &impl enough::Stop,
     ) -> Result<(), CompressionError> {
-        let mut mf = self.ht_mf.take().unwrap();
+        let mut mf = self.ht_mf.take().expect("ht_mf is present between calls");
+        let result = self.compress_fastest_inner(&mut mf, os, input, stop);
+        // Restore on every path: an early return (stop, full output) must
+        // leave the compressor reusable.
+        self.ht_mf = Some(mf);
+        result
+    }
+
+    fn compress_fastest_inner(
+        &mut self,
+        mf: &mut HtMatchfinder,
+        os: &mut OutputBitstream<'_>,
+        input: &[u8],
+        stop: &impl enough::Stop,
+    ) -> Result<(), CompressionError> {
         mf.init();
 
         let in_end = input.len();
@@ -1847,7 +1933,6 @@ impl Compressor {
             );
         }
 
-        self.ht_mf = Some(mf);
         Ok(())
     }
 
@@ -1865,9 +1950,26 @@ impl Compressor {
         input: &[u8],
         stop: &impl enough::Stop,
     ) -> Result<(), CompressionError> {
+        let mut mf = self
+            .turbo_mf
+            .take()
+            .expect("turbo_mf is present between calls");
+        let result = self.compress_static_turbo_inner(&mut mf, os, input, stop);
+        // Restore on every path: an early return (stop, full output) must
+        // leave the compressor reusable.
+        self.turbo_mf = Some(mf);
+        result
+    }
+
+    fn compress_static_turbo_inner(
+        &mut self,
+        mf: &mut TurboMatchfinder,
+        os: &mut OutputBitstream<'_>,
+        input: &[u8],
+        stop: &impl enough::Stop,
+    ) -> Result<(), CompressionError> {
         use crate::fast_bytes::load_u32_le;
 
-        let mut mf = self.turbo_mf.take().unwrap();
         mf.init();
 
         let in_end = input.len();
@@ -2056,7 +2158,6 @@ impl Compressor {
             }
         }
 
-        self.turbo_mf = Some(mf);
         Ok(())
     }
 
@@ -2099,7 +2200,24 @@ impl Compressor {
         input: &[u8],
         stop: &impl enough::Stop,
     ) -> Result<(), CompressionError> {
-        let mut mf = self.turbo_mf.take().unwrap();
+        let mut mf = self
+            .turbo_mf
+            .take()
+            .expect("turbo_mf is present between calls");
+        let result = self.compress_turbo_inner(&mut mf, os, input, stop);
+        // Restore on every path: an early return (stop, full output) must
+        // leave the compressor reusable.
+        self.turbo_mf = Some(mf);
+        result
+    }
+
+    fn compress_turbo_inner(
+        &mut self,
+        mf: &mut TurboMatchfinder,
+        os: &mut OutputBitstream<'_>,
+        input: &[u8],
+        stop: &impl enough::Stop,
+    ) -> Result<(), CompressionError> {
         mf.init();
 
         let in_end = input.len();
@@ -2205,7 +2323,6 @@ impl Compressor {
             );
         }
 
-        self.turbo_mf = Some(mf);
         Ok(())
     }
 
@@ -2220,7 +2337,24 @@ impl Compressor {
         input: &[u8],
         stop: &impl enough::Stop,
     ) -> Result<(), CompressionError> {
-        let mut mf = self.fast_ht_mf.take().unwrap();
+        let mut mf = self
+            .fast_ht_mf
+            .take()
+            .expect("fast_ht_mf is present between calls");
+        let result = self.compress_fast_ht_inner(&mut mf, os, input, stop);
+        // Restore on every path: an early return (stop, full output) must
+        // leave the compressor reusable.
+        self.fast_ht_mf = Some(mf);
+        result
+    }
+
+    fn compress_fast_ht_inner(
+        &mut self,
+        mf: &mut FastHtMatchfinder,
+        os: &mut OutputBitstream<'_>,
+        input: &[u8],
+        stop: &impl enough::Stop,
+    ) -> Result<(), CompressionError> {
         mf.init();
 
         let in_end = input.len();
@@ -2326,7 +2460,6 @@ impl Compressor {
             );
         }
 
-        self.fast_ht_mf = Some(mf);
         Ok(())
     }
 
@@ -2340,7 +2473,21 @@ impl Compressor {
         input: &[u8],
         stop: &impl enough::Stop,
     ) -> Result<(), CompressionError> {
-        let mut mf = self.hc_mf.take().unwrap();
+        let mut mf = self.hc_mf.take().expect("hc_mf is present between calls");
+        let result = self.compress_greedy_inner(&mut mf, os, input, stop);
+        // Restore on every path: an early return (stop, full output) must
+        // leave the compressor reusable.
+        self.hc_mf = Some(mf);
+        result
+    }
+
+    fn compress_greedy_inner(
+        &mut self,
+        mf: &mut HcMatchfinder,
+        os: &mut OutputBitstream<'_>,
+        input: &[u8],
+        stop: &impl enough::Stop,
+    ) -> Result<(), CompressionError> {
         mf.init();
 
         let in_end = input.len();
@@ -2450,7 +2597,6 @@ impl Compressor {
             );
         }
 
-        self.hc_mf = Some(mf);
         Ok(())
     }
 
@@ -2466,7 +2612,22 @@ impl Compressor {
         lazy2: bool,
         stop: &impl enough::Stop,
     ) -> Result<(), CompressionError> {
-        let mut mf = self.hc_mf.take().unwrap();
+        let mut mf = self.hc_mf.take().expect("hc_mf is present between calls");
+        let result = self.compress_lazy_generic_inner(&mut mf, os, input, lazy2, stop);
+        // Restore on every path: an early return (stop, full output) must
+        // leave the compressor reusable.
+        self.hc_mf = Some(mf);
+        result
+    }
+
+    fn compress_lazy_generic_inner(
+        &mut self,
+        mf: &mut HcMatchfinder,
+        os: &mut OutputBitstream<'_>,
+        input: &[u8],
+        lazy2: bool,
+        stop: &impl enough::Stop,
+    ) -> Result<(), CompressionError> {
         mf.init();
 
         let in_end = input.len();
@@ -2711,7 +2872,6 @@ impl Compressor {
             );
         }
 
-        self.hc_mf = Some(mf);
         Ok(())
     }
 
@@ -2725,7 +2885,24 @@ impl Compressor {
         input: &[u8],
         stop: &impl enough::Stop,
     ) -> Result<(), CompressionError> {
-        let mut ns = self.near_optimal.take().unwrap();
+        let mut ns = self
+            .near_optimal
+            .take()
+            .expect("near_optimal is present between calls");
+        let result = self.compress_near_optimal_inner(&mut ns, os, input, stop);
+        // Restore on every path: an early return (stop, full output) must
+        // leave the compressor reusable.
+        self.near_optimal = Some(ns);
+        result
+    }
+
+    fn compress_near_optimal_inner(
+        &mut self,
+        ns: &mut NearOptimalState,
+        os: &mut OutputBitstream<'_>,
+        input: &[u8],
+        stop: &impl enough::Stop,
+    ) -> Result<(), CompressionError> {
         ns.bt_mf.init();
 
         let in_end = input.len();
@@ -2784,7 +2961,7 @@ impl Compressor {
         let mut in_next_slide =
             in_base_offset + (in_end - in_base_offset).min(MATCHFINDER_WINDOW_SIZE as usize);
 
-        init_stats(&mut self.split_stats, &mut ns);
+        init_stats(&mut self.split_stats, ns);
 
         loop {
             stop.check()?;
@@ -2964,7 +3141,7 @@ impl Compressor {
                     break;
                 }
                 // Not ending — merge stats and record checkpoint
-                merge_stats(&mut self.split_stats, &mut ns);
+                merge_stats(&mut self.split_stats, ns);
                 prev_end_block_check = Some(in_next);
             }
 
@@ -2986,7 +3163,7 @@ impl Compressor {
                 let cache_len_rewound = orig_cache_idx - cache_idx;
 
                 prev_block_used_only_literals = optimize_and_flush_block(
-                    &mut ns,
+                    ns,
                     os,
                     &input[in_block_begin..],
                     block_length,
@@ -3007,8 +3184,8 @@ impl Compressor {
                     .copy_within(cache_idx..cache_idx + cache_len_rewound, 0);
                 cache_idx = cache_len_rewound;
 
-                save_stats(&self.split_stats, &mut ns);
-                clear_old_stats(&mut self.split_stats, &mut ns);
+                save_stats(&self.split_stats, ns);
+                clear_old_stats(&mut self.split_stats, ns);
                 in_block_begin = in_block_end;
             } else {
                 // End block at current position (no rewind)
@@ -3016,9 +3193,9 @@ impl Compressor {
                 let is_first = in_block_begin == 0;
                 let is_final = !self.force_nonfinal && in_next == in_end;
 
-                merge_stats(&mut self.split_stats, &mut ns);
+                merge_stats(&mut self.split_stats, ns);
                 prev_block_used_only_literals = optimize_and_flush_block(
-                    &mut ns,
+                    ns,
                     os,
                     &input[in_block_begin..],
                     block_length,
@@ -3035,8 +3212,8 @@ impl Compressor {
                 );
 
                 cache_idx = 0;
-                save_stats(&self.split_stats, &mut ns);
-                init_stats(&mut self.split_stats, &mut ns);
+                save_stats(&self.split_stats, ns);
+                init_stats(&mut self.split_stats, ns);
                 in_block_begin = in_next;
             }
 
@@ -3045,7 +3222,6 @@ impl Compressor {
             }
         }
 
-        self.near_optimal = Some(ns);
         Ok(())
     }
 

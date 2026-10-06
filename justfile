@@ -4,6 +4,11 @@
 test:
     cargo test
 
+# Full cross-API conformance matrix: every level through every compression
+# entry point on inputs up to 1 MiB (the default `cargo test` runs a subset)
+conformance-full:
+    ZENFLATE_CONFORMANCE=full cargo test --release --test conformance
+
 # Run all tests with unchecked bounds elimination
 test-unchecked:
     cargo test --features unchecked

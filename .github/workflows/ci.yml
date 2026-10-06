@@ -23,6 +23,25 @@ env:
 
 jobs:
   # ==========================================================================
+  # Full cross-API conformance matrix (tests/conformance.rs, release build)
+  # ==========================================================================
+  conformance:
+    name: Conformance (full)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      # Same command as `just conformance-full`.
+      - name: Full conformance matrix
+        run: ZENFLATE_CONFORMANCE=full cargo test --release --test conformance
+
+  # ==========================================================================
   # Native testing (6-platform matrix)
   # ==========================================================================
   test:

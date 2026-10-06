@@ -235,6 +235,18 @@ native AVX-512+VNNI+VPCLMULQDQ), no `target-cpu=native`. Full data:
 - **Decision (user, 2026-07-14):** keep `avx512` in default. Opt-in removes
   nothing measurable and costs 4.3× standalone CRC. Don't revisit without new data.
 
+### Strategy state must survive early returns (2026-10-06)
+
+Each strategy takes its matchfinder / near-optimal state out of `Compressor`
+(`self.x.take()`) so it can call `&mut self` helpers, and used to put it back
+only on the success path. Any early return (a `Stop` firing, `InsufficientSpace`)
+left the field `None`, so the compressor's next call panicked on `unwrap()`.
+Fixed by splitting each strategy into a wrapper that always restores the state
+and an `_inner` body that receives it. Any new strategy that takes state out
+must do the same. Guarded by `tests/conformance.rs` (`recovery_*`: stop after
+0-20 checks, buffers from 0 bytes to one short, then reuse must match a fresh
+compressor) and the cross-API matrix (`just conformance-full` in release).
+
 ## Known Bugs
 
 (none currently)

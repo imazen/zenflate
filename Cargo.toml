@@ -101,6 +101,10 @@ name = "heap_compare"
 required-features = ["compress"]
 
 [[example]]
+name = "setup_cost"
+required-features = ["compress"]
+
+[[example]]
 name = "heap_c"
 required-features = ["compress"]
 
