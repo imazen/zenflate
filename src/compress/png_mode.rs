@@ -1,5 +1,6 @@
 //! PNG-tuned compression for [`CompressionLevel::png`](super::CompressionLevel::png)
-//! efforts 2-12 (effort 1 is the ultra-fast encoder in `png_ultra`).
+//! efforts 2-9 (effort 1 is the ultra-fast encoder in `png_ultra`), and the
+//! runs-only guard ([`RunsGuard`]) that efforts 10-18 add to the lazy parser.
 //!
 //! PNG encoders hand DEFLATE filtered scanlines: per-row residuals that are
 //! mostly small literals, long runs of a repeated byte (flat regions after
@@ -14,8 +15,8 @@
 //! - **Runs first.** Five equal bytes at the cursor become a distance-1
 //!   match, extended backwards into the pending literals and forwards up to
 //!   258 bytes, with no hash-table work inside the run (effort 2 stops here).
-//! - **Hashed repeats** of at least 8 bytes (effort 3) or 5 bytes (4-12),
-//!   from a single-entry table (3-5) or hash chains (6-12), extended
+//! - **Hashed repeats** of at least 8 bytes (effort 3) or 5 bytes (4-9),
+//!   from a single-entry table (3-5) or hash chains (6-9), extended
 //!   backwards into the pending literal run.
 //! - **Skip-ahead in incompressible stretches.** The step grows with the
 //!   distance since the last match (`1 + gap >> skip_shift`).
@@ -89,8 +90,8 @@ pub(crate) struct PngParams {
 const SKIP_STEP_MAX: usize = 256;
 
 /// Parser settings for [`CompressionLevel::png`](super::CompressionLevel::png)
-/// efforts 2-12 (effort 1 is the ultra-fast encoder in `png_ultra`); `None`
-/// outside that range.
+/// efforts 2-9 (effort 1 is the ultra-fast encoder in `png_ultra`; 10 and up
+/// use the lazy parsers with [`RunsGuard`]); `None` outside that range.
 ///
 /// Chosen on 146-150 held-out imazen-26 cluster representatives at three
 /// sizes for per-image monotonicity, not only aggregate position: the knobs
@@ -108,9 +109,6 @@ pub(crate) fn png_params(effort: u32) -> Option<PngParams> {
         7 => (true, 6, 5, 4, 32),
         8 => (true, 6, 5, 8, 32),
         9 => (true, 6, 5, 16, 32),
-        10 => (true, 8, 5, 24, 64),
-        11 => (true, 10, 5, 48, 128),
-        12 => (true, 12, 5, 64, 258),
         _ => return None,
     };
     Some(PngParams {
@@ -426,6 +424,84 @@ fn parse_block(
     seqs[seq_idx].litrunlen_and_length += (end - last) as u32;
     count_literals(&input[begin..end], &seqs[..=seq_idx], freqs);
     Ok(seq_idx)
+}
+
+/// The runs-only guard for `png()` rungs built on the general lazy parsers
+/// (`png(10..)`): before a block is written, parse the same bytes runs-only
+/// and report whether that parse is cheaper. Same rule as the guard in
+/// `compress_png_inner`, including the pause after a clear loss.
+#[derive(Clone)]
+pub(crate) struct RunsGuard {
+    parse: RunsParse,
+    skip: u32,
+}
+
+impl RunsGuard {
+    /// A guard for blocks of up to `max_block` input bytes.
+    pub(crate) fn new(max_block: usize) -> Self {
+        Self {
+            parse: RunsParse {
+                seqs: alloc::vec![Sequence::default(); (max_block + MIN_BLOCK_LENGTH) / 4 + 2],
+                freqs: DeflateFreqs::default(),
+                n: 0,
+            },
+            skip: 0,
+        }
+    }
+
+    /// Reset between compressions.
+    pub(crate) fn reset(&mut self) {
+        self.skip = 0;
+    }
+
+    /// Parse `input[begin..end]` runs-only and return true when that parse
+    /// costs fewer bits than one with literal/match frequencies `freqs`
+    /// (end-of-block not counted). Afterwards [`parse`](Self::parse) holds it.
+    pub(crate) fn prefer_runs(
+        &mut self,
+        input: &[u8],
+        begin: usize,
+        end: usize,
+        freqs: &DeflateFreqs,
+        static_codes: &DeflateCodes,
+        stop: &impl enough::Stop,
+    ) -> Result<bool, CompressionError> {
+        if self.skip > 0 {
+            self.skip -= 1;
+            return Ok(false);
+        }
+        // png(2)'s runs-only settings.
+        let cfg = ParseCfg {
+            skip_shift: 4,
+            mm: 8,
+            mm_shift: 0,
+            depth: 1,
+            nice: DEFLATE_MAX_MATCH_LEN as usize,
+        };
+        let r = &mut self.parse;
+        r.n = parse_block(
+            input,
+            begin,
+            end,
+            None,
+            &cfg,
+            &mut r.seqs,
+            &mut r.freqs,
+            stop,
+        )?;
+        let mut scratch = DeflateCodes::default();
+        let main_bits = block_bits(freqs, &mut scratch, static_codes);
+        let runs_bits = block_bits(&r.freqs, &mut scratch, static_codes);
+        if runs_bits > main_bits + main_bits / 8 {
+            self.skip = 3;
+        }
+        Ok(runs_bits < main_bits)
+    }
+
+    /// The last runs-only parse: its sequences and frequencies.
+    pub(crate) fn parse(&mut self) -> (&[Sequence], &mut DeflateFreqs) {
+        (&self.parse.seqs[..=self.parse.n], &mut self.parse.freqs)
+    }
 }
 
 /// Size (bits) of the cheaper of the dynamic and static Huffman encodings of
@@ -758,17 +834,18 @@ mod tests {
     fn png_level_mapping() {
         assert_eq!(CompressionLevel::png(0).effort(), 0);
         assert_eq!(CompressionLevel::png(500).effort(), 200);
-        // 13+ uses the general parsers.
+        // 19-22 use new(23)'s near-optimal parser; 23+ equal new(23+).
         let img = filtered_image(200, 100, 7);
-        for effort in [13, 15] {
+        for (effort, general) in [(19, 23), (22, 23), (23, 23), (26, 26)] {
             let a = CompressionLevel::png(effort);
-            let b = CompressionLevel::new(effort);
+            let b = CompressionLevel::new(general);
             assert_eq!(
                 roundtrip(a, &img),
                 roundtrip(b, &img),
-                "png({effort}) vs new({effort})"
+                "png({effort}) vs new({general})"
             );
         }
+        assert_eq!(CompressionLevel::png(20).effort(), 20);
 
         let chain = |mut l: CompressionLevel| {
             let mut v = vec![l.effort()];
@@ -781,9 +858,51 @@ mod tests {
         assert_eq!(chain(CompressionLevel::png(1)), [1]);
         assert_eq!(chain(CompressionLevel::png(2)), [2, 1]);
         assert_eq!(chain(CompressionLevel::png(3)), [3]);
-        assert_eq!(chain(CompressionLevel::png(10)), [10, 3]);
-        assert_eq!(chain(CompressionLevel::png(16)), [16, 12, 3]);
-        assert_eq!(chain(CompressionLevel::png(40)), [40, 30, 22, 17, 12, 3]);
+        assert_eq!(chain(CompressionLevel::png(10)), [10, 9, 3]);
+        assert_eq!(chain(CompressionLevel::png(16)), [16, 9, 3]);
+        assert_eq!(chain(CompressionLevel::png(20)), [20, 18, 9, 3]);
+        assert_eq!(chain(CompressionLevel::png(40)), [40, 30, 18, 9, 3]);
+    }
+
+    /// The runs-only guard only ever swaps in a cheaper block: on flat-colour
+    /// art the guarded lazy rungs beat the same lazy parser without it.
+    #[test]
+    fn png_lazy_rungs_guarded() {
+        // Flat colour bands with sparse noise: far matches split the runs.
+        let mut img = Vec::new();
+        let mut x = 0x2545_F491u32;
+        for y in 0..300 {
+            img.push(1);
+            for i in 0..600 {
+                x ^= x << 13;
+                x ^= x >> 17;
+                x ^= x << 5;
+                img.push(if x.is_multiple_of(97) {
+                    x as u8
+                } else {
+                    ((i / 40 + y / 25) % 4) as u8 * 40
+                });
+            }
+        }
+        let size = |effort: u32, guard: bool| {
+            let mut c = Compressor::new(CompressionLevel::png(effort));
+            if !guard {
+                c.runs_guard = None;
+            }
+            let mut out = vec![0u8; Compressor::zlib_compress_bound(img.len())];
+            c.zlib_compress(&img, &mut out, enough::Unstoppable)
+                .unwrap()
+        };
+        let mut smaller = 0;
+        for effort in [10, 12, 15, 18] {
+            let (with, without) = (size(effort, true), size(effort, false));
+            assert!(
+                with <= without,
+                "png({effort}): {with} vs {without} unguarded"
+            );
+            smaller += usize::from(with < without);
+        }
+        assert!(smaller > 0, "the guard never picked the runs-only parse");
     }
 
     #[cfg(feature = "threads")]

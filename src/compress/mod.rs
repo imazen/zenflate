@@ -41,7 +41,7 @@ use self::near_optimal::{
     MATCH_CACHE_LENGTH, NearOptimalState, clear_old_stats, init_stats, merge_stats,
     optimize_and_flush_block, save_stats,
 };
-use self::png_mode::{PNG_SEQ_STORE_LENGTH, PngMatchfinder, PngParams};
+use self::png_mode::{PNG_SEQ_STORE_LENGTH, PngMatchfinder, PngParams, RunsGuard};
 use self::png_ultra::UltraState;
 use self::sequences::Sequence;
 
@@ -223,24 +223,30 @@ impl CompressionLevel {
     /// | 1 | Ultra-fast: literals + zero runs, one Huffman table per stream |
     /// | 2 | Runs only (distance-1 matches), exact Huffman per block |
     /// | 3 | Runs + hashed repeats of 8+ bytes |
-    /// | 4-12 | Runs + hashed repeats of 5+ bytes, hash chains of growing depth |
-    /// | 13-200 | Same parsers as [`new(effort)`](Self::new) |
+    /// | 4-9 | Runs + hashed repeats of 5+ bytes, hash chains of growing depth |
+    /// | 10-18 | Lazy matching, search depth 16 → 800, with the runs-only guard |
+    /// | 19-22 | Near-optimal parsing, as [`new(23)`](Self::new) |
+    /// | 23-200 | Same parsers as [`new(effort)`](Self::new) |
     ///
-    /// Measured on 146 held-out imazen-26 cluster representatives at their
-    /// native sizes (adaptive filter), efforts 2-12 compress smaller than
-    /// `new()` efforts of similar speed; from about 110 MiB/s the general
-    /// lazy parsers are as good, so `png(13..)` equals `new(13..)`. On
-    /// unfiltered rows and on small (256x256 and below) images `new(10..)`
-    /// compresses better than `png(10..=12)` at similar speed.
+    /// Efforts 1-9 were chosen on 146 held-out imazen-26 cluster
+    /// representatives at native sizes (adaptive filter). Efforts 10-18 use
+    /// libdeflate 5/6/7's lazy settings and deeper ones, without `new()`'s
+    /// `good_match`/`max_lazy` shortcuts, and parse every block runs-only too,
+    /// keeping the cheaper parse. On 86 PNG filtered streams (64-1024 px) they
+    /// are never larger per image than libdeflate 5/6/7 and lie on the
+    /// size/speed front; below about 10 MB/s near-optimal parsing beats any
+    /// lazy depth, so efforts 19-22 all use it
+    /// (`benchmarks/png_ladder_pareto_*_2026-10-06.txt`).
     ///
     /// # Monotonicity
     ///
-    /// Within the ladder the search only gets wider, and efforts 3-12 compare
-    /// every block against its runs-only parse. Three switches change the
+    /// Within the ladder the search only gets wider, and efforts 3-18 compare
+    /// every block against its runs-only parse. Four switches change the
     /// algorithm, and [`monotonicity_fallback`](Self::monotonicity_fallback)
     /// covers each one: ultra-fast to exact Huffman (`png(2)` → `png(1)`),
-    /// minimum match 8 to 5 (`png(4..=12)` → `png(3)`), and PNG to general
-    /// parsers (`png(13..=17)` → `png(12)`).
+    /// minimum match 8 to 5 (`png(4..=9)` → `png(3)`), hashed chains to lazy
+    /// matching (`png(10..=18)` → `png(9)`), and lazy to near-optimal
+    /// (`png(19..)` → `png(18)`).
     ///
     /// Not supported by the incremental API
     /// ([`deflate_compress_incremental`](Compressor::deflate_compress_incremental)).
@@ -264,6 +270,15 @@ impl CompressionLevel {
         let effort = effort.min(200);
         let strategy = if effort == 1 {
             InternalStrategy::PngUltra
+        } else if (10..=18).contains(&effort) {
+            // Lazy parsing (libdeflate 5/6/7 settings, then deeper), plus the
+            // runs-only guard (see `compression_params` and `RunsGuard`).
+            // Double-lazy measured worse than lazy at the same depth here.
+            InternalStrategy::Lazy
+        } else if (19..=22).contains(&effort) {
+            // Below ~10 MB/s near-optimal parsing beats any lazy depth on PNG
+            // data; efforts 19-23 all get new(23)'s near-optimal settings.
+            InternalStrategy::NearOptimal
         } else {
             match png_mode::png_params(effort) {
                 Some(params) => InternalStrategy::Png(params),
@@ -420,16 +435,14 @@ impl CompressionLevel {
             return None;
         }
         if self.png_family {
-            // Algorithm switches in the PNG ladder (measured on held-out
-            // images): ultra-fast -> exact Huffman (2), min match 8 -> 5 (4),
-            // PNG -> general parsers (13). Efforts 3 and 5-12 only widen the
-            // search.
+            // Algorithm switches in the PNG ladder: ultra-fast -> exact Huffman
+            // (2), min match 8 -> 5 (4), hashed chains -> lazy (10), lazy ->
+            // near-optimal (19). Other steps only widen the search.
             return match self.effort {
                 2 => Some(Self::png(1)),
-                4..=12 => Some(Self::png(3)),
-                13..=17 => Some(Self::png(12)),
-                18..=22 => Some(Self::png(17)),
-                23..=30 => Some(Self::png(22)),
+                4..=9 => Some(Self::png(3)),
+                10..=18 => Some(Self::png(9)),
+                19..=30 => Some(Self::png(18)),
                 31..=200 => Some(Self::png(30)),
                 _ => None,
             };
@@ -443,6 +456,16 @@ impl CompressionLevel {
             23..=30 => Some(Self::new(22)),  // NearOptimal → Lazy2 max
             31..=200 => Some(Self::new(30)), // FullOptimal → NearOptimal max
             _ => None,
+        }
+    }
+
+    /// Effort the near-optimal block writer sees: `png(19..=22)` use
+    /// `new(23)`'s near-optimal parser in full, so they report 23.
+    pub(crate) fn near_optimal_effort(self) -> u32 {
+        if self.png_family {
+            self.effort.max(23)
+        } else {
+            self.effort
         }
     }
 
@@ -475,6 +498,28 @@ impl CompressionLevel {
             };
         }
 
+        if self.png_family && matches!(self.strategy, InternalStrategy::Lazy) && self.effort <= 18 {
+            // png(10..=12): libdeflate 5/6/7's lazy settings, which were on the
+            // Pareto front for PNG filtered data where new(11..=13), whose
+            // good_match/max_lazy shortcuts are on, lost ~1.2% at the same speed.
+            let (depth, nice) = match self.effort {
+                10 => (16, 30),
+                11 => (35, 65),
+                12 => (100, 130),
+                13 => (150, 160),
+                14 => (200, DEFLATE_MAX_MATCH_LEN),
+                15 => (300, DEFLATE_MAX_MATCH_LEN),
+                16 => (450, DEFLATE_MAX_MATCH_LEN),
+                17 => (600, DEFLATE_MAX_MATCH_LEN),
+                _ => (800, DEFLATE_MAX_MATCH_LEN),
+            };
+            return CompressionParams {
+                max_search_depth: depth,
+                nice_match_length: nice,
+                good_match: DISABLED,
+                max_lazy: DISABLED,
+            };
+        }
         let (depth, nice) = match self.strategy {
             InternalStrategy::Store => (0, 0),
             InternalStrategy::StaticTurbo
@@ -637,6 +682,8 @@ pub struct Compressor {
     png_mf: Option<Box<PngMatchfinder>>,
     /// Code tables for the PngUltra strategy.
     png_ultra: Option<Box<UltraState>>,
+    /// Runs-only guard for `png()` rungs on the lazy parsers.
+    runs_guard: Option<Box<RunsGuard>>,
     /// Starting offset: skip dictionary bytes at the start of input.
     /// Set by `deflate_compress_chunk`; 0 for normal operation.
     chunk_start: usize,
@@ -735,6 +782,7 @@ impl Clone for Compressor {
             full_optimal: self.full_optimal.as_ref().map(|b| Box::new((**b).clone())),
             png_mf: self.png_mf.clone(),
             png_ultra: self.png_ultra.clone(),
+            runs_guard: self.runs_guard.clone(),
             chunk_start: self.chunk_start,
             force_nonfinal: self.force_nonfinal,
             incremental_pos: self.incremental_pos,
@@ -846,6 +894,12 @@ impl Compressor {
             png_mf: match strategy {
                 InternalStrategy::Png(p) if p.hash => {
                     Some(Box::new(PngMatchfinder::new(p.chain_depth > 1)))
+                }
+                _ => None,
+            },
+            runs_guard: match strategy {
+                InternalStrategy::Lazy | InternalStrategy::Lazy2 if level.png_family => {
+                    Some(Box::new(RunsGuard::new(SOFT_MAX_BLOCK_LENGTH)))
                 }
                 _ => None,
             },
@@ -2754,6 +2808,9 @@ impl Compressor {
         stop: &impl enough::Stop,
     ) -> Result<(), CompressionError> {
         mf.init();
+        if let Some(g) = self.runs_guard.as_deref_mut() {
+            g.reset();
+        }
 
         let in_end = input.len();
         let mut in_next = self.chunk_start;
@@ -2985,6 +3042,29 @@ impl Compressor {
 
             let block_length = in_next - in_block_begin;
             let is_final = !self.force_nonfinal && in_next >= in_end;
+            if let Some(g) = self.runs_guard.as_deref_mut()
+                && g.prefer_runs(
+                    input,
+                    in_block_begin,
+                    in_next,
+                    &self.freqs,
+                    &self.static_codes,
+                    stop,
+                )?
+            {
+                let (seqs, freqs) = g.parse();
+                finish_block(
+                    os,
+                    &input[in_block_begin..],
+                    block_length,
+                    seqs,
+                    freqs,
+                    &mut self.codes,
+                    &self.static_codes,
+                    is_final,
+                );
+                continue;
+            }
             finish_block(
                 os,
                 &input[in_block_begin..],
@@ -3300,7 +3380,7 @@ impl Compressor {
                     &self.static_codes,
                     &self.split_stats,
                     max_search_depth,
-                    self.level.effort(),
+                    self.level.near_optimal_effort(),
                     self.level.is_libdeflate_compat(),
                 );
 
@@ -3332,7 +3412,7 @@ impl Compressor {
                     &self.static_codes,
                     &self.split_stats,
                     max_search_depth,
-                    self.level.effort(),
+                    self.level.near_optimal_effort(),
                     self.level.is_libdeflate_compat(),
                 );
 

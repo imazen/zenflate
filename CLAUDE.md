@@ -52,7 +52,9 @@ Pure Rust DEFLATE/zlib/gzip compression and decompression.
   src/compress/png_ultra.rs). png(1) = ultra-fast (literals + zero runs, one table per
   stream, counted from the whole input up to 64 KiB, sampled above; pair LUT from
   512 KiB); png(2) runs-only;
-  png(3) hash min match 8; png(4..12) min match 5, chains; png(13..) = new(13..).
+  png(3) hash min match 8; png(4..9) min match 5, chains; png(10..18) lazy (libdeflate
+  5/6/7 settings, then deeper, no good_match/max_lazy shortcuts) + runs-only guard
+  (`RunsGuard`); png(19..22) = new(23)'s near-optimal parser; png(23..) = new(23..).
   Skip-ahead step capped at 256. Validated on 146-150 held-out K300 reps at 3 sizes:
   `benchmarks/png_mode_2026-10-06.md`, tooling in `benchmarks/harnesses/png-mode/validation/`.
 - [x] Phase 12 (unreleased): `zenflate::png::{StripCompressor, StripDecoder}` for iDOT
@@ -322,19 +324,32 @@ two-thread decode pipeline is bounded by inflate, so this is zenpng's lever.
 
 ### PNG ladder on identical filtered bytes (2026-10-06)
 
-`examples/png_ladder_pareto.rs`, `benchmarks/png_ladder_pareto_{arm,mac}_2026-10-06.txt`:
+`examples/png_ladder_pareto.rs`, `benchmarks/png_ladder_pareto_{arm,mac}_2026-10-06.txt`,
+`benchmarks/png_ladder_lazy_guard_2026-10-06.txt` (after the png(10..) change):
 
 - zenflate beats miniz_oxide (image-png's balanced/high codec) at every size
   point: e15 3.864 @ 45 MB/s vs miniz 6 3.849 @ 20 (Neoverse); png(1) 3.08 vs
   fdeflate ultra-fast 2.84 at 1.6-2x its speed.
 - `new(1..=9)` are dominated by `png()` on PNG data (e1-e4 identical bytes,
   e5-e9 identical).
-- Gap: libdeflate 5/6 beat png(10..=12) and e12/e13 in the 60-80 MB/s band
-  (Neoverse). One-step lazy matching in png(10..=12) gave -0.5% size for
-  +32-42% time and stayed dominated: rejected. Next candidate: lazy parsing
-  with 3-byte matches (libdeflate 5/6 style) plus the runs-only guard.
-- e13 is larger than png(12) on 41/86 images (up to 8.6%): the lazy parsers
-  lack the runs-only guard.
+- Gap (fixed the same day): libdeflate 5/6 beat the old png(10..=12) and e12/e13 in
+  the 60-80 MB/s band (Neoverse). One-step lazy matching in png(10..=12) gave -0.5% size for
+  +32-42% time and stayed dominated: rejected.
+- What worked: libdeflate's lazy parser (3-byte matches) plus the runs-only guard,
+  without new()'s good_match/max_lazy shortcuts (those cost ~1.2% at equal speed:
+  e11 3.756 vs libdeflate 5 3.800). Guarded rungs are never larger per image than
+  libdeflate 5/6/7. The guard costs ~30% time at png(10).
+- Double-lazy (Lazy2) was worse than plain lazy at equal depth on PNG data
+  (png(15) Lazy2 depth 200 lost to png(14) lazy depth 200 on 29/86 images), and
+  deep lazy (450) beat every Lazy2 rung: png(10..=18) are all lazy.
+- Below ~10 MB/s near-optimal parsing beats any lazy depth (libdeflate 10 4.120
+  @ 7 MB/s vs lazy depth 3000 3.976 @ 7): png(19..=22) use new(23)'s parser
+  (`CompressionLevel::near_optimal_effort` keeps their output identical to
+  new(23) while `effort()` reports 19-22).
+- Block-split butterfly: lazy depth 295 -> 299 made 8007_rgb8_256 7.5% larger
+  (one different match moves the block boundaries). The guard can't fix that;
+  it's a block-splitter instability, not a depth bug.
+- Before the guard, e13 was larger than png(12) on 41/86 images (up to 8.6%).
 
 ### Strategy state must survive early returns (2026-10-06)
 

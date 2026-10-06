@@ -57,7 +57,7 @@ struct Arm {
 
 fn arms() -> Vec<Arm> {
     let mut v = Vec::new();
-    for e in 1..=12 {
+    for e in 1u32..=19 {
         v.push(Arm {
             name: format!("zen_png{e}"),
             kind: Kind::Zen(CompressionLevel::png(e)),
