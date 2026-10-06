@@ -55,6 +55,16 @@ Pure Rust DEFLATE/zlib/gzip compression and decompression.
   png(3) hash min match 8; png(4..12) min match 5, chains; png(13..) = new(13..).
   Skip-ahead step capped at 256. Validated on 146-150 held-out K300 reps at 3 sizes:
   `benchmarks/png_mode_2026-10-06.md`, tooling in `benchmarks/harnesses/png-mode/validation/`.
+- [x] Phase 12 (unreleased): `zenflate::png::{StripCompressor, StripDecoder}` for iDOT
+  (src/png/). Shape set by the user (2026-10-06): PNG-specific types, no new free functions
+  ("free functions increasing is a red flag"), and no public PNG-only `StreamDecompressor`
+  methods. The raw layer (`Compressor::deflate_compress_segment`,
+  `StreamDecompressor::with_segment_end` / `zlib_continuation` / `ended_at_segment_boundary`
+  / `running_checksum` / `footer_checksum`) is `pub(crate)`; `StripDecoder` wraps it.
+  zenpng main (src/decoder/idot.rs) decodes iDOT strips in parallel through this, streaming
+  each strip across IDAT chunks and un-filtering row by row, so the decoder must stay
+  streaming. Caller-driven, no built-in threads: a threaded helper forced whole-image
+  buffering and blocked zenpng's per-strip filter search on its own pool.
 
 ## Performance (0.4.0)
 
