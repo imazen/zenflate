@@ -1,6 +1,7 @@
 //! Fuzz target: compress then decompress, verify byte-identical output.
 //!
 //! Tests all three formats (deflate, zlib, gzip) at a fuzz-selected level.
+//! The effort byte's high bit selects the `CompressionLevel::png` family.
 //! Catches compression bugs where output decompresses to different data.
 
 #![no_main]
@@ -9,7 +10,7 @@ use zenflate::{CompressionLevel, Compressor, Decompressor, Unstoppable};
 
 #[derive(arbitrary::Arbitrary, Debug)]
 struct Input {
-    /// Compression effort 0-30
+    /// Compression effort 0-30 (low bits); high bit = `png()` family
     effort: u8,
     /// Data to compress
     data: Vec<u8>,
@@ -25,7 +26,11 @@ fuzz_target!(|input: Input| {
         return;
     }
 
-    let comp_level = CompressionLevel::new(level);
+    let comp_level = if input.effort & 0x80 != 0 {
+        CompressionLevel::png(level)
+    } else {
+        CompressionLevel::new(level)
+    };
     let mut compressor = Compressor::new(comp_level);
     let mut decompressor = Decompressor::new();
 

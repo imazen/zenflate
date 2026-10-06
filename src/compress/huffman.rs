@@ -378,7 +378,12 @@ pub(crate) fn make_huffman_code(
 ///
 /// Given `lens[sym]` already filled in, builds `len_counts` and generates
 /// bit-reversed canonical codewords into `codewords`.
-fn canonical_codewords(num_syms: usize, lens: &[u8], codewords: &mut [u32], max_codeword_len: u32) {
+pub(crate) fn canonical_codewords(
+    num_syms: usize,
+    lens: &[u8],
+    codewords: &mut [u32],
+    max_codeword_len: u32,
+) {
     let max_len = max_codeword_len as usize;
 
     // Build len_counts from lens.

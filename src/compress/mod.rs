@@ -13,6 +13,8 @@ pub(crate) mod full_optimal;
 pub(crate) mod huffman;
 pub(crate) mod katajainen;
 pub(crate) mod near_optimal;
+pub(crate) mod png_mode;
+pub(crate) mod png_ultra;
 pub(crate) mod sequences;
 
 #[cfg(not(feature = "std"))]
@@ -39,6 +41,8 @@ use self::near_optimal::{
     MATCH_CACHE_LENGTH, NearOptimalState, clear_old_stats, init_stats, merge_stats,
     optimize_and_flush_block, save_stats,
 };
+use self::png_mode::{PNG_SEQ_STORE_LENGTH, PngMatchfinder, PngParams};
+use self::png_ultra::UltraState;
 use self::sequences::Sequence;
 
 /// Hash order for the ht_matchfinder (needed for initial hash computation).
@@ -91,6 +95,10 @@ pub(crate) enum InternalStrategy {
     NearOptimal,
     /// Zopfli-style forward DP with iterative cost model refinement.
     FullOptimal,
+    /// PNG-tuned greedy parser: runs + 8-byte hashed repeats + skip-ahead.
+    Png(PngParams),
+    /// PNG ultra-fast: literals + zero runs, one table per stream.
+    PngUltra,
 }
 
 /// Map effort (0-200) to internal strategy.
@@ -149,6 +157,12 @@ pub(crate) struct CompressionParams {
 /// | 23-30 | Near-optimal |
 /// | 31-200 | Full-optimal (Zopfli) |
 ///
+/// # PNG image data
+///
+/// [`png(effort)`](Self::png) uses encoders tuned for filtered PNG scanlines
+/// at efforts 1-12 (smaller than `new()` at similar speed there), and matches
+/// `new()` from effort 13 up.
+///
 /// # C libdeflate compatibility
 ///
 /// [`libdeflate(level)`](Self::libdeflate) (0-12) produces byte-identical
@@ -175,6 +189,8 @@ pub struct CompressionLevel {
     strategy: InternalStrategy,
     /// When Some, use exact C libdeflate parameters for byte-identical output.
     libdeflate_level: Option<u8>,
+    /// Created by [`png()`](Self::png): monotonicity fallbacks stay in the PNG ladder.
+    png_family: bool,
 }
 
 impl CompressionLevel {
@@ -190,6 +206,75 @@ impl CompressionLevel {
             effort,
             strategy: effort_to_strategy(effort),
             libdeflate_level: None,
+            png_family: false,
+        }
+    }
+
+    /// Create a compression level tuned for PNG image data (0-200).
+    ///
+    /// Efforts 1-12 use encoders built for filtered PNG scanlines (runs of
+    /// repeated bytes, literal-heavy residuals, occasional long repeats),
+    /// adapted from [fdeflate](https://github.com/image-rs/fdeflate)'s
+    /// ultra-fast, RLE and greedy compressors:
+    ///
+    /// | Effort | Encoder |
+    /// |--------|---------|
+    /// | 0 | Store |
+    /// | 1 | Ultra-fast: literals + zero runs, one Huffman table per stream |
+    /// | 2 | Runs only (distance-1 matches), exact Huffman per block |
+    /// | 3 | Runs + hashed repeats of 8+ bytes |
+    /// | 4-12 | Runs + hashed repeats of 5+ bytes, hash chains of growing depth |
+    /// | 13-200 | Same parsers as [`new(effort)`](Self::new) |
+    ///
+    /// Measured on 146 held-out imazen-26 cluster representatives at their
+    /// native sizes (adaptive filter), efforts 2-12 compress smaller than
+    /// `new()` efforts of similar speed; from about 110 MiB/s the general
+    /// lazy parsers are as good, so `png(13..)` equals `new(13..)`. On
+    /// unfiltered rows and on small (256x256 and below) images `new(10..)`
+    /// compresses better than `png(10..=12)` at similar speed.
+    ///
+    /// # Monotonicity
+    ///
+    /// Within the ladder the search only gets wider, and efforts 3-12 compare
+    /// every block against its runs-only parse. Three switches change the
+    /// algorithm, and [`monotonicity_fallback`](Self::monotonicity_fallback)
+    /// covers each one: ultra-fast to exact Huffman (`png(2)` → `png(1)`),
+    /// minimum match 8 to 5 (`png(4..=12)` → `png(3)`), and PNG to general
+    /// parsers (`png(13..=17)` → `png(12)`).
+    ///
+    /// Not supported by the incremental API
+    /// ([`deflate_compress_incremental`](Compressor::deflate_compress_incremental)).
+    ///
+    /// ```
+    /// use zenflate::{Compressor, CompressionLevel, Unstoppable};
+    ///
+    /// // Two filtered rows of an RGB image (filter byte + residuals).
+    /// let mut idat = Vec::new();
+    /// for _ in 0..64 {
+    ///     idat.push(1); // Sub filter
+    ///     idat.extend(std::iter::repeat_n(0u8, 300));
+    /// }
+    /// let mut c = Compressor::new(CompressionLevel::png(6));
+    /// let mut out = vec![0u8; Compressor::zlib_compress_bound(idat.len())];
+    /// let n = c.zlib_compress(&idat, &mut out, Unstoppable).unwrap();
+    /// assert!(n < idat.len() / 20);
+    /// ```
+    #[must_use]
+    pub fn png(effort: u32) -> Self {
+        let effort = effort.min(200);
+        let strategy = if effort == 1 {
+            InternalStrategy::PngUltra
+        } else {
+            match png_mode::png_params(effort) {
+                Some(params) => InternalStrategy::Png(params),
+                None => effort_to_strategy(effort),
+            }
+        };
+        Self {
+            effort,
+            strategy,
+            libdeflate_level: None,
+            png_family: true,
         }
     }
 
@@ -217,6 +302,7 @@ impl CompressionLevel {
             effort,
             strategy,
             libdeflate_level: Some(level as u8),
+            png_family: false,
         }
     }
 
@@ -333,6 +419,21 @@ impl CompressionLevel {
         if self.libdeflate_level.is_some() {
             return None;
         }
+        if self.png_family {
+            // Algorithm switches in the PNG ladder (measured on held-out
+            // images): ultra-fast -> exact Huffman (2), min match 8 -> 5 (4),
+            // PNG -> general parsers (13). Efforts 3 and 5-12 only widen the
+            // search.
+            return match self.effort {
+                2 => Some(Self::png(1)),
+                4..=12 => Some(Self::png(3)),
+                13..=17 => Some(Self::png(12)),
+                18..=22 => Some(Self::png(17)),
+                23..=30 => Some(Self::png(22)),
+                31..=200 => Some(Self::png(30)),
+                _ => None,
+            };
+        }
         // Each strategy's levels fall back to the previous strategy's max.
         // The chain terminates at FastHt (Turbo→FastHt always improves).
         match self.effort {
@@ -419,8 +520,10 @@ impl CompressionLevel {
                 29 => (200, DEFLATE_MAX_MATCH_LEN),
                 _ => (300, DEFLATE_MAX_MATCH_LEN),
             },
-            // FullOptimal has its own matchfinder; these params are not used.
-            InternalStrategy::FullOptimal => (0, 0),
+            // FullOptimal and Png have their own matchfinders; these params are not used.
+            InternalStrategy::FullOptimal
+            | InternalStrategy::Png(_)
+            | InternalStrategy::PngUltra => (0, 0),
         };
 
         let (good_match, max_lazy) = match self.strategy {
@@ -530,6 +633,10 @@ pub struct Compressor {
     near_optimal: Option<Box<NearOptimalState>>,
     /// Full-optimal (Zopfli) state for the FullOptimal strategy.
     full_optimal: Option<Box<full_optimal::FullOptimalState>>,
+    /// Hash table for the Png strategy (when hashing is enabled).
+    png_mf: Option<Box<PngMatchfinder>>,
+    /// Code tables for the PngUltra strategy.
+    png_ultra: Option<Box<UltraState>>,
     /// Starting offset: skip dictionary bytes at the start of input.
     /// Set by `deflate_compress_chunk`; 0 for normal operation.
     chunk_start: usize,
@@ -626,6 +733,8 @@ impl Clone for Compressor {
             hc_mf: self.hc_mf.as_ref().map(|b| Box::new((**b).clone())),
             near_optimal: self.near_optimal.as_ref().map(|b| Box::new((**b).clone())),
             full_optimal: self.full_optimal.as_ref().map(|b| Box::new((**b).clone())),
+            png_mf: self.png_mf.clone(),
+            png_ultra: self.png_ultra.clone(),
             chunk_start: self.chunk_start,
             force_nonfinal: self.force_nonfinal,
             incremental_pos: self.incremental_pos,
@@ -669,6 +778,8 @@ impl Compressor {
             InternalStrategy::Greedy | InternalStrategy::Lazy | InternalStrategy::Lazy2 => {
                 SEQ_STORE_LENGTH + 1
             }
+            InternalStrategy::Png(_) => PNG_SEQ_STORE_LENGTH + 1,
+            InternalStrategy::PngUltra => 0,
         };
 
         let mut freqs = DeflateFreqs::default();
@@ -727,6 +838,16 @@ impl Compressor {
                 Some(full_optimal::FullOptimalState::new(iterations.max(1)))
             } else {
                 None
+            },
+            png_ultra: match strategy {
+                InternalStrategy::PngUltra => Some(Box::new(UltraState::new())),
+                _ => None,
+            },
+            png_mf: match strategy {
+                InternalStrategy::Png(p) if p.hash => {
+                    Some(Box::new(PngMatchfinder::new(p.chain_depth > 1)))
+                }
+                _ => None,
             },
             chunk_start: 0,
             force_nonfinal: false,
@@ -826,6 +947,12 @@ impl Compressor {
                 let fo = self.full_optimal.as_ref().unwrap();
                 let iterations = fo.iterations();
                 full_optimal::compress_full_optimal(&mut os, input, iterations, true, &stop)?;
+            }
+            InternalStrategy::Png(params) => {
+                self.compress_png(&mut os, input, params, &stop)?;
+            }
+            InternalStrategy::PngUltra => {
+                self.compress_png_ultra(&mut os, input, &stop)?;
             }
         }
 
@@ -3261,6 +3388,8 @@ impl Compressor {
             InternalStrategy::Lazy => self.compress_lazy_generic(&mut os, input, false, stop),
             InternalStrategy::Lazy2 => self.compress_lazy_generic(&mut os, input, true, stop),
             InternalStrategy::NearOptimal => self.compress_near_optimal(&mut os, input, stop),
+            InternalStrategy::Png(params) => self.compress_png(&mut os, input, params, stop),
+            InternalStrategy::PngUltra => self.compress_png_ultra(&mut os, input, stop),
             InternalStrategy::Store | InternalStrategy::FullOptimal => unreachable!(),
         };
         if let Err(e) = result {

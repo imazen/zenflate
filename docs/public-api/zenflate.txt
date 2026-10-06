@@ -6,7 +6,7 @@
 # impls omitted; re-export duplicates annotated `[also: path]`.
 # DO NOT EDIT BY HAND — commit regenerated changes with the code.
 #
-# files: zenflate.txt 197 lines (supported surface) | zenflate.features.txt 0 added (features: alloc,avx512,compress,simd,std,threads,unchecked) | zenflate.internal.txt 8 lines (8 hidden + 0 excluded-feature)
+# files: zenflate.txt 199 lines (supported surface) | zenflate.features.txt 0 added (features: alloc,avx512,compress,simd,std,threads,unchecked) | zenflate.internal.txt 8 lines (8 hidden + 0 excluded-feature)
 
 ## summary
 #
@@ -14,7 +14,7 @@
 #   pub types (struct/enum/trait/alias)        28
 #   pub consts/statics                          2
 #   free functions                              8
-#   inherent methods                          124
+#   inherent methods                          126
 #   struct fields                               4
 #   enum variants                              22
 #   re-exports                                  3
@@ -25,11 +25,11 @@
 # per-module pub lines:
 #   (root)                           72
 #   checksum                          6
-#   compress                         53
+#   compress                         55
 #   decompress                       52
 #   error                            14
 
-## items (179 lines)
+## items (181 lines)
 
 pub mod zenflate
 pub use Stop
@@ -63,6 +63,7 @@ pub fn compress::CompressionLevel::libdeflate(u32) -> Self
 pub fn compress::CompressionLevel::monotonicity_fallback(&self) -> core::option::Option<compress::CompressionLevel>
 pub fn compress::CompressionLevel::new(u32) -> Self
 pub fn compress::CompressionLevel::none() -> Self
+pub fn compress::CompressionLevel::png(u32) -> Self
 pub fn compress::Compressor::deflate_compress(&mut self, &[u8], &mut [u8], impl enough::Stop) -> core::result::Result<usize, error::CompressionError>
 pub fn compress::Compressor::deflate_compress_bound(usize) -> usize
 pub fn compress::Compressor::deflate_compress_incremental(&mut self, &[u8], &mut [u8], bool, impl enough::Stop) -> core::result::Result<usize, error::CompressionError>
@@ -151,6 +152,7 @@ pub fn compress::CompressionLevel::libdeflate(u32) -> Self
 pub fn compress::CompressionLevel::monotonicity_fallback(&self) -> core::option::Option<compress::CompressionLevel>
 pub fn compress::CompressionLevel::new(u32) -> Self
 pub fn compress::CompressionLevel::none() -> Self
+pub fn compress::CompressionLevel::png(u32) -> Self
 pub struct Compressor [also: compress]
 pub fn compress::Compressor::deflate_compress(&mut self, &[u8], &mut [u8], impl enough::Stop) -> core::result::Result<usize, error::CompressionError>
 pub fn compress::Compressor::deflate_compress_bound(usize) -> usize

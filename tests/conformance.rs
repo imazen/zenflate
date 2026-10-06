@@ -219,6 +219,7 @@ fn inputs() -> Vec<(String, Vec<u8>)> {
 enum Family {
     New(u32),
     Libdeflate(u32),
+    Png(u32),
 }
 
 fn levels() -> Vec<(String, Family, CompressionLevel)> {
@@ -236,6 +237,13 @@ fn levels() -> Vec<(String, Family, CompressionLevel)> {
             format!("libdeflate({l})"),
             Family::Libdeflate(l),
             CompressionLevel::libdeflate(l),
+        )
+    }));
+    v.extend((0..=17).map(|e| {
+        (
+            format!("png({e})"),
+            Family::Png(e),
+            CompressionLevel::png(e),
         )
     }));
     v
@@ -320,6 +328,8 @@ fn incremental_supported(family: Family) -> bool {
     match family {
         Family::Libdeflate(l) => (1..=9).contains(&l),
         Family::New(e) => (10..=22).contains(&e),
+        // png(13..=22) use the same parsers as new(13..=22).
+        Family::Png(e) => (13..=22).contains(&e),
     }
 }
 
@@ -617,4 +627,14 @@ fn recovery_new_levels() {
 #[test]
 fn recovery_libdeflate_levels() {
     check_recovery(|f| matches!(f, Family::Libdeflate(_)));
+}
+
+#[test]
+fn conformance_png_levels() {
+    run_levels(|f| matches!(f, Family::Png(_)));
+}
+
+#[test]
+fn recovery_png_levels() {
+    check_recovery(|f| matches!(f, Family::Png(_)));
 }

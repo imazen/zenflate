@@ -108,7 +108,12 @@ pub fn check(input: &Input) {
             let l = (l - 32) as u32;
             (CompressionLevel::libdeflate(l), (1..=9).contains(&l))
         }
-        // Reserved (45..=63).
+        p @ 45..=62 => {
+            // png(13..) uses new(13..)'s parsers.
+            let p = (p - 45) as u32;
+            (CompressionLevel::png(p), (13..=22).contains(&p))
+        }
+        // Reserved (63).
         r => {
             let e = (r % 32) as u32;
             (CompressionLevel::new(e), (10..=22).contains(&e))

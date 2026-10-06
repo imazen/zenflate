@@ -1,6 +1,6 @@
 //! Fuzz target: every compression entry point against two decoders.
 //!
-//! The fuzzer picks a level (`new(0..=31)`, `libdeflate(0..=12)`), an entry
+//! The fuzzer picks a level (`new(0..=31)`, `libdeflate(0..=12)`, `png(0..=17)`), an entry
 //! point and its parameters, and the data. Data is used raw or expanded from
 //! a small op stream into runs, repeats and literals, so the matchfinders and
 //! block splitters see image-like structure. Checks:
