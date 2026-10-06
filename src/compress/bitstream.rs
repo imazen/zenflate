@@ -67,7 +67,11 @@ impl<'a> OutputBitstream<'a> {
                     self.bitcount -= 8;
                     self.bitbuf >>= 8;
                 } else {
+                    // The output is already lost: drop the pending bits so
+                    // later add_bits calls stay within the bit buffer.
                     self.overflow = true;
+                    self.bitbuf = 0;
+                    self.bitcount = 0;
                     return;
                 }
             }
@@ -129,5 +133,26 @@ impl<'a> OutputBitstream<'a> {
     #[allow(dead_code)]
     pub fn fast_end(&self) -> usize {
         self.buf.len().saturating_sub(7)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::OutputBitstream;
+
+    /// Writing far past a full buffer must only set `overflow` (it used to
+    /// grow `bitcount` past the 64-bit buffer).
+    #[test]
+    fn writes_past_a_full_buffer_set_overflow() {
+        for len in [0usize, 1, 2, 7, 8, 9] {
+            let mut buf = alloc::vec![0u8; len];
+            let mut os = OutputBitstream::new(&mut buf);
+            for i in 0..200u32 {
+                os.add_bits(i & 0xFF, 8);
+                os.flush_bits();
+            }
+            assert!(os.overflow, "len {len}");
+            assert!(os.bitcount <= 7, "len {len}: bitcount {}", os.bitcount);
+        }
     }
 }
