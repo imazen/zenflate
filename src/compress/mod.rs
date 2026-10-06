@@ -2776,7 +2776,13 @@ impl Compressor {
             nice_len = max_len.min(self.nice_match_length);
         }
 
-        let mut in_next_slide = in_next + (in_end - in_next).min(MATCHFINDER_WINDOW_SIZE as usize);
+        // The binary tree stores 16-bit positions relative to in_base_offset,
+        // so the first slide is due one window past the base, not past
+        // in_next: after a dictionary warm-up (chunk_start > 0) those differ,
+        // and sliding late wrapped every position in the first window of the
+        // chunk (no matches, dictionary unused).
+        let mut in_next_slide =
+            in_base_offset + (in_end - in_base_offset).min(MATCHFINDER_WINDOW_SIZE as usize);
 
         init_stats(&mut self.split_stats, &mut ns);
 
@@ -5120,6 +5126,52 @@ mod tests {
             assert!(n > 0, "{level:?}: empty final call wrote nothing");
             stream.extend_from_slice(&out[..n]);
             assert_decodes_to(&stream, &data, &alloc::format!("{level:?} chunks"));
+        }
+    }
+
+    /// Near-optimal chunks warm up on the preceding 32 KiB; sliding the
+    /// matchfinder window late used to lose matches (and the dictionary) for
+    /// the first 32 KiB of every chunk: +4% at 8 chunks on filtered images.
+    #[cfg(feature = "threads")]
+    #[test]
+    fn near_optimal_parallel_keeps_dictionary() {
+        // Rows of noise that repeat with small edits: matches cross chunk edges.
+        let mut x = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = move || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        };
+        let row: Vec<u8> = (0..3000).map(|_| next() as u8).collect();
+        let mut data = Vec::with_capacity(2_000_000);
+        while data.len() < 2_000_000 {
+            for (i, &b) in row.iter().enumerate() {
+                data.push(if next() % 16 == 0 {
+                    next() as u8
+                } else {
+                    b.wrapping_add(i as u8 % 3)
+                });
+            }
+        }
+        for effort in [23, 30] {
+            let mut c = Compressor::new(CompressionLevel::new(effort));
+            let mut out = vec![0u8; Compressor::gzip_compress_bound(data.len()) + 4096];
+            let whole = c
+                .gzip_compress(&data, &mut out, enough::Unstoppable)
+                .unwrap();
+            let par = c
+                .gzip_compress_parallel(&data, &mut out, 8, enough::Unstoppable)
+                .unwrap();
+            let mut back = vec![0u8; data.len()];
+            crate::Decompressor::new()
+                .gzip_decompress(&out[..par], &mut back, enough::Unstoppable)
+                .unwrap();
+            assert!(back == data, "e{effort}: parallel roundtrip");
+            assert!(
+                (par as f64) < whole as f64 * 1.01,
+                "e{effort}: 8 chunks {par} B vs whole {whole} B"
+            );
         }
     }
 }
