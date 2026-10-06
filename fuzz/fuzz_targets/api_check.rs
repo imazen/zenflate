@@ -69,7 +69,10 @@ fn decodes_to(deflate: &[u8], data: &[u8], what: &str) {
     let r = Decompressor::new()
         .deflate_decompress(deflate, &mut out, Unstoppable)
         .unwrap_or_else(|e| panic!("{what}: zenflate decode: {e:?}"));
-    assert!(r.output_written == data.len() && out == data, "{what}: zenflate content");
+    assert!(
+        r.output_written == data.len() && out == data,
+        "{what}: zenflate content"
+    );
     let mz = miniz_oxide::inflate::decompress_to_vec(deflate)
         .unwrap_or_else(|e| panic!("{what}: miniz decode: {e:?}"));
     assert!(mz == data, "{what}: miniz content");
@@ -80,7 +83,10 @@ fn zlib_decodes_to(zlib: &[u8], data: &[u8], what: &str) {
     let r = Decompressor::new()
         .zlib_decompress(zlib, &mut out, Unstoppable)
         .unwrap_or_else(|e| panic!("{what}: zenflate zlib decode: {e:?}"));
-    assert!(r.output_written == data.len() && out == data, "{what}: zlib content");
+    assert!(
+        r.output_written == data.len() && out == data,
+        "{what}: zlib content"
+    );
 }
 
 fn fresh_zlib(level: CompressionLevel, data: &[u8]) -> Vec<u8> {
@@ -94,21 +100,36 @@ fn fresh_zlib(level: CompressionLevel, data: &[u8]) -> Vec<u8> {
 
 /// Run every check `input` selects; panics on a violation.
 pub fn check(input: &Input) {
-    let (level, incremental_ok) = match input.level % 45 {
+    // Selector bytes keep their meaning so committed seeds keep testing what
+    // they were written for: new levels and entry points take reserved values.
+    let (level, incremental_ok) = match input.level % 64 {
         e @ 0..=31 => (CompressionLevel::new(e as u32), (10..=22).contains(&e)),
-        l => {
+        l @ 32..=44 => {
             let l = (l - 32) as u32;
             (CompressionLevel::libdeflate(l), (1..=9).contains(&l))
         }
+        // Reserved (45..=63).
+        r => {
+            let e = (r % 32) as u32;
+            (CompressionLevel::new(e), (10..=22).contains(&e))
+        }
     };
-    let data = if input.expand { expand(&input.data) } else { input.data.clone() };
-    let max = if level.effort() >= 31 { 16 << 10 } else { 256 << 10 };
+    let data = if input.expand {
+        expand(&input.data)
+    } else {
+        input.data.clone()
+    };
+    let max = if level.effort() >= 31 {
+        16 << 10
+    } else {
+        256 << 10
+    };
     if data.len() > max {
         return;
     }
     let name = format!("{level:?} len {}", data.len());
 
-    match input.mode % 5 {
+    match input.mode % 8 {
         0 => {
             let mut c = Compressor::new(level);
             let mut out = vec![0u8; Compressor::deflate_compress_bound(data.len())];
@@ -124,7 +145,10 @@ pub fn check(input: &Input) {
             let r = Decompressor::new()
                 .gzip_decompress(&out[..n], &mut back, Unstoppable)
                 .unwrap_or_else(|e| panic!("{name}: gzip decode: {e:?}"));
-            assert!(r.output_written == data.len() && back == data, "{name}: gzip content");
+            assert!(
+                r.output_written == data.len() && back == data,
+                "{name}: gzip content"
+            );
         }
         1 => {
             // Short buffer, then reuse.
@@ -147,7 +171,10 @@ pub fn check(input: &Input) {
             let mut out = vec![0u8; Compressor::zlib_compress_bound(data.len())];
             let stop = StopAfter(AtomicUsize::new(input.stop_after as usize));
             match c.zlib_compress(&data, &mut out, &stop) {
-                Ok(n) => assert!(out[..n] == fresh[..], "{name}: completed differently under a stop"),
+                Ok(n) => assert!(
+                    out[..n] == fresh[..],
+                    "{name}: completed differently under a stop"
+                ),
                 Err(CompressionError::Stopped(_)) => {}
                 Err(e) => panic!("{name}: stop: {e:?}"),
             }
@@ -183,7 +210,7 @@ pub fn check(input: &Input) {
                 Err(e) => assert!(!incremental_ok, "{name}: incremental final: {e:?}"),
             }
         }
-        _ => {
+        4 => {
             // Parallel gzip.
             let threads = 1 + input.threads as usize % 8;
             let mut c = Compressor::new(level);
@@ -195,7 +222,12 @@ pub fn check(input: &Input) {
             let r = Decompressor::new()
                 .gzip_decompress(&out[..n], &mut back, Unstoppable)
                 .unwrap_or_else(|e| panic!("{name}: parallel x{threads} decode: {e:?}"));
-            assert!(r.output_written == data.len() && back == data, "{name}: parallel content");
+            assert!(
+                r.output_written == data.len() && back == data,
+                "{name}: parallel content"
+            );
         }
+        // Reserved (5..=7).
+        _ => {}
     }
 }
