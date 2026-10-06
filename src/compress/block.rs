@@ -1390,6 +1390,33 @@ pub(crate) fn choose_match(
     next
 }
 
+/// [`finish_block`] for a block whose `codes` were already built from
+/// `freqs` plus one end-of-block symbol (as `png_mode`'s `block_bits` does),
+/// so they aren't built twice. Writes the same bytes as `finish_block`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn finish_block_with_codes(
+    os: &mut OutputBitstream<'_>,
+    block_begin: &[u8],
+    block_length: usize,
+    sequences: &[Sequence],
+    freqs: &mut DeflateFreqs,
+    codes: &DeflateCodes,
+    static_codes: &DeflateCodes,
+    is_final_block: bool,
+) {
+    freqs.litlen[DEFLATE_END_OF_BLOCK as usize] += 1;
+    flush_block(
+        os,
+        block_begin,
+        block_length,
+        BlockOutput::Sequences(sequences),
+        freqs,
+        codes,
+        static_codes,
+        is_final_block,
+    );
+}
+
 /// Build codes and flush a finished block (adds end-of-block symbol first).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn finish_block(

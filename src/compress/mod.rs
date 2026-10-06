@@ -3042,28 +3042,45 @@ impl Compressor {
 
             let block_length = in_next - in_block_begin;
             let is_final = !self.force_nonfinal && in_next >= in_end;
-            if let Some(g) = self.runs_guard.as_deref_mut()
-                && g.prefer_runs(
+            if let Some(g) = self.runs_guard.as_deref_mut() {
+                match g.prefer_runs(
                     input,
                     in_block_begin,
                     in_next,
                     &self.freqs,
-                    &self.static_codes,
-                    stop,
-                )?
-            {
-                let (seqs, freqs) = g.parse();
-                finish_block(
-                    os,
-                    &input[in_block_begin..],
-                    block_length,
-                    seqs,
-                    freqs,
                     &mut self.codes,
                     &self.static_codes,
-                    is_final,
-                );
-                continue;
+                    stop,
+                )? {
+                    Some(true) => {
+                        let (seqs, freqs, codes) = g.parse();
+                        block::finish_block_with_codes(
+                            os,
+                            &input[in_block_begin..],
+                            block_length,
+                            seqs,
+                            freqs,
+                            codes,
+                            &self.static_codes,
+                            is_final,
+                        );
+                        continue;
+                    }
+                    Some(false) => {
+                        block::finish_block_with_codes(
+                            os,
+                            &input[in_block_begin..],
+                            block_length,
+                            &self.sequences[..=seq_idx],
+                            &mut self.freqs,
+                            &self.codes,
+                            &self.static_codes,
+                            is_final,
+                        );
+                        continue;
+                    }
+                    None => {}
+                }
             }
             finish_block(
                 os,

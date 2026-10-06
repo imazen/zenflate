@@ -42,7 +42,7 @@ use alloc::vec::Vec;
 use super::bitstream::OutputBitstream;
 use super::block::{
     DeflateCodes, DeflateFreqs, block_symbol_cost, choose_match, dynamic_header_bits, finish_block,
-    make_huffman_codes,
+    finish_block_with_codes, make_huffman_codes,
 };
 use super::block_split::MIN_BLOCK_LENGTH;
 use super::sequences::Sequence;
@@ -140,6 +140,8 @@ pub(crate) struct PngMatchfinder {
 pub(crate) struct RunsParse {
     seqs: Vec<Sequence>,
     freqs: DeflateFreqs,
+    /// Codes built from `freqs` by the last cost comparison.
+    codes: DeflateCodes,
     n: usize,
 }
 
@@ -162,6 +164,7 @@ impl PngMatchfinder {
             runs: Box::new(RunsParse {
                 seqs: alloc::vec![Sequence::default(); PNG_SEQ_STORE_LENGTH],
                 freqs: DeflateFreqs::default(),
+                codes: DeflateCodes::default(),
                 n: 0,
             }),
         }
@@ -443,6 +446,7 @@ impl RunsGuard {
             parse: RunsParse {
                 seqs: alloc::vec![Sequence::default(); (max_block + MIN_BLOCK_LENGTH) / 4 + 2],
                 freqs: DeflateFreqs::default(),
+                codes: DeflateCodes::default(),
                 n: 0,
             },
             skip: 0,
@@ -454,21 +458,26 @@ impl RunsGuard {
         self.skip = 0;
     }
 
-    /// Parse `input[begin..end]` runs-only and return true when that parse
-    /// costs fewer bits than one with literal/match frequencies `freqs`
-    /// (end-of-block not counted). Afterwards [`parse`](Self::parse) holds it.
+    /// Parse `input[begin..end]` runs-only and compare it with the main parse
+    /// (literal/match frequencies `freqs`, end-of-block not counted).
+    /// `None`: the comparison was skipped (paused after a clear loss).
+    /// `Some(true)`: runs-only is cheaper; [`parse`](Self::parse) holds it
+    /// with its codes. `Some(false)`: the main parse wins and `main_codes`
+    /// now hold its codes (built from `freqs` + end-of-block).
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn prefer_runs(
         &mut self,
         input: &[u8],
         begin: usize,
         end: usize,
         freqs: &DeflateFreqs,
+        main_codes: &mut DeflateCodes,
         static_codes: &DeflateCodes,
         stop: &impl enough::Stop,
-    ) -> Result<bool, CompressionError> {
+    ) -> Result<Option<bool>, CompressionError> {
         if self.skip > 0 {
             self.skip -= 1;
-            return Ok(false);
+            return Ok(None);
         }
         // png(2)'s runs-only settings.
         let cfg = ParseCfg {
@@ -489,18 +498,21 @@ impl RunsGuard {
             &mut r.freqs,
             stop,
         )?;
-        let mut scratch = DeflateCodes::default();
-        let main_bits = block_bits(freqs, &mut scratch, static_codes);
-        let runs_bits = block_bits(&r.freqs, &mut scratch, static_codes);
+        let main_bits = block_bits(freqs, main_codes, static_codes);
+        let runs_bits = block_bits(&r.freqs, &mut r.codes, static_codes);
         if runs_bits > main_bits + main_bits / 8 {
             self.skip = 3;
         }
-        Ok(runs_bits < main_bits)
+        Ok(Some(runs_bits < main_bits))
     }
 
-    /// The last runs-only parse: its sequences and frequencies.
-    pub(crate) fn parse(&mut self) -> (&[Sequence], &mut DeflateFreqs) {
-        (&self.parse.seqs[..=self.parse.n], &mut self.parse.freqs)
+    /// The last runs-only parse: its sequences, frequencies and codes.
+    pub(crate) fn parse(&mut self) -> (&[Sequence], &mut DeflateFreqs, &DeflateCodes) {
+        (
+            &self.parse.seqs[..=self.parse.n],
+            &mut self.parse.freqs,
+            &self.parse.codes,
+        )
     }
 }
 
@@ -601,10 +613,12 @@ impl Compressor {
             // the cheaper parse. When runs-only loses by more than 1/8
             // (photo-like content) the next 3 blocks skip the comparison.
             let mut use_runs = false;
+            let mut compared = false;
             if let Some(mf) = mf.as_deref_mut() {
                 if runs_skip > 0 {
                     runs_skip -= 1;
                 } else {
+                    compared = true;
                     let runs = &mut mf.runs;
                     runs.n = parse_block(
                         input,
@@ -616,9 +630,8 @@ impl Compressor {
                         &mut runs.freqs,
                         stop,
                     )?;
-                    let mut scratch = DeflateCodes::default();
-                    let main_bits = block_bits(&self.freqs, &mut scratch, &self.static_codes);
-                    let runs_bits = block_bits(&runs.freqs, &mut scratch, &self.static_codes);
+                    let main_bits = block_bits(&self.freqs, &mut self.codes, &self.static_codes);
+                    let runs_bits = block_bits(&runs.freqs, &mut runs.codes, &self.static_codes);
                     use_runs = runs_bits < main_bits;
                     if runs_bits > main_bits + main_bits / 8 {
                         runs_skip = 3;
@@ -628,20 +641,39 @@ impl Compressor {
 
             let block = &input[begin..end];
             let is_final = !self.force_nonfinal && end >= in_end;
-            let (seqs, freqs) = match mf.as_deref_mut() {
-                Some(mf) if use_runs => (&mf.runs.seqs[..=mf.runs.n], &mut mf.runs.freqs),
-                _ => (&self.sequences[..=n], &mut self.freqs),
-            };
-            finish_block(
-                os,
-                block,
-                block.len(),
-                seqs,
-                freqs,
-                &mut self.codes,
-                &self.static_codes,
-                is_final,
-            );
+            match mf.as_deref_mut() {
+                // Codes were built by the cost comparison; don't build them again.
+                Some(mf) if use_runs => finish_block_with_codes(
+                    os,
+                    block,
+                    block.len(),
+                    &mf.runs.seqs[..=mf.runs.n],
+                    &mut mf.runs.freqs,
+                    &mf.runs.codes,
+                    &self.static_codes,
+                    is_final,
+                ),
+                _ if compared => finish_block_with_codes(
+                    os,
+                    block,
+                    block.len(),
+                    &self.sequences[..=n],
+                    &mut self.freqs,
+                    &self.codes,
+                    &self.static_codes,
+                    is_final,
+                ),
+                _ => finish_block(
+                    os,
+                    block,
+                    block.len(),
+                    &self.sequences[..=n],
+                    &mut self.freqs,
+                    &mut self.codes,
+                    &self.static_codes,
+                    is_final,
+                ),
+            }
 
             ip = end;
         }

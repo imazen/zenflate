@@ -94,61 +94,6 @@ fn heapify_array(a: &mut [u32], length: usize) {
     }
 }
 
-/// Heapsort an array of u32 values. The input slice is 0-based.
-fn heap_sort(a: &mut [u32]) {
-    let len = a.len();
-    if len < 2 {
-        return;
-    }
-    // Shift to 1-based by working with a[1..] after prepending conceptually.
-    // We use the trick from libdeflate: `A--` to shift to 1-based.
-    // In Rust, we work around this by creating a wrapper that indexes from a[-1].
-    // Actually, we can just shift the slice: operate on indices [0..len) as [1..len+1).
-    // We need 1-based access, so we'll work with a helper.
-
-    // Build maxheap (1-based, so element at index 0 is "index 1")
-    // We need to offset. Let's just do it with explicit offset math.
-    heapify_array_0based(a, len);
-
-    let mut length = len;
-    while length >= 2 {
-        a.swap(0, length - 1);
-        length -= 1;
-        heapify_subtree_0based(a, length, 0);
-    }
-}
-
-/// Sift down for maxheap, 0-based indexing.
-fn heapify_subtree_0based(a: &mut [u32], length: usize, root: usize) {
-    let v = a[root];
-    let mut parent = root;
-    loop {
-        let mut child = parent * 2 + 1;
-        if child >= length {
-            break;
-        }
-        if child + 1 < length && a[child + 1] > a[child] {
-            child += 1;
-        }
-        if v >= a[child] {
-            break;
-        }
-        a[parent] = a[child];
-        parent = child;
-    }
-    a[parent] = v;
-}
-
-/// Build maxheap, 0-based indexing.
-fn heapify_array_0based(a: &mut [u32], length: usize) {
-    if length < 2 {
-        return;
-    }
-    for i in (0..length / 2).rev() {
-        heapify_subtree_0based(a, length, i);
-    }
-}
-
 /// Sort symbols by frequency, discarding zero-frequency symbols.
 ///
 /// Returns the number of symbols with nonzero frequency.
@@ -185,12 +130,15 @@ fn sort_symbols(num_syms: usize, freqs: &[u32], lens: &mut [u8], symout: &mut [u
         }
     }
 
-    // Heapsort the symbols in the last counter bucket (high frequencies).
+    // Sort the symbols in the last counter bucket (high frequencies). Every
+    // entry packs `freq << NUM_SYMBOL_BITS | sym`, so keys are unique and any
+    // correct sort gives libdeflate's heapsort order exactly; std's unstable
+    // sort is cheaper than the heapsort on these 100-300 entry runs.
     if num_counters >= 2 {
         let start = counters[num_counters - 2] as usize;
         let end = counters[num_counters - 1] as usize;
         if end > start {
-            heap_sort(&mut symout[start..end]);
+            symout[start..end].sort_unstable();
         }
     }
 
@@ -627,31 +575,27 @@ mod tests {
         assert_eq!(reverse_codeword(0b110, 3), 0b011);
     }
 
+    /// The symbol sort orders by (frequency, symbol), across the counting
+    /// buckets and the high-frequency bucket that is sorted explicitly, and
+    /// gives unused symbols length 0.
     #[test]
-    fn test_heap_sort_empty() {
-        let mut a: [u32; 0] = [];
-        heap_sort(&mut a);
-    }
-
-    #[test]
-    fn test_heap_sort_sorted() {
-        let mut a = [1u32, 2, 3, 4, 5];
-        heap_sort(&mut a);
-        assert_eq!(a, [1, 2, 3, 4, 5]);
-    }
-
-    #[test]
-    fn test_heap_sort_reverse() {
-        let mut a = [5u32, 4, 3, 2, 1];
-        heap_sort(&mut a);
-        assert_eq!(a, [1, 2, 3, 4, 5]);
-    }
-
-    #[test]
-    fn test_heap_sort_duplicates() {
-        let mut a = [3u32, 1, 3, 1, 2];
-        heap_sort(&mut a);
-        assert_eq!(a, [1, 1, 2, 3, 3]);
+    fn test_sort_symbols_order() {
+        let freqs: [u32; 12] = [5, 0, 300, 5, 1000, 7, 0, 300, 2, 999, 1, 5000];
+        let mut lens = [9u8; 12];
+        let mut out = [0u32; 12];
+        let n = sort_symbols(12, &freqs, &mut lens, &mut out);
+        assert_eq!(n, 10);
+        let got: Vec<(u32, u32)> = out[..n]
+            .iter()
+            .map(|&v| ((v & SYMBOL_MASK), freqs[(v & SYMBOL_MASK) as usize]))
+            .collect();
+        let mut want: Vec<(u32, u32)> = (0..12u32)
+            .filter(|&s| freqs[s as usize] != 0)
+            .map(|s| (s, freqs[s as usize]))
+            .collect();
+        want.sort_by_key(|&(s, f)| (f, s));
+        assert_eq!(got, want);
+        assert_eq!((lens[1], lens[6]), (0, 0));
     }
 
     #[test]
