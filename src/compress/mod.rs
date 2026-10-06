@@ -3200,7 +3200,8 @@ impl Compressor {
     /// The compression ratio is nearly identical to single-threaded compression,
     /// since each chunk uses a full 32KB dictionary window.
     ///
-    /// Falls back to single-threaded compression for small inputs or `num_threads <= 1`.
+    /// Falls back to single-threaded compression for small inputs, `num_threads <= 1`,
+    /// and efforts 31+ (full-optimal parsing has no chunk dictionary warm-up).
     ///
     /// ```
     /// use zenflate::{Compressor, CompressionLevel, Decompressor, Unstoppable};
@@ -3232,7 +3233,12 @@ impl Compressor {
         let level = self.level;
 
         // For small inputs or single thread, fall back to single-threaded.
-        if num_threads == 1 || input.len() < 32 * 1024 {
+        // FullOptimal (efforts 31-200) has no dictionary warm-up for chunks,
+        // so it compresses on one thread.
+        if num_threads == 1
+            || input.len() < 32 * 1024
+            || level.strategy() == InternalStrategy::FullOptimal
+        {
             return self.gzip_compress(input, output, stop);
         }
 
@@ -5172,6 +5178,28 @@ mod tests {
                 (par as f64) < whole as f64 * 1.01,
                 "e{effort}: 8 chunks {par} B vs whole {whole} B"
             );
+        }
+    }
+
+    /// Efforts 31+ (FullOptimal) used to panic in every worker thread
+    /// (`unreachable!` in the chunk dispatcher).
+    #[cfg(feature = "threads")]
+    #[test]
+    fn parallel_gzip_full_optimal_does_not_panic() {
+        let data: Vec<u8> = (0..120_000u32)
+            .map(|i| (i * 7 % 251) as u8 ^ (i >> 9) as u8)
+            .collect();
+        for effort in [31, 46] {
+            let mut c = Compressor::new(CompressionLevel::new(effort));
+            let mut out = vec![0u8; Compressor::gzip_compress_bound(data.len()) + 4096];
+            let n = c
+                .gzip_compress_parallel(&data, &mut out, 4, enough::Unstoppable)
+                .unwrap();
+            let mut back = vec![0u8; data.len()];
+            crate::Decompressor::new()
+                .gzip_decompress(&out[..n], &mut back, enough::Unstoppable)
+                .unwrap();
+            assert!(back == data, "e{effort}: roundtrip");
         }
     }
 }
