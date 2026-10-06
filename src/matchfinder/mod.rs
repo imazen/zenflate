@@ -103,7 +103,7 @@ fn lz_extend_wasm128(strptr: &[u8], matchptr: &[u8], start_len: u32, max_len: u3
 }
 
 /// Word-at-a-time match extension for non-WASM targets.
-#[cfg(not(all(target_arch = "wasm32", target_feature = "simd128")))]
+#[cfg(not(all(target_arch = "wasm32", target_feature = "simd128", feature = "simd")))]
 #[inline(always)]
 fn lz_extend_word(strptr: &[u8], matchptr: &[u8], start_len: u32, max_len: u32) -> u32 {
     use crate::fast_bytes::{get_byte, load_u64_le};
