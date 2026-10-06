@@ -357,6 +357,21 @@ two-thread decode pipeline is bounded by inflate, so this is zenpng's lever.
   split points from the input alone (e.g. byte-histogram change points on the
   filtered rows), computed once and shared by every rung and the runs-only
   guard - adaptive and parse-independent, so rungs couldn't diverge.
+  IMPLEMENTED for png(10..=18) (`block_split::input_block_end`, zenpng asked
+  for monotone rungs): splitting on the runs-only tokenization of the input (a
+  5+ byte run = one match observation, other bytes literals) costs +0.12% total
+  vs parse-driven splitting (raw bytes as literals cost +0.55%, residual-
+  magnitude buckets +0.61%); neighbour inversions from png(12) up are <= 0.07%
+  (png(11)/png(13) 0.6% on the 16-bit image). Speed cost on Neoverse:
+  png(10) +14%, png(12) +9%, png(14) +5%, png(16..=18) +4% (about half is the
+  scan at ~18 instructions/byte after unchecked-free tightening, the rest
+  different block sizes). Blocks are capped at 3 * (SEQ_STORE_LENGTH - 1)
+  bytes so the sequence store can't end one early (a parse-dependent end).
+  Matches must not cross the shared block end, and `adjust_max_and_nice_len`
+  only lowers max_len/nice_len, so they are reset per block (forgetting that
+  made output 12-16% larger). On 5207_rgb16_1024 greedy min-match-5 png(9)
+  beats every lazy rung (3-byte lazy matches suit 16-bit samples poorly). new() keeps
+  parse-driven splitting.
 - Before the guard, e13 was larger than png(12) on 41/86 images (up to 8.6%).
 
 ### Strategy state must survive early returns (2026-10-06)

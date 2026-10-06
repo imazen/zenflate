@@ -937,6 +937,38 @@ mod tests {
         assert!(smaller > 0, "the guard never picked the runs-only parse");
     }
 
+    /// png(10..=18) take block ends from the input alone
+    /// (`input_block_end`): they are deterministic, strictly increasing and
+    /// end at the input's end, and rungs built on them round-trip.
+    #[test]
+    fn png_lazy_rungs_share_block_ends() {
+        let img = filtered_image(900, 300, 3);
+        let ends = |data: &[u8]| {
+            let mut v = vec![];
+            let mut b = 0;
+            while b < data.len() {
+                b = crate::compress::block_split::input_block_end(data, b, data.len(), 300_000);
+                v.push(b);
+            }
+            v
+        };
+        let e = ends(&img);
+        assert!(e.len() > 1, "test image should split");
+        assert_eq!(e, ends(&img));
+        assert_eq!(*e.last().unwrap(), img.len());
+        for w in e.windows(2) {
+            assert!(w[1] > w[0]);
+        }
+        for effort in [10, 14, 18] {
+            let mut out = vec![0u8; Compressor::zlib_compress_bound(img.len())];
+            let n = Compressor::new(CompressionLevel::png(effort))
+                .zlib_compress(&img, &mut out, enough::Unstoppable)
+                .unwrap();
+            let back = miniz_oxide::inflate::decompress_to_vec_zlib(&out[..n]).unwrap();
+            assert!(back == img, "png({effort}) roundtrip");
+        }
+    }
+
     #[cfg(feature = "threads")]
     #[test]
     fn png_parallel_gzip() {

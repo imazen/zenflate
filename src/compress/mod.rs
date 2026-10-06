@@ -232,7 +232,9 @@ impl CompressionLevel {
     /// representatives at native sizes (adaptive filter). Efforts 10-18 use
     /// libdeflate 5/6/7's lazy settings and deeper ones, without `new()`'s
     /// `good_match`/`max_lazy` shortcuts, and parse every block runs-only too,
-    /// keeping the cheaper parse. On 86 PNG filtered streams (64-1024 px) they
+    /// keeping the cheaper parse. Their block boundaries come from the input
+    /// alone, so every one of them splits a given input identically and a
+    /// higher effort only widens the search within the same blocks. On 86 PNG filtered streams (64-1024 px) they
     /// are never larger per image than libdeflate 5/6/7 and lie on the
     /// size/speed front; below about 10 MB/s near-optimal parsing beats any
     /// lazy depth, so efforts 19-22 all use it
@@ -2837,7 +2839,34 @@ impl Compressor {
         while in_next < in_end && !os.overflow {
             stop.check()?;
             let in_block_begin = in_next;
-            let in_max_block_end = choose_max_block_end(in_next, in_end, SOFT_MAX_BLOCK_LENGTH);
+            // png() lazy rungs take block ends from the input alone, so every
+            // rung and the runs-only guard see the same blocks; matches then
+            // never cross a block end.
+            let shared_blocks = self.level.png_family;
+            let in_max_block_end = if shared_blocks {
+                // Every sequence holds a match of 3+ bytes, so a block this
+                // long can't fill the sequence store: blocks never end early
+                // on a parse-dependent condition.
+                block_split::input_block_end(
+                    input,
+                    in_next,
+                    in_end,
+                    SOFT_MAX_BLOCK_LENGTH.min(3 * (SEQ_STORE_LENGTH - 1)),
+                )
+            } else {
+                choose_max_block_end(in_next, in_end, SOFT_MAX_BLOCK_LENGTH)
+            };
+            let match_end = if shared_blocks {
+                in_max_block_end
+            } else {
+                in_end
+            };
+            if shared_blocks {
+                // adjust_max_and_nice_len only lowers these; restore them for
+                // each block, since only the stream's end lowers them for good.
+                max_len = DEFLATE_MAX_MATCH_LEN;
+                nice_len = max_len.min(self.nice_match_length);
+            }
             let mut seq_idx = 0;
             let mut next_recalc_min_len = in_next + (in_end - in_next).min(10000);
 
@@ -2862,7 +2891,7 @@ impl Compressor {
                 }
 
                 // Find match at current position
-                adjust_max_and_nice_len(&mut max_len, &mut nice_len, in_end - in_next);
+                adjust_max_and_nice_len(&mut max_len, &mut nice_len, match_end - in_next);
                 let (mut cur_len, mut cur_offset) = mf.longest_match(
                     input,
                     &mut in_base_offset,
@@ -2915,7 +2944,7 @@ impl Compressor {
 
                         // Look ahead: try to find a better match at the next position.
                         // Use half the search depth for the lookahead.
-                        adjust_max_and_nice_len(&mut max_len, &mut nice_len, in_end - in_next);
+                        adjust_max_and_nice_len(&mut max_len, &mut nice_len, match_end - in_next);
                         let (next_len, next_offset) = mf.longest_match(
                             input,
                             &mut in_base_offset,
@@ -2948,7 +2977,11 @@ impl Compressor {
 
                         if lazy2 {
                             // Second lookahead with quarter search depth
-                            adjust_max_and_nice_len(&mut max_len, &mut nice_len, in_end - in_next);
+                            adjust_max_and_nice_len(
+                                &mut max_len,
+                                &mut nice_len,
+                                match_end - in_next,
+                            );
                             let (next_len2, next_offset2) = mf.longest_match(
                                 input,
                                 &mut in_base_offset,
@@ -3032,9 +3065,10 @@ impl Compressor {
                 // Check if block should end
                 if in_next >= in_max_block_end
                     || seq_idx >= SEQ_STORE_LENGTH
-                    || self
-                        .split_stats
-                        .should_end_block(in_block_begin, in_next, in_end)
+                    || (!shared_blocks
+                        && self
+                            .split_stats
+                            .should_end_block(in_block_begin, in_next, in_end))
                 {
                     break;
                 }
