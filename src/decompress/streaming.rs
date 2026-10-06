@@ -138,6 +138,11 @@ struct PendingMatch {
 // 32 KiB measured 3% faster streaming on zenpng's 106 PNG inputs (4 KiB: 2.9%).
 const INPUT_BUF_SIZE: usize = 32 * 1024;
 
+/// Initial staging size; doubles up to [`INPUT_BUF_SIZE`] while the source
+/// keeps filling it, so small streams don't zero 32 KiB they never use (64 px
+/// PNG streams decoded 4% slower on x86 with a 32 KiB initial buffer).
+const INPUT_BUF_INITIAL: usize = 4 * 1024;
+
 /// Minimum lookback required for match references (32KB window).
 const LOOKBACK_SIZE: usize = 32 * 1024;
 
@@ -194,7 +199,11 @@ pub struct StreamDecompressor<S> {
     source: S,
     inner: Decompressor,
 
-    // Output buffer: [lookback (32KB) | peekable (capacity)]
+    // Output buffer: starts at `capacity` bytes with output from offset 0, and
+    // grows to [lookback (32KB) | peekable (capacity)] the first time output
+    // outgrows it, so a stream that fits in `capacity` never allocates or
+    // zero-fills the 32 KiB window. Back-references are bounded by
+    // `lookback_valid`, never by buffer position.
     buffer: Vec<u8>,
     capacity: usize,
     write_pos: usize,
@@ -203,10 +212,10 @@ pub struct StreamDecompressor<S> {
     // valid back-reference targets. Saturates at `LOOKBACK_SIZE` (the maximum
     // legal DEFLATE back-ref distance).
     //
-    // This is NOT `write_pos - LOOKBACK_SIZE`: at construction `write_pos`
-    // starts at `LOOKBACK_SIZE`, but the bytes before it are zero-fill, not
-    // real output. A malicious stream emitting a back-ref as the very first
-    // symbol would otherwise read those implicit zeros as "lookback".
+    // This is NOT derived from `write_pos`: after `reset` the buffer may still
+    // hold a previous stream's bytes, and before the first compaction no
+    // window exists at all. A malicious stream emitting a back-ref as the very
+    // first symbol must not read stale bytes as "lookback".
     //
     // Updated by every write to `write_pos`, and re-clamped by
     // `compact_output` (which may reduce `write_pos`).
@@ -370,7 +379,7 @@ impl<S> StreamDecompressor<S> {
 impl<S: InputSource> StreamDecompressor<S> {
     fn new(source: S, capacity: usize, wrapper: WrapperFormat) -> Self {
         assert!(capacity > 0, "capacity must be at least 1");
-        let buf_size = LOOKBACK_SIZE + capacity;
+        let buf_size = capacity;
         let initial_state = if wrapper == WrapperFormat::Raw {
             StreamState::BlockHeader
         } else {
@@ -385,10 +394,10 @@ impl<S: InputSource> StreamDecompressor<S> {
             inner: Decompressor::new(),
             buffer: vec![0u8; buf_size],
             capacity,
-            write_pos: LOOKBACK_SIZE,
-            read_pos: LOOKBACK_SIZE,
+            write_pos: 0,
+            read_pos: 0,
             lookback_valid: 0,
-            input_buf: vec![0u8; INPUT_BUF_SIZE],
+            input_buf: vec![0u8; INPUT_BUF_INITIAL],
             input_len: 0,
             input_pos: 0,
             bitbuf: 0,
@@ -403,7 +412,7 @@ impl<S: InputSource> StreamDecompressor<S> {
             wrapper,
             checksum: checksum_init,
             total_output: 0,
-            checksum_watermark: LOOKBACK_SIZE,
+            checksum_watermark: 0,
             skip_checksum: false,
             checksum_matched: None,
             max_output_size: None,
@@ -531,8 +540,8 @@ impl<S: InputSource> StreamDecompressor<S> {
         };
         self.source = source;
         self.inner = Decompressor::new();
-        self.write_pos = LOOKBACK_SIZE;
-        self.read_pos = LOOKBACK_SIZE;
+        self.write_pos = 0;
+        self.read_pos = 0;
         self.lookback_valid = 0;
         self.input_len = 0;
         self.input_pos = 0;
@@ -553,7 +562,7 @@ impl<S: InputSource> StreamDecompressor<S> {
         self.doubles_pending = false;
         self.checksum = checksum_init;
         self.total_output = 0;
-        self.checksum_watermark = LOOKBACK_SIZE;
+        self.checksum_watermark = 0;
         // Preserve skip_checksum and max_output_size across reset; clear result
         self.checksum_matched = None;
         self.total_decompressed = 0;
@@ -574,19 +583,26 @@ impl<S: InputSource> StreamDecompressor<S> {
             self.input_len -= self.input_pos;
             self.input_pos = 0;
         }
-        // Fill remaining space from source
-        while self.input_len < INPUT_BUF_SIZE {
-            let src = self.source.fill_buf()?;
-            if src.is_empty() {
-                break;
+        // Fill remaining space from source, doubling the buffer (up to
+        // INPUT_BUF_SIZE) each time the source fills it.
+        loop {
+            while self.input_len < self.input_buf.len() {
+                let src = self.source.fill_buf()?;
+                if src.is_empty() {
+                    return Ok(());
+                }
+                let can_copy = src.len().min(self.input_buf.len() - self.input_len);
+                self.input_buf[self.input_len..self.input_len + can_copy]
+                    .copy_from_slice(&src[..can_copy]);
+                self.input_len += can_copy;
+                self.source.consume(can_copy);
             }
-            let can_copy = src.len().min(INPUT_BUF_SIZE - self.input_len);
-            self.input_buf[self.input_len..self.input_len + can_copy]
-                .copy_from_slice(&src[..can_copy]);
-            self.input_len += can_copy;
-            self.source.consume(can_copy);
+            if self.input_buf.len() >= INPUT_BUF_SIZE {
+                return Ok(());
+            }
+            let grown = (self.input_buf.len() * 2).min(INPUT_BUF_SIZE);
+            self.input_buf.resize(grown, 0);
         }
-        Ok(())
     }
 
     /// Ensure the staging buffer has at least `min_bytes` available.
@@ -607,6 +623,12 @@ impl<S: InputSource> StreamDecompressor<S> {
     /// Compact the output buffer. Keeps the last 32KB as lookback.
     /// Must be called only after updating checksum up to write_pos.
     fn compact_output(&mut self) {
+        if self.buffer.len() < LOOKBACK_SIZE + self.capacity {
+            // Output outgrew `capacity` for the first time: add room for the
+            // lookback window instead of compacting.
+            self.buffer.resize(LOOKBACK_SIZE + self.capacity, 0);
+            return;
+        }
         if self.read_pos <= LOOKBACK_SIZE {
             return;
         }
@@ -1374,10 +1396,9 @@ impl<S: InputSource> StreamDecompressor<S> {
                                 as usize;
 
                         // Reject back-refs that point past produced output.
-                        // `out_pos` alone is not the right bound: at stream
-                        // start the output buffer holds `LOOKBACK_SIZE` bytes
-                        // of zero-fill that are NOT real lookback. Track the
-                        // count of real bytes immediately behind `out_pos`.
+                        // `out_pos` alone is not the right bound: after a
+                        // reset the buffer can hold a previous stream's bytes,
+                        // which are NOT real lookback (see `lookback_valid`).
                         if offset == 0 || offset > out_pos - real_start {
                             break 'fastloop Exit::BadData;
                         }
@@ -2524,6 +2545,34 @@ mod tests {
             other => panic!(
                 "expected DecompressionError::BadData on tiny-capacity stream, got {other:?}"
             ),
+        }
+    }
+
+    #[test]
+    fn stream_first_symbol_backref_after_reset_is_rejected() {
+        // After `reset` the output buffer still holds the previous stream's
+        // bytes (it is no longer zero-filled), at every capacity. A back-ref
+        // as the new stream's first symbol must not read them.
+        let bad = craft_first_symbol_bad_backref();
+        // A valid stored block of 40 KiB of 0xAB fills (and, at small
+        // capacities, grows and compacts) the buffer first.
+        let payload = vec![0xABu8; 40 * 1024];
+        let mut good = vec![0x00u8];
+        for chunk in payload.chunks(0xFFFF) {
+            let n = chunk.len() as u16;
+            good.extend_from_slice(&n.to_le_bytes());
+            good.extend_from_slice(&(!n).to_le_bytes());
+            good.extend_from_slice(chunk);
+        }
+        good[0] = 0x01; // BFINAL stored block (single chunk)
+        for capacity in [16, 4096, DEFAULT_CAPACITY] {
+            let mut dec = StreamDecompressor::deflate(good.as_slice(), capacity);
+            assert_eq!(stream_decompress_all(&mut dec).unwrap(), payload);
+            dec.reset(bad.as_slice());
+            match stream_decompress_all(&mut dec) {
+                Err(StreamError::Decompress(DecompressionError::BadData)) => {}
+                other => panic!("capacity {capacity}: expected BadData after reset, got {other:?}"),
+            }
         }
     }
 }
