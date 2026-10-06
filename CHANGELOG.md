@@ -13,6 +13,7 @@
   - A call whose new input needed more than one sequence store (8,192 sequences for HtGreedy, 50,000 for Greedy/Lazy/Lazy2) compressed one block, dropped the rest and returned `Ok`; 4,000,000 bytes of small-alphabet data became a 16 KB stream that failed to decode. Each call now emits as many blocks as it needs.
   - Each call padded its last partial byte, so consecutive outputs did not concatenate into a decodable stream. Non-final calls now keep the partial byte for the next call (carried through `snapshot`/`restore` and `clone`), so returned sizes sum to the exact stream size.
   - A final call with no new input wrote nothing, leaving the stream unterminated; it now writes an empty final block.
+- `gzip_compress_parallel` panicked in every worker thread at efforts 31-200 (full-optimal parsing has no chunk dictionary warm-up). Those efforts now compress on one thread (dd28ead).
 - Near-optimal compression (efforts 23-30) discarded its 32 KiB dictionary at every chunk boundary: the binary-tree matchfinder's first window slide came one window late, wrapping its 16-bit positions so the first 32 KiB of each chunk found no matches (14017cc). `gzip_compress_parallel` at these efforts lost about 0.7% of the output per chunk on filtered images (+4.2% at 8 chunks); it is now within 0.3% of single-threaded output.
 
 - **A second, newer Miri blocker: the gate could not finish at all.** With
