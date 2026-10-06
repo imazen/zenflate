@@ -285,6 +285,57 @@ native AVX-512+VNNI+VPCLMULQDQ), no `target-cpu=native`. Full data:
 - Min match 8 -> 5 is a real strategy boundary (27-38 images larger, up to 6.5%); keep it a
   single switch with a monotonicity_fallback, don't step through 7 and 6.
 
+### Inflate on PNG streams (2026-10-06, `examples/png_inflate.rs`)
+
+Measured on zenpng's 106 vs_png inputs (each PNG's IDAT stream), median time
+per image, interleaved arms. zenpng's ST decode is ~45% inflate and its
+two-thread decode pipeline is bounded by inflate, so this is zenpng's lever.
+
+- **Double-literal litlen entries** (fdeflate's trick): `add_double_literals`
+  packs two literals into one 11-bit-table entry when both codewords fit.
+  Literal-heavy PNG streams halve their lookups. The slow paths must test
+  `HUFFDEC_LITERAL` before any flag (the second literal overlaps bits 8-15).
+- **12-bit tables measured no better** with doubles (median 1.045 vs 1.036 of
+  fdeflate's time on i265) and slower on small images. Kept 11.
+- **The pass is gated** (`DOUBLE_LITERAL_MIN_INPUT` = 16 KiB of compressed input
+  left; streaming upgrades the table mid-block once 16 KiB is staged). Ungated,
+  64 px images decoded 10% slower on Neoverse-N1.
+- **Blocks without doubles keep a single-store literal path** (`put_lits`): the
+  two-store `store_lits` makes the output position depend on the loaded entry,
+  and alone cost 64 px images +7.7% one-shot on Neoverse.
+- **Streaming:** 512-byte input staging made the fastloop exit every ~480
+  compressed bytes (32 KiB: 1.167 -> 1.129 of fdeflate's time on i265); per-literal saturating
+  `lookback_valid` updates replaced by a fixed `real_start` per fastloop entry
+  (1.129 -> 1.092 of fdeflate's time); the 32 KiB lookback window is allocated only when output outgrows
+  `capacity` (zenpng measured its zero-fill at ~26K of ~620K instructions in a
+  64x48 decode).
+- Results (new/base, median per image): x86 265K one-shot 0.972, streaming
+  0.966; Neoverse-N1 one-shot 0.980, streaming 0.984; M4 Pro one-shot 0.970,
+  streaming 0.945. A 32 KiB *initial* staging buffer cost 64 px streams 4% on
+  x86 (zeroing); it now starts at 4 KiB and doubles while the source fills it. Data: `~/tmp` runs on i265,
+  arm-big and mac (not committed; the CHANGELOG entry carries the summary).
+- On ARM zenflate was already faster than fdeflate one-shot (0.90x); on x86 it
+  was 1.11x slower one-shot and 1.18x streaming before this work.
+- `fuzz_inflate_diff` (one-shot vs streaming vs miniz_oxide) is the correctness
+  gate for decoder changes; the old `fuzz_decompress` only catches crashes.
+  Under `cfg(test)`/`cfg(fuzzing)` the doubles threshold is 0.
+
+### PNG ladder on identical filtered bytes (2026-10-06)
+
+`examples/png_ladder_pareto.rs`, `benchmarks/png_ladder_pareto_{arm,mac}_2026-10-06.txt`:
+
+- zenflate beats miniz_oxide (image-png's balanced/high codec) at every size
+  point: e15 3.864 @ 45 MB/s vs miniz 6 3.849 @ 20 (Neoverse); png(1) 3.08 vs
+  fdeflate ultra-fast 2.84 at 1.6-2x its speed.
+- `new(1..=9)` are dominated by `png()` on PNG data (e1-e4 identical bytes,
+  e5-e9 identical).
+- Gap: libdeflate 5/6 beat png(10..=12) and e12/e13 in the 60-80 MB/s band
+  (Neoverse). One-step lazy matching in png(10..=12) gave -0.5% size for
+  +32-42% time and stayed dominated: rejected. Next candidate: lazy parsing
+  with 3-byte matches (libdeflate 5/6 style) plus the runs-only guard.
+- e13 is larger than png(12) on 41/86 images (up to 8.6%): the lazy parsers
+  lack the runs-only guard.
+
 ### Strategy state must survive early returns (2026-10-06)
 
 Each strategy takes its matchfinder / near-optimal state out of `Compressor`
