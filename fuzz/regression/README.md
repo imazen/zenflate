@@ -6,10 +6,12 @@ directory (recursively, ignoring dotfiles and README.md) and runs each
 file through the `fuzz_decompress` entry points (`deflate`, `zlib`,
 `gzip` decompression with a 64 KB output buffer).
 
-The `fuzz_roundtrip` target uses an arbitrary-encoded `Input { effort,
-data }` struct rather than raw bytes; if you add regression seeds for
-it, also extend `tests/fuzz_regression.rs` to deserialize them via
-`arbitrary::Unstructured`.
+Seeds are also replayed through the `fuzz_api` checks
+(`fuzz/fuzz_targets/api_check.rs`, shared by the fuzz target and the test):
+the bytes decode as its arbitrary `Input` (level, entry point, stop point,
+buffer size, threads, data). Keep those under `fuzz_api/`. A seed only needs
+to reproduce a fixed bug on the code before the fix; check that before
+committing it, and raise `EXPECTED_SEEDS` in the harness.
 
 To add a seed:
 1. Minimize the crash with `cargo +nightly fuzz tmin <target> <input>`.
