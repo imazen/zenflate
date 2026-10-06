@@ -346,9 +346,17 @@ two-thread decode pipeline is bounded by inflate, so this is zenpng's lever.
   @ 7 MB/s vs lazy depth 3000 3.976 @ 7): png(19..=22) use new(23)'s parser
   (`CompressionLevel::near_optimal_effort` keeps their output identical to
   new(23) while `effort()` reports 19-22).
-- Block-split butterfly: lazy depth 295 -> 299 made 8007_rgb8_256 7.5% larger
-  (one different match moves the block boundaries). The guard can't fix that;
-  it's a block-splitter instability, not a depth bug.
+- Block-split butterfly: lazy depth 295 -> 299 made 8007_rgb8_256 7.5% larger:
+  a 5-byte shift of the first boundary (18674 vs 18679) cascades into different
+  splits for the rest of the stream (libdeflate's statistics-based
+  `should_end_block`). Measured alternatives on the 86 inputs (png(10..=18)):
+  no early block ends: +0.6% total, up to +15% on 48/86 images, but rung
+  inversions drop to 0.04%; fixed 64 KiB blocks: +0.24% total (median +0.06%),
+  up to +9% on images with mid-stream content changes, worst inversion 0.36%
+  (32 KiB and 128 KiB were worse). Kept adaptive splitting. Idea not yet tried:
+  split points from the input alone (e.g. byte-histogram change points on the
+  filtered rows), computed once and shared by every rung and the runs-only
+  guard - adaptive and parse-independent, so rungs couldn't diverge.
 - Before the guard, e13 was larger than png(12) on 41/86 images (up to 8.6%).
 
 ### Strategy state must survive early returns (2026-10-06)
