@@ -4,17 +4,8 @@
 
 ### Added
 
-- **Independent DEFLATE segments** for parallel encode and decode (e.g. Apple's `iDOT` PNG layout).
-  `Compressor::deflate_compress_segment(input, is_last, out, stop)` compresses one segment with an
-  empty window; non-final segments end byte-aligned with a full-flush marker and no BFINAL, so
-  segments concatenate into one valid stream. Every strategy is supported, including FullOptimal.
-  `StreamDecompressor::with_segment_end(true)` plus `ended_at_segment_boundary()` decode one segment
-  and end cleanly only at a byte-aligned block boundary with no leftover bits; a segment ending
-  mid-block (the "ambiguous PNG" construction) still errors, so independent decode equals serial
-  decode. `StreamDecompressor::zlib_continuation` decodes the tail of a zlib stream whose header was
-  consumed elsewhere, recording (not verifying) the footer; `running_checksum()` and
-  `footer_checksum()` let the caller verify the whole stream with `adler32_combine`.
-  Additive; existing output is unchanged.
+- `Compressor::deflate_compress_segment` (and `deflate_compress_segment_bound`): compress one independently decodable segment of a DEFLATE stream (empty window, byte-aligned end), the building block for PNG's `iDOT` layout. The caller schedules and buffers segments (one strip at a time, on its own pool); output does not depend on compressor reuse. Every level is supported, including full-optimal. Size +0.06-0.28%; with freshly spawned workers, 1.9-6.5x faster at 4-8 threads on a 12 MB image (benchmarks/segmented_zlib_2026-10-06.txt).
+- `StreamDecompressor::with_segment_end`, `ended_at_segment_boundary`, `zlib_continuation`, `running_checksum` and `footer_checksum`: decode one segment of such a stream on its own. A segment ends cleanly only at a byte-aligned block boundary with no leftover bits, so independent decode equals serial decode; a segment ending mid-block (the "ambiguous PNG" construction) still errors.
 
 ### Changed
 

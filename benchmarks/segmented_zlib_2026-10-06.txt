@@ -1,0 +1,8 @@
+# Caller-driven deflate_compress_segment vs zlib_compress: 2000x2000 RGB PNG-like filtered rows (12 MB), median of 5, host i265 (Core Ultra 7 265K, 20 threads), 2026-10-06.
+# Each row: segments/threads, time, speedup vs single, size change. Threads are std::thread::scope workers spawned per call, one Compressor and output buffer each.
+# 1seg/1t is the control: a freshly spawned worker pays first-touch on new tables (10-50% at efforts 1-22); 4seg/1t matches it, so segmenting itself costs no time. Long-lived workers avoid the first-touch cost.
+e1   single    18.5 ms   3553003 B | 1seg/1t   29.0 ms x0.64 +0.00% | 4seg/1t   28.0 ms x0.66 +0.07% | 4seg/4t    9.0 ms x2.05 +0.07% | 8seg/8t    9.8 ms x1.90 +0.08% | 16seg/8t    9.3 ms x1.98 +0.18% |
+e10  single   112.3 ms   3019253 B | 1seg/1t  127.5 ms x0.88 +0.00% | 4seg/1t  127.1 ms x0.88 +0.06% | 4seg/4t   45.9 ms x2.45 +0.06% | 8seg/8t   27.9 ms x4.02 +0.06% | 16seg/8t   27.5 ms x4.09 +0.13% |
+e15  single   114.4 ms   3012958 B | 1seg/1t  133.1 ms x0.86 +0.00% | 4seg/1t  133.0 ms x0.86 +0.06% | 4seg/4t   49.9 ms x2.29 +0.06% | 8seg/8t   29.3 ms x3.90 +0.06% | 16seg/8t   29.6 ms x3.87 +0.12% |
+e22  single   142.1 ms   3015600 B | 1seg/1t  160.4 ms x0.89 +0.00% | 4seg/1t  158.2 ms x0.90 +0.06% | 4seg/4t   55.4 ms x2.57 +0.06% | 8seg/8t   35.2 ms x4.03 +0.06% | 16seg/8t   34.7 ms x4.09 +0.13% |
+e24  single   919.4 ms   2971346 B | 1seg/1t  910.7 ms x1.01 +0.00% | 4seg/1t  913.1 ms x1.01 +0.09% | 4seg/4t  247.5 ms x3.72 +0.09% | 8seg/8t  140.6 ms x6.54 +0.14% | 16seg/8t  141.0 ms x6.52 +0.28% |

@@ -17,7 +17,7 @@
 //! (full)") adds inputs up to 1 MiB and runs in release.
 #![cfg(feature = "compress")]
 
-use zenflate::{CompressionLevel, Compressor, Decompressor, Unstoppable};
+use zenflate::{CompressionLevel, Compressor, Decompressor, StreamDecompressor, Unstoppable};
 
 fn full() -> bool {
     std::env::var("ZENFLATE_CONFORMANCE").is_ok_and(|v| v == "full")
@@ -361,6 +361,68 @@ fn check_incremental(name: &str, level: CompressionLevel, data: &[u8]) {
     }
 }
 
+/// Independent segments (PNG iDOT layout), each into an exactly-bound
+/// buffer with one reused compressor, framed as zlib: decodes as one stream,
+/// and every segment decodes alone to its slice of the input.
+fn check_segmented(name: &str, level: CompressionLevel, data: &[u8]) {
+    let n = data.len();
+    for seg_ends in [vec![n], vec![n / 3, 2 * n / 3, n]] {
+        let mut c = Compressor::new(level);
+        let mut z = vec![0x78, 0x9c];
+        let mut cends = Vec::new();
+        let mut start = 0;
+        for (k, &end) in seg_ends.iter().enumerate() {
+            let mut out = vec![0u8; Compressor::deflate_compress_segment_bound(end - start)];
+            let len = c
+                .deflate_compress_segment(
+                    &data[start..end],
+                    k + 1 == seg_ends.len(),
+                    &mut out,
+                    Unstoppable,
+                )
+                .unwrap_or_else(|e| panic!("{name} segment {k} into its bound: {e:?}"));
+            z.extend_from_slice(&out[..len]);
+            cends.push(z.len());
+            start = end;
+        }
+        z.extend_from_slice(&zenflate::adler32(1, data).to_be_bytes());
+        *cends.last_mut().unwrap() = z.len();
+        let mz = miniz_oxide::inflate::decompress_to_vec_zlib(&z)
+            .unwrap_or_else(|e| panic!("{name} segmented: miniz decode: {e:?}"));
+        assert!(mz == data, "{name} segmented: miniz content");
+        let mut prev = 0;
+        for (k, (&cend, &dend)) in cends.iter().zip(&seg_ends).enumerate() {
+            let src = &z[prev..cend];
+            let d = if k == 0 {
+                StreamDecompressor::zlib(src, 1 << 16)
+            } else {
+                StreamDecompressor::zlib_continuation(src, 1 << 16)
+            };
+            let mut d = d.with_segment_end(true);
+            let mut got = Vec::new();
+            while !d.is_done() {
+                let o = d
+                    .fill()
+                    .unwrap_or_else(|e| panic!("{name} segment {k} alone: {e:?}"));
+                let m = o.len();
+                got.extend_from_slice(o);
+                d.advance(m);
+            }
+            let dstart = if k == 0 { 0 } else { seg_ends[k - 1] };
+            assert!(
+                got == data[dstart..dend],
+                "{name} segment {k} alone: content"
+            );
+            assert_eq!(
+                d.ended_at_segment_boundary(),
+                k + 1 < seg_ends.len(),
+                "{name} segment {k}"
+            );
+            prev = cend;
+        }
+    }
+}
+
 #[cfg(feature = "threads")]
 fn check_parallel(name: &str, level: CompressionLevel, data: &[u8]) {
     let threads: &[usize] = if full() { &[2, 3, 4, 7] } else { &[2, 4] };
@@ -418,6 +480,7 @@ fn run_levels(filter: impl Fn(Family) -> bool) {
             }
             #[cfg(feature = "threads")]
             check_parallel(&name, level, data);
+            check_segmented(&name, level, data);
         }
     }
 }

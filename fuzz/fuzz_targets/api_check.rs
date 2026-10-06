@@ -227,7 +227,43 @@ pub fn check(input: &Input) {
                 "{name}: parallel content"
             );
         }
-        // Reserved (5..=7).
+        5 => {
+            // Independent segments at fuzz-chosen ends: one reused compressor
+            // must match fresh ones, and the zlib-framed stream decodes back.
+            let mut ends: Vec<usize> = input
+                .cuts
+                .iter()
+                .take(16)
+                .map(|&c| c as usize % (data.len() + 1))
+                .collect();
+            ends.push(data.len());
+            ends.sort_unstable();
+            let mut reused = Compressor::new(level);
+            let mut z = vec![0x78, 0x9c];
+            let mut start = 0;
+            for (k, &end) in ends.iter().enumerate() {
+                let seg = &data[start..end];
+                let last = k + 1 == ends.len();
+                let bound = Compressor::deflate_compress_segment_bound(seg.len());
+                let mut out = vec![0u8; bound];
+                let n = reused
+                    .deflate_compress_segment(seg, last, &mut out, Unstoppable)
+                    .unwrap_or_else(|e| panic!("{name}: segment {k}: {e:?}"));
+                let mut fresh = vec![0u8; bound];
+                let m = Compressor::new(level)
+                    .deflate_compress_segment(seg, last, &mut fresh, Unstoppable)
+                    .unwrap();
+                assert!(
+                    out[..n] == fresh[..m],
+                    "{name}: segment {k} depends on reuse"
+                );
+                z.extend_from_slice(&out[..n]);
+                start = end;
+            }
+            z.extend_from_slice(&zenflate::adler32(1, &data).to_be_bytes());
+            zlib_decodes_to(&z, &data, &format!("{name} segments"));
+        }
+        // Reserved (6..=7).
         _ => {}
     }
 }

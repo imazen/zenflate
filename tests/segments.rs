@@ -29,15 +29,17 @@ fn test_data(len: usize) -> Vec<u8> {
     v
 }
 
+/// `parts` equal pieces (the last may be shorter), compressed as segments by
+/// one reused compressor.
 fn compress_segments(data: &[u8], parts: usize, level: CompressionLevel) -> Vec<Vec<u8>> {
-    let per = data.len().div_ceil(parts);
-    let chunks: Vec<&[u8]> = data.chunks(per.max(1)).collect();
+    let per = data.len().div_ceil(parts).max(1);
+    let chunks: Vec<&[u8]> = data.chunks(per).collect();
     let n = chunks.len();
+    let mut comp = Compressor::new(level);
     chunks
         .iter()
         .enumerate()
         .map(|(k, c)| {
-            let mut comp = Compressor::new(level);
             let mut out = vec![0u8; Compressor::deflate_compress_segment_bound(c.len())];
             let len = comp
                 .deflate_compress_segment(c, k + 1 == n, &mut out, Unstoppable)
@@ -316,4 +318,54 @@ fn zlib_continuation_reports_partial_and_footer_checksums() {
     let (_, _, fb, _, mb) = decode(StreamDecompressor::zlib_continuation(&bad[..], 64 * 1024));
     assert_eq!(fb, Some(adler ^ 1));
     assert_eq!(mb, None);
+}
+
+/// A compressor reused across segments (as a caller compressing strips on a
+/// pool would) gives the same bytes as a fresh compressor per segment.
+#[test]
+fn segment_output_does_not_depend_on_reuse() {
+    let data = test_data(250_000);
+    for (name, level) in levels() {
+        let reused = compress_segments(&data, 5, level);
+        let per = data.len().div_ceil(5);
+        let n = reused.len();
+        for (k, c) in data.chunks(per).enumerate() {
+            let mut out = vec![0u8; Compressor::deflate_compress_segment_bound(c.len())];
+            let len = Compressor::new(level)
+                .deflate_compress_segment(c, k + 1 == n, &mut out, Unstoppable)
+                .unwrap();
+            assert_eq!(&out[..len], &reused[k][..], "{name} segment {k}");
+        }
+    }
+}
+
+/// Empty and tiny segments, in the middle and at the end.
+#[test]
+fn empty_and_tiny_segments() {
+    let data = test_data(20_000);
+    for lens in [
+        vec![0usize],
+        vec![0, 20_000],
+        vec![5_000, 0, 1, 14_999],
+        vec![20_000, 0],
+    ] {
+        let mut c = Compressor::new(CompressionLevel::new(10));
+        let mut z = Vec::new();
+        let mut start = 0;
+        for (k, &l) in lens.iter().enumerate() {
+            let seg = &data[start..start + l];
+            let mut out = vec![0u8; Compressor::deflate_compress_segment_bound(l)];
+            let n = c
+                .deflate_compress_segment(seg, k + 1 == lens.len(), &mut out, Unstoppable)
+                .unwrap();
+            z.extend_from_slice(&out[..n]);
+            start += l;
+        }
+        let mut back = vec![0u8; start];
+        let r = Decompressor::new()
+            .deflate_decompress(&z, &mut back, Unstoppable)
+            .unwrap_or_else(|e| panic!("{lens:?}: {e:?}"));
+        assert_eq!(r.output_written, start);
+        assert_eq!(back, data[..start], "{lens:?}");
+    }
 }

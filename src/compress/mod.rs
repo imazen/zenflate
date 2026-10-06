@@ -853,34 +853,10 @@ impl Compressor {
         output: &mut [u8],
         stop: impl enough::Stop,
     ) -> Result<usize, CompressionError> {
-        // zlib header: CMF=0x78, FLG level hint depends on compression level.
-        // Matches C libdeflate's mapping: <2 fastest, <6 fast, <8 default, >=8 slowest.
-        let level = self.level.level();
-        let level_hint: u8 = if level < 2 {
-            0 // ZLIB_FASTEST_COMPRESSION
-        } else if level < 6 {
-            1 // ZLIB_FAST_COMPRESSION
-        } else if level < 8 {
-            2 // ZLIB_DEFAULT_COMPRESSION
-        } else {
-            3 // ZLIB_SLOWEST_COMPRESSION
-        };
-        let flg = level_hint << 6;
-        // CMF = 0x78 (deflate, window size 32K)
-        let cmf = 0x78u8;
-        // Adjust FLG so (CMF*256 + FLG) % 31 == 0
-        let check = ((cmf as u16) * 256 + flg as u16) % 31;
-        let flg = if check == 0 {
-            flg
-        } else {
-            flg + (31 - check) as u8
-        };
-
         if output.len() < 6 {
             return Err(CompressionError::InsufficientSpace);
         }
-        output[0] = cmf;
-        output[1] = flg;
+        output[..2].copy_from_slice(&self.zlib_header());
 
         let compressed_size = self.deflate_compress(input, &mut output[2..], stop)?;
         let total = 2 + compressed_size;
@@ -948,27 +924,52 @@ impl Compressor {
     }
 
     /// Compress `input` as one independent segment of a larger raw DEFLATE
-    /// stream.
+    /// stream: the building block for PNG's `iDOT` layout, where decoders
+    /// inflate horizontal strips of the image in parallel.
     ///
-    /// Segments produced this way can be compressed in parallel and then
-    /// concatenated in order to form one valid DEFLATE stream:
-    ///
-    /// - The segment uses no history from earlier segments (an empty
-    ///   window), so it can also be *decompressed* independently — see
+    /// - The segment uses no history from earlier segments (an empty window),
+    ///   so it also decompresses on its own; see
     ///   [`StreamDecompressor::with_segment_end`](crate::StreamDecompressor::with_segment_end).
-    /// - When `is_last` is false, no block has BFINAL set and the output ends
-    ///   byte-aligned on a block boundary: compressed segments end with an
-    ///   empty stored block (the zlib full-flush marker, `00 00 ff ff` after
-    ///   alignment); stored-only segments are byte-aligned already.
-    /// - When `is_last` is true, the final block has BFINAL set, exactly as
-    ///   [`deflate_compress`](Self::deflate_compress) would end.
+    /// - With `is_last` false, no block has BFINAL set and the output ends
+    ///   byte-aligned on a block boundary (compressed segments end with an
+    ///   empty stored block, the zlib full-flush marker `00 00 ff ff`).
+    /// - With `is_last` true, the output ends like
+    ///   [`deflate_compress`](Self::deflate_compress).
     ///
-    /// For a zlib stream, prefix the first segment with a zlib header and
-    /// append the big-endian Adler-32 of the whole uncompressed input (use
-    /// [`adler32_combine`](crate::adler32_combine) to join per-segment
-    /// checksums).
+    /// Segments concatenated in order form one valid DEFLATE stream. Each
+    /// call is independent, so the caller decides how segments are buffered
+    /// and scheduled: compress a strip as soon as its rows are filtered, on
+    /// its own thread pool, and fold the compressed size into its filter
+    /// choice for that strip. One compressor can be reused for any number of
+    /// segments; output does not depend on reuse.
     ///
-    /// Size `output` with [`deflate_compress_segment_bound`](Self::deflate_compress_segment_bound).
+    /// For a zlib stream, write a zlib header (`78 01`, `78 5e`, `78 9c` or
+    /// `78 da`), the segments in order, then the big-endian Adler-32 of the
+    /// whole uncompressed input; join per-segment checksums with
+    /// [`adler32_combine`](crate::adler32_combine).
+    ///
+    /// Size `output` with
+    /// [`deflate_compress_segment_bound`](Self::deflate_compress_segment_bound).
+    ///
+    /// ```
+    /// use zenflate::{Compressor, CompressionLevel, Decompressor, Unstoppable, adler32, adler32_combine};
+    ///
+    /// let strips: [&[u8]; 2] = [&[1u8; 40_000], &[2u8; 40_000]];
+    /// let mut c = Compressor::new(CompressionLevel::balanced());
+    /// let mut z = vec![0x78, 0x9c];
+    /// let mut adler = 1;
+    /// for (k, strip) in strips.iter().enumerate() {
+    ///     let mut out = vec![0u8; Compressor::deflate_compress_segment_bound(strip.len())];
+    ///     let n = c.deflate_compress_segment(strip, k + 1 == strips.len(), &mut out, Unstoppable).unwrap();
+    ///     z.extend_from_slice(&out[..n]);
+    ///     adler = adler32_combine(adler, adler32(1, strip), strip.len());
+    /// }
+    /// z.extend_from_slice(&adler.to_be_bytes());
+    ///
+    /// let mut back = vec![0u8; 80_000];
+    /// Decompressor::new().zlib_decompress(&z, &mut back, Unstoppable).unwrap();
+    /// assert_eq!(back, strips.concat());
+    /// ```
     pub fn deflate_compress_segment(
         &mut self,
         input: &[u8],
@@ -982,9 +983,35 @@ impl Compressor {
     /// Upper bound on the output of
     /// [`deflate_compress_segment`](Self::deflate_compress_segment):
     /// [`deflate_compress_bound`](Self::deflate_compress_bound) plus the
-    /// 5-byte flush marker, plus one byte of bit padding.
+    /// 5-byte flush marker and one byte of bit padding.
+    #[must_use]
     pub fn deflate_compress_segment_bound(input_len: usize) -> usize {
         Self::deflate_compress_bound(input_len) + 6
+    }
+
+    /// The 2-byte zlib header: deflate, 32 KiB window, a level hint matching
+    /// C libdeflate's mapping.
+    fn zlib_header(&self) -> [u8; 2] {
+        let level = self.level.level();
+        let level_hint: u8 = if level < 2 {
+            0 // ZLIB_FASTEST_COMPRESSION
+        } else if level < 6 {
+            1 // ZLIB_FAST_COMPRESSION
+        } else if level < 8 {
+            2 // ZLIB_DEFAULT_COMPRESSION
+        } else {
+            3 // ZLIB_SLOWEST_COMPRESSION
+        };
+        let cmf = 0x78u8; // deflate, 32 KiB window
+        let flg = level_hint << 6;
+        // FCHECK: (CMF*256 + FLG) % 31 == 0
+        let check = ((cmf as u16) * 256 + flg as u16) % 31;
+        let flg = if check == 0 {
+            flg
+        } else {
+            flg + (31 - check) as u8
+        };
+        [cmf, flg]
     }
 
     /// Compute the maximum compressed size for zlib output.
