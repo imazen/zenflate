@@ -540,6 +540,10 @@ pub struct Compressor {
     incremental_pos: usize,
     /// Incremental compression: matchfinder base offset (for window sliding).
     incremental_base_offset: usize,
+    /// Incremental compression: bits of the last partial byte (fewer than 8),
+    /// carried to the next call so consecutive outputs concatenate.
+    incremental_bitbuf: u64,
+    incremental_bitcount: u32,
 }
 
 /// Snapshot of compressor state for cheap save/restore during incremental compression.
@@ -571,6 +575,8 @@ pub struct CompressorSnapshot {
     hc_mf: Option<Box<HcMatchfinder>>,
     incremental_pos: usize,
     incremental_base_offset: usize,
+    incremental_bitbuf: u64,
+    incremental_bitcount: u32,
 }
 
 impl core::fmt::Debug for CompressorSnapshot {
@@ -594,6 +600,8 @@ impl Clone for CompressorSnapshot {
             hc_mf: self.hc_mf.as_ref().map(|b| Box::new((**b).clone())),
             incremental_pos: self.incremental_pos,
             incremental_base_offset: self.incremental_base_offset,
+            incremental_bitbuf: self.incremental_bitbuf,
+            incremental_bitcount: self.incremental_bitcount,
         }
     }
 }
@@ -622,6 +630,8 @@ impl Clone for Compressor {
             force_nonfinal: self.force_nonfinal,
             incremental_pos: self.incremental_pos,
             incremental_base_offset: self.incremental_base_offset,
+            incremental_bitbuf: self.incremental_bitbuf,
+            incremental_bitcount: self.incremental_bitcount,
         }
     }
 }
@@ -722,6 +732,8 @@ impl Compressor {
             force_nonfinal: false,
             incremental_pos: 0,
             incremental_base_offset: 0,
+            incremental_bitbuf: 0,
+            incremental_bitcount: 0,
         }
     }
 
@@ -743,6 +755,8 @@ impl Compressor {
             hc_mf: self.hc_mf.as_ref().map(|b| Box::new((**b).clone())),
             incremental_pos: self.incremental_pos,
             incremental_base_offset: self.incremental_base_offset,
+            incremental_bitbuf: self.incremental_bitbuf,
+            incremental_bitcount: self.incremental_bitcount,
         }
     }
 
@@ -763,6 +777,8 @@ impl Compressor {
         }
         self.incremental_pos = snap.incremental_pos;
         self.incremental_base_offset = snap.incremental_base_offset;
+        self.incremental_bitbuf = snap.incremental_bitbuf;
+        self.incremental_bitcount = snap.incremental_bitcount;
     }
 
     /// Compress data in raw DEFLATE format.
@@ -949,7 +965,13 @@ impl Compressor {
     /// The compressor remembers how far it has compressed (via `incremental_pos`)
     /// and only compresses the new portion, using matchfinder state from prior calls.
     ///
-    /// `is_final`: set true on the last chunk to emit the DEFLATE end marker.
+    /// The outputs of consecutive calls concatenate into one raw DEFLATE
+    /// stream: each non-final call ends on a block boundary and keeps the last
+    /// partial byte (fewer than 8 bits) for the next call, so the returned
+    /// sizes sum to the exact stream size.
+    ///
+    /// `is_final`: set true on the last chunk to emit the DEFLATE end marker
+    /// (an empty final block if there is no new data) and pad the last byte.
     ///
     /// This is designed for the forking brute-force use case: feed one PNG row
     /// at a time, fork (clone) before each row, try different filters, pick
@@ -976,6 +998,9 @@ impl Compressor {
         }
 
         let mut os = OutputBitstream::new(output);
+        // Bits left over from the previous call come first.
+        os.bitbuf = self.incremental_bitbuf;
+        os.bitcount = self.incremental_bitcount;
 
         match self.level.strategy() {
             InternalStrategy::HtGreedy => {
@@ -990,18 +1015,36 @@ impl Compressor {
             }
         }
 
+        if is_final && new_start >= data.len() {
+            // Nothing new on the final call: terminate the stream with an
+            // empty final block (static Huffman, end-of-block only).
+            os.add_bits(1, 1);
+            os.add_bits(DEFLATE_BLOCKTYPE_STATIC_HUFFMAN, 2);
+            os.add_bits(0, 7);
+            os.flush_bits();
+        }
+
         if os.overflow {
             return Err(CompressionError::InsufficientSpace);
         }
 
-        // Write final partial byte
-        if os.bitcount > 0 {
-            if os.pos < os.buf.len() {
-                os.buf[os.pos] = os.bitbuf as u8;
-                os.pos += 1;
-            } else {
-                return Err(CompressionError::InsufficientSpace);
+        if is_final {
+            // Pad the last partial byte.
+            if os.bitcount > 0 {
+                if os.pos < os.buf.len() {
+                    os.buf[os.pos] = os.bitbuf as u8;
+                    os.pos += 1;
+                } else {
+                    return Err(CompressionError::InsufficientSpace);
+                }
             }
+            self.incremental_bitbuf = 0;
+            self.incremental_bitcount = 0;
+        } else {
+            // Keep the partial byte for the next call, so the outputs of
+            // consecutive calls concatenate into one stream.
+            self.incremental_bitbuf = os.bitbuf;
+            self.incremental_bitcount = os.bitcount;
         }
 
         self.incremental_pos = data.len();
@@ -1013,6 +1056,8 @@ impl Compressor {
     pub fn incremental_reset(&mut self) {
         self.incremental_pos = 0;
         self.incremental_base_offset = 0;
+        self.incremental_bitbuf = 0;
+        self.incremental_bitcount = 0;
     }
 
     /// Returns the current incremental cursor position.
@@ -1375,8 +1420,9 @@ impl Compressor {
         let mut in_next = new_start;
         let mut in_base_offset = self.incremental_base_offset;
 
-        // Feed new bytes to the matchfinder and produce one DEFLATE block.
-        if in_next < in_end {
+        // Feed new bytes to the matchfinder, one DEFLATE block per sequence
+        // store: a single call may carry more than one block's worth.
+        while in_next < in_end {
             stop.check()?;
             let in_block_begin = in_next;
             let mut seq_idx = 0;
@@ -1491,8 +1537,9 @@ impl Compressor {
         let max_lazy = self.max_lazy;
         let mut next_hashes = [0u32; 2];
 
-        // Feed new bytes and produce one DEFLATE block.
-        if in_next < in_end {
+        // Feed new bytes, one DEFLATE block per sequence store: a single call
+        // may carry more than one block's worth.
+        while in_next < in_end {
             stop.check()?;
             let in_block_begin = in_next;
             let mut seq_idx = 0;
@@ -4992,5 +5039,87 @@ mod tests {
             out2[..len2],
             "clone produced different output"
         );
+    }
+
+    // ---- deflate_compress_incremental: inputs larger than one block ----
+
+    /// Small-alphabet noise: many short matches, so a large input needs far
+    /// more sequences than one sequence store holds.
+    fn incremental_test_data(n: usize, alphabet: u64) -> Vec<u8> {
+        let mut x = 0x1234_5678_9abc_def1u64;
+        (0..n)
+            .map(|_| {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                (x % alphabet) as u8
+            })
+            .collect()
+    }
+
+    fn incremental_levels() -> [CompressionLevel; 4] {
+        [
+            CompressionLevel::libdeflate(1), // HtGreedy
+            CompressionLevel::new(10),       // Greedy
+            CompressionLevel::new(15),       // Lazy
+            CompressionLevel::new(20),       // Lazy2
+        ]
+    }
+
+    fn assert_decodes_to(stream: &[u8], expected: &[u8], what: &str) {
+        let mut back = vec![0u8; expected.len()];
+        let r = crate::Decompressor::new()
+            .deflate_decompress(stream, &mut back, enough::Unstoppable)
+            .unwrap_or_else(|e| panic!("{what}: decode failed: {e:?}"));
+        assert_eq!(r.output_written, expected.len(), "{what}: length");
+        assert!(back == expected, "{what}: content");
+        let mz = miniz_oxide::inflate::decompress_to_vec(stream)
+            .unwrap_or_else(|e| panic!("{what}: miniz decode failed: {e:?}"));
+        assert!(mz == expected, "{what}: miniz content");
+    }
+
+    /// A single call carrying more sequences than one store must still
+    /// compress every byte (it used to emit one block and drop the rest).
+    #[test]
+    fn incremental_single_call_larger_than_one_block() {
+        let data = incremental_test_data(4_000_000, 8);
+        for level in incremental_levels() {
+            let mut c = Compressor::new(level);
+            let mut out = vec![0u8; Compressor::deflate_compress_bound(data.len())];
+            let n = c
+                .deflate_compress_incremental(&data, &mut out, true, enough::Unstoppable)
+                .unwrap();
+            assert_decodes_to(&out[..n], &data, &alloc::format!("{level:?} single call"));
+        }
+    }
+
+    /// Uneven chunks, some larger than a block, then a final call with no
+    /// new bytes (which must still terminate the stream).
+    #[test]
+    fn incremental_uneven_chunks_and_empty_final_call() {
+        let data = incremental_test_data(1_500_000, 6);
+        let cuts = [1usize, 4096, 700_000, 700_001, 1_200_000, data.len()];
+        for level in incremental_levels() {
+            let mut c = Compressor::new(level);
+            let mut stream = Vec::new();
+            let mut out = vec![0u8; Compressor::deflate_compress_bound(data.len())];
+            for &end in &cuts {
+                let n = c
+                    .deflate_compress_incremental(
+                        &data[..end],
+                        &mut out,
+                        false,
+                        enough::Unstoppable,
+                    )
+                    .unwrap();
+                stream.extend_from_slice(&out[..n]);
+            }
+            let n = c
+                .deflate_compress_incremental(&data, &mut out, true, enough::Unstoppable)
+                .unwrap();
+            assert!(n > 0, "{level:?}: empty final call wrote nothing");
+            stream.extend_from_slice(&out[..n]);
+            assert_decodes_to(&stream, &data, &alloc::format!("{level:?} chunks"));
+        }
     }
 }
