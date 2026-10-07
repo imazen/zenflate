@@ -43,7 +43,7 @@ jobs:
     # that exceeds it has a new pathological test rather than a slow day.
     timeout-minutes: 180
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Install Rust nightly
         uses: dtolnay/rust-toolchain@nightly
