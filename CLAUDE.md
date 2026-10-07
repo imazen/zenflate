@@ -373,6 +373,33 @@ two-thread decode pipeline is bounded by inflate, so this is zenpng's lever.
   gate for decoder changes; the old `fuzz_decompress` only catches crashes.
   Under `cfg(test)`/`cfg(fuzzing)` the doubles threshold is 0.
 
+### Compression hot loops: bounds checks that cost real time (2026-10-07)
+
+The `unchecked` feature measured +0-12%, so the safe build was assumed close
+to optimal. It wasn't, for indices LLVM can't bound: hash values read back
+from a stored `next_hashes` array, `Vec` tables (unknown length), and
+`input[pos..pos + 4]` per candidate. Fixes, all byte-identical output:
+- Mask stored hash indices to the table size (`& (SIZE - 1)`), and make the
+  tables fixed-size (`[i16; N]` or `Box<[i16; N]>`, never `Vec`) so the mask
+  proves the bound.
+- Bounds-check the current position and each candidate once
+  (`&input[pos..pos + max_len]`) and index those slices.
+- DP (`find_min_cost_path`): a fixed `[OptimumNode; 259]` window per position,
+  match lengths clamped to 258 once per match, a 65536-entry offset-slot
+  table indexed by the `u16` offset.
+Neoverse-N1 (`benchmarks/hc_matchfinder_bounds_2026-10-07.txt`,
+`benchmarks/near_optimal_bounds_2026-10-07.txt`): png(10) -7.9%, new(12)
+-9.3%, png(19..26) -16..-18%, libdeflate(12) port 56.7 -> 45.1 s (C: 45.6 s).
+On x86 (265K, `benchmarks/encode_bounds_x86_2026-10-07.txt`) the hash-chain
+change is within noise (png(10) 820 -> 817 ms) - the wide out-of-order core
+hides those checks - while binary tree + DP still give png(19) -14%, png(23)
+-13%, png(26) -13.5%. Measure ARM too: x86 alone would have rejected the hc
+change.
+The turbo/fast_ht matchfinders already had fixed arrays and constant-shift
+hashes: masking changed nothing there. Pre-slicing `lz_extend`'s arguments in
+hc changed nothing either. Instruction counts vs C overstate the gap (the
+libdeflate(5) port was 1.6x C's Ir but 1.17x its time before this).
+
 ### Streaming decode fixed costs (zenpng asks A-F, 2026-10-07)
 
 callgrind on one 64 px streaming decode (`png_inflate --profile zenS`):
