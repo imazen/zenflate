@@ -3198,9 +3198,18 @@ impl Compressor {
         }
         #[cfg(test)]
         self.test_block_ends.clear();
-        // png() near-optimal rungs take block ends from the input alone (as
-        // the lazy rungs do), so every rung splits a given input identically.
+        // png() near-optimal rungs share segment ends taken from the input
+        // alone (the lazy rungs use them as block ends), so every rung splits
+        // a given input at the same points.
         let shared_blocks = self.level.png_family;
+        let mut segment_end = 0usize;
+        // png(27..=30) may also end blocks inside a segment by the usual
+        // statistics test (-0.1% size); png(19..=26) end blocks only at
+        // segment ends, which keeps neighbouring levels nested more tightly
+        // (zenpng refines its mid rungs at one level each, so every
+        // level-to-level inversion is an effort-to-effort inversion; its top
+        // rungs keep the smallest of png(26/28/30)).
+        let split_in_segments = shared_blocks && self.level.effort() >= 27;
 
         let in_end = input.len();
         let mut in_next = self.chunk_start;
@@ -3264,7 +3273,19 @@ impl Compressor {
             stop.check()?;
             // Starting a new DEFLATE block
             let in_max_block_end = if shared_blocks {
-                block_split::input_block_end(input, in_block_begin, in_end, SOFT_MAX_BLOCK_LENGTH)
+                // Segments from the input alone bound every block; inside a
+                // segment the usual statistics test may end blocks earlier,
+                // so a rung's parse-dependent split choices cannot spread past
+                // the segment end.
+                if in_block_begin >= segment_end {
+                    segment_end = block_split::input_block_end(
+                        input,
+                        in_block_begin,
+                        in_end,
+                        SOFT_MAX_BLOCK_LENGTH,
+                    );
+                }
+                segment_end
             } else {
                 choose_max_block_end(in_block_begin, in_end, SOFT_MAX_BLOCK_LENGTH)
             };
@@ -3429,7 +3450,7 @@ impl Compressor {
                 if cache_idx >= MATCH_CACHE_LENGTH {
                     break;
                 }
-                if shared_blocks {
+                if shared_blocks && !split_in_segments {
                     continue;
                 }
                 // Not ready to check block end?
@@ -3492,6 +3513,9 @@ impl Compressor {
                             begin: in_block_begin,
                         }),
                 );
+
+                #[cfg(test)]
+                self.test_block_ends.push(in_block_end);
 
                 // Move remaining cache entries to beginning
                 ns.match_cache

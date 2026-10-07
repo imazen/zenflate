@@ -1119,13 +1119,24 @@ mod tests {
             want.push(b);
         }
         assert!(want.len() > 1, "test image should split");
-        for effort in [19, 20, 21, 22, 23, 26, 30] {
+        for effort in [19, 20, 21, 22, 23, 26, 27, 28, 30] {
             let mut c = Compressor::new(CompressionLevel::png(effort));
             let mut out = vec![0u8; Compressor::zlib_compress_bound(img.len())];
             let n = c
                 .zlib_compress(&img, &mut out, enough::Unstoppable)
                 .unwrap();
-            assert_eq!(c.test_block_ends, want, "png({effort}) block ends");
+            if effort <= 26 {
+                assert_eq!(c.test_block_ends, want, "png({effort}) block ends");
+            } else {
+                // Every shared segment end is a block end; png(27..=30) may
+                // also end blocks inside a segment.
+                for e in &want {
+                    assert!(
+                        c.test_block_ends.contains(e),
+                        "png({effort}): no block ends at segment end {e}"
+                    );
+                }
+            }
             let back = miniz_oxide::inflate::decompress_to_vec_zlib(&out[..n]).unwrap();
             assert!(back == img, "png({effort}) roundtrip");
         }

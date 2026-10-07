@@ -237,9 +237,10 @@ scanlines with long byte runs and literal-heavy residuals.
 
 From `png(3)` through `png(30)` every block is also parsed runs-only and the
 smaller parse is written, so no level loses to runs-only on flat-colour art.
-From `png(10)` through `png(30)` block boundaries come from the input alone, so
+From `png(10)` through `png(26)` block boundaries come from the input alone, so
 every level splits a given image the same way and a higher level only searches
-harder inside the same blocks. `monotonicity_fallback()` names the lower level
+harder inside the same blocks; `png(27..=30)` keep those boundaries and may also
+split inside them (about 0.1% smaller, less strictly nested). `monotonicity_fallback()` names the lower level
 to compare against at each change of algorithm.
 
 ```rust
