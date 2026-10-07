@@ -29,6 +29,24 @@ use super::{
     table_lookup, wants_double_literals,
 };
 
+/// x86-64-v3 (AVX2, BMI1/2) build of the streaming decode loop: variable
+/// shifts and bit masks become `shrx`/`bzhi`, as in libdeflate's BMI2 build.
+/// Streaming inflate on zenpng's 106 PNG inputs, Core Ultra 7 265K: 1.105 ->
+/// 1.066 of fdeflate's time. (The one-shot decoder measured slower with it.)
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+mod v3 {
+    use super::*;
+    use archmage::prelude::*;
+
+    #[arcane]
+    pub(super) fn decompress_block_v3<S: InputSource>(
+        _token: X64V3Token,
+        d: &mut StreamDecompressor<S>,
+    ) -> Result<(), StreamError<S::Error>> {
+        d.decompress_block_impl()
+    }
+}
+
 // ---------------------------------------------------------------------------
 // InputSource trait
 // ---------------------------------------------------------------------------
@@ -1183,7 +1201,21 @@ impl<S: InputSource> StreamDecompressor<S> {
     // Compressed data decoding (Huffman)
     // -----------------------------------------------------------------------
 
+    /// Decode compressed data until the output buffer fills or the block
+    /// ends. On x86-64-v3 CPUs this runs a BMI2 build (see `v3` below).
     fn decompress_block(&mut self) -> Result<(), StreamError<S::Error>> {
+        #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+        {
+            use archmage::SimdToken;
+            if let Some(token) = archmage::X64V3Token::summon() {
+                return v3::decompress_block_v3(token, self);
+            }
+        }
+        self.decompress_block_impl()
+    }
+
+    #[inline(always)]
+    fn decompress_block_impl(&mut self) -> Result<(), StreamError<S::Error>> {
         let bad = DecompressionError::BadData;
 
         // Handle pending match from previous fill()

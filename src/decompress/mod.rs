@@ -893,6 +893,8 @@ impl Decompressor {
         output: &mut [u8],
         stop: &impl enough::Stop,
     ) -> Result<(usize, usize), DecompressionError> {
+        // No x86-64-v3 build here (unlike the streaming decoder): measured
+        // 1.8-2.5% slower on Core Ultra 7 265K, while streaming gained 3.5%.
         let mut in_pos: usize = 0;
         let mut out_pos: usize = 0;
         let mut bitbuf: u64 = 0;
