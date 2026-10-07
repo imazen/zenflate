@@ -119,12 +119,6 @@ impl BlockSplitStats {
     }
 }
 
-/// End of the block starting at `begin`, chosen from the input bytes alone
-/// (each byte is one observation: a repeat of the previous byte counts as a
-/// short match, any other byte as that literal), using the same distribution
-/// test as the parse-driven splitter. Parse-independent, so every parser that
-/// uses it splits the input identically. Never past `begin + max_len` (or
-/// `end`); never leaves a tail shorter than [`MIN_BLOCK_LENGTH`].
 /// Literal observation category of each byte value (top 2 bits and low bit).
 const LITERAL_CATEGORY: [u8; 256] = {
     let mut t = [0u8; 256];
@@ -136,6 +130,13 @@ const LITERAL_CATEGORY: [u8; 256] = {
     t
 };
 
+/// End of the block starting at `begin`, chosen from the input bytes alone,
+/// using the same distribution test as the parse-driven splitter. The input
+/// is observed as a runs-only parse would see it: a run of 5+ equal bytes is
+/// a literal plus one match observation, any other byte a literal.
+/// Parse-independent, so every parser that uses it splits the input
+/// identically. Never past `begin + max_len` (or `end`); never leaves a tail
+/// shorter than [`MIN_BLOCK_LENGTH`].
 pub(crate) fn input_block_end(input: &[u8], begin: usize, end: usize, max_len: usize) -> usize {
     let max_end = if end - begin <= max_len + MIN_BLOCK_LENGTH {
         end
