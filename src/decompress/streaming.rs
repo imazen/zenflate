@@ -324,6 +324,7 @@ impl<S> StreamDecompressor<S> {
     /// true), call [`checksum_matched()`](Self::checksum_matched) to see if
     /// the checksum was correct.
     #[must_use]
+    #[inline(always)]
     pub fn with_skip_checksum(mut self, skip: bool) -> Self {
         self.skip_checksum = skip;
         self
@@ -365,6 +366,7 @@ impl<S> StreamDecompressor<S> {
     /// With the zlib wrapper, a segment end skips the Adler-32 footer, so
     /// [`checksum_matched()`](Self::checksum_matched) stays `None`.
     #[must_use]
+    #[inline(always)]
     pub(crate) fn with_segment_end(mut self, enable: bool) -> Self {
         self.segment_end = enable;
         self
@@ -388,6 +390,7 @@ impl<S> StreamDecompressor<S> {
     ///
     /// `None` (the default) means unlimited.
     #[must_use]
+    #[inline(always)]
     pub fn with_max_output_size(mut self, max: Option<usize>) -> Self {
         self.max_output_size = max;
         self
@@ -398,6 +401,7 @@ impl<S> StreamDecompressor<S> {
 const REFILL_BELOW: usize = 4096;
 
 impl<S: InputSource> StreamDecompressor<S> {
+    #[inline(always)]
     fn new(source: S, capacity: usize, wrapper: WrapperFormat) -> Self {
         assert!(capacity > 0, "capacity must be at least 1");
         let buf_size = capacity;
@@ -455,6 +459,7 @@ impl<S: InputSource> StreamDecompressor<S> {
     /// # Panics
     ///
     /// Panics if `capacity` is 0.
+    #[inline(always)]
     pub fn deflate(source: S, capacity: usize) -> Self {
         Self::new(source, capacity, WrapperFormat::Raw)
     }
@@ -466,6 +471,7 @@ impl<S: InputSource> StreamDecompressor<S> {
     /// # Panics
     ///
     /// Panics if `capacity` is 0.
+    #[inline(always)]
     pub fn zlib(source: S, capacity: usize) -> Self {
         Self::new(source, capacity, WrapperFormat::Zlib)
     }
@@ -515,6 +521,7 @@ impl<S: InputSource> StreamDecompressor<S> {
     /// # Panics
     ///
     /// Panics if `capacity` is 0.
+    #[inline(always)]
     pub fn gzip(source: S, capacity: usize) -> Self {
         Self::new(source, capacity, WrapperFormat::Gzip)
     }
@@ -2572,6 +2579,46 @@ mod tests {
             other => panic!(
                 "expected DecompressionError::BadData on tiny-capacity stream, got {other:?}"
             ),
+        }
+    }
+
+    /// A buffer that fills exactly is grown only when a symbol needs the
+    /// room: decode at capacities around the output size, with callers that
+    /// drain everything and callers that take fixed-size rows (a partial row
+    /// left in the buffer must still get more bytes).
+    #[test]
+    fn stream_exact_capacity_and_rows() {
+        let data: Vec<u8> = (0..12_345u32)
+            .map(|i| (i * 7 % 251) as u8 ^ (i / 300) as u8)
+            .collect();
+        let mut c = libdeflater::Compressor::new(libdeflater::CompressionLvl::new(6).unwrap());
+        let mut z = vec![0u8; c.zlib_compress_bound(data.len())];
+        let n = c.zlib_compress(&data, &mut z).unwrap();
+        let z = &z[..n];
+        let len = data.len();
+        for capacity in [1, 7, 64, len - 1, len, len + 1, 2 * len] {
+            let mut d = StreamDecompressor::zlib(z, capacity);
+            assert_eq!(
+                stream_decompress_all(&mut d).unwrap(),
+                data,
+                "drain, cap {capacity}"
+            );
+            for row in [1usize, 97, 1000] {
+                let mut d = StreamDecompressor::zlib(z, capacity.max(row));
+                let mut out = Vec::new();
+                loop {
+                    while d.peek().len() < row && !d.is_done() {
+                        d.fill().unwrap();
+                    }
+                    let take = d.peek().len().min(row);
+                    if take == 0 {
+                        break;
+                    }
+                    out.extend_from_slice(&d.peek()[..take]);
+                    d.advance(take);
+                }
+                assert_eq!(out, data, "rows of {row}, cap {capacity}");
+            }
         }
     }
 
