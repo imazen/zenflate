@@ -13,6 +13,11 @@
 //! ```text
 //! cargo run --release --example png_inflate -- [DIR_OR_PNG ...] [--rounds N] [--filter SUBSTR]
 //! ```
+//! `--raw` treats every input as plain data instead of PNG: it is compressed
+//! to zlib with `CompressionLevel::libdeflate(6)` (byte-identical to C
+//! libdeflate level 6), split into 32 KiB "chunks", and consumed 4 KiB at a
+//! time by the streaming arm (for Silesia/Canterbury-style corpora).
+//!
 //! `--profile zen1|zenS|fdef|libd` runs only that arm over the selected images
 //! for `--secs S` seconds (default 5; for `perf record` or callgrind).
 //! Default input: `~/tmp/mtpng/bench_in` (zenpng's `scripts/vs_png_inputs.sh` output).
@@ -29,6 +34,21 @@ struct Png {
     stride: usize,
     rows: usize,
     raw_len: usize,
+}
+
+fn parse_raw(path: &std::path::Path) -> Option<Png> {
+    let data = std::fs::read(path).ok()?;
+    let mut c = zenflate::Compressor::new(zenflate::CompressionLevel::libdeflate(6));
+    let mut z = vec![0u8; zenflate::Compressor::zlib_compress_bound(data.len())];
+    let n = c.zlib_compress(&data, &mut z, Unstoppable).ok()?;
+    z.truncate(n);
+    Some(Png {
+        name: path.file_name()?.to_string_lossy().into_owned(),
+        chunks: z.chunks(32 * 1024).map(<[u8]>::to_vec).collect(),
+        stride: 4096,
+        rows: data.len().div_ceil(4096),
+        raw_len: data.len(),
+    })
 }
 
 fn parse_png(path: &std::path::Path) -> Option<Png> {
@@ -167,6 +187,7 @@ fn main() {
     let mut rounds = 15usize;
     let mut filter = String::new();
     let mut profile: Option<String> = None;
+    let mut raw = false;
     let mut secs = 5.0f64;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
@@ -174,6 +195,7 @@ fn main() {
             "--rounds" => rounds = args.next().unwrap().parse().unwrap(),
             "--filter" => filter = args.next().unwrap(),
             "--profile" => profile = args.next(),
+            "--raw" => raw = true,
             "--secs" => secs = args.next().unwrap().parse().unwrap(),
             _ => inputs.push(a.into()),
         }
@@ -187,7 +209,8 @@ fn main() {
             let mut v: Vec<PathBuf> = std::fs::read_dir(i)
                 .unwrap()
                 .filter_map(|e| e.ok().map(|e| e.path()))
-                .filter(|p| p.extension().is_some_and(|e| e == "png"))
+                .filter(|p| raw || p.extension().is_some_and(|e| e == "png"))
+                .filter(|p| p.is_file())
                 .collect();
             v.sort();
             files.extend(v);
@@ -200,7 +223,7 @@ fn main() {
     if let Some(arm) = profile {
         let pngs: Vec<(Png, Vec<u8>)> = files
             .iter()
-            .filter_map(|f| parse_png(f))
+            .filter_map(|f| if raw { parse_raw(f) } else { parse_png(f) })
             .map(|p| {
                 let j = p.chunks.concat();
                 (p, j)
@@ -241,7 +264,9 @@ fn main() {
     );
     let mut ratios = (Vec::new(), Vec::new(), Vec::new());
     for f in &files {
-        let Some(p) = parse_png(f) else { continue };
+        let Some(p) = (if raw { parse_raw(f) } else { parse_png(f) }) else {
+            continue;
+        };
         let joined: Vec<u8> = p.chunks.concat();
         let mut out = vec![0u8; p.raw_len];
         // Correctness: every arm produces the full stream.

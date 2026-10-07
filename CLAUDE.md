@@ -318,6 +318,24 @@ two-thread decode pipeline is bounded by inflate, so this is zenpng's lever.
   arm-big and mac (not committed; the CHANGELOG entry carries the summary).
 - On ARM zenflate was already faster than fdeflate one-shot (0.90x); on x86 it
   was 1.11x slower one-shot and 1.18x streaming before this work.
+- **16-byte chunked match copy** (fdeflate's): the fastloop copies matches as
+  fixed 16-byte `copy_within`s (no memmove call per match; offset 2..=15 step
+  by the offset), margin +16. The biggest single x86 win: PNG one-shot 1.035 ->
+  0.97 of fdeflate's time, streaming 1.066 -> 1.007; Silesia/Canterbury one-shot
+  and streaming ~0.89 of fdeflate. Rejected variants: exact memmove for
+  length >= 64 non-overlapping, and period-doubling for small offsets - both
+  slower overall and neither fixed `nci` one-shot on Neoverse-N1 (+7% vs
+  before the chunked copy, cause unknown; its streaming decode got faster).
+- **x86-64-v3 build of the streaming loop** (archmage `#[arcane]` X64V3Token):
+  streaming 1.105 -> 1.066 of fdeflate on the 265K. The same for the one-shot
+  core was 1.8-2.5% slower, and so were full-width 11-bit tables with a
+  constant mask, 12-bit tables, and bounds-check-free typed table lookups
+  (LLVM's checks evidently help its codegen here). Measure; don't assume.
+- Consumers checked against these changes (2026-10-07, copies in ~/tmp with a
+  path dep): heic (`unci`, one-shot, default-features=false: 32 suites incl. 36
+  unci tests), zenzop (checksums only), zensim-validate - all pass. No-`simd`
+  builds (heic's config) decode zlib ~6% slower than fdeflate because Adler-32
+  is scalar there; enabling `simd` in the consumer fixes that.
 - `fuzz_inflate_diff` (one-shot vs streaming vs miniz_oxide) is the correctness
   gate for decoder changes; the old `fuzz_decompress` only catches crashes.
   Under `cfg(test)`/`cfg(fuzzing)` the doubles threshold is 0.

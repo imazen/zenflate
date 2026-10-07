@@ -37,12 +37,13 @@ pub(crate) const HUFFDEC_DOUBLE_LITERAL: u32 = 0x4000_0000;
 pub(crate) const CONSUMABLE_NBITS: u32 = 56; // MAX_BITSLEFT(63) - 7
 
 // Fastloop safety margins — how many bytes the fastloop can read/write per iteration.
-// Max bytes that can be written past the nominal match end in one fastloop iteration.
-// Word copies (8 bytes) can overrun by at most 7 bytes; RLE uses fill() (exact length).
-// Up to two litlen entries (each writes two bytes, one of which may be scratch
-// for a single literal) precede a match in one iteration.
+// Max bytes one fastloop iteration can write from its starting position: up to
+// two litlen entries (two bytes each, one possibly scratch for a single
+// literal), then a match whose 16-byte chunked copy can run up to 15 bytes
+// past its end. Bytes past the decoded output may be scribbled (within this
+// margin) and are overwritten by later output or left beyond `output_written`.
 pub(crate) const FASTLOOP_MAX_BYTES_WRITTEN: usize =
-    4 + crate::constants::DEFLATE_MAX_MATCH_LEN as usize + 7;
+    4 + crate::constants::DEFLATE_MAX_MATCH_LEN as usize + 16;
 // Input: worst-case bytes consumed per iteration + 8-byte read-ahead for branchless refill
 pub(crate) const FASTLOOP_MAX_BYTES_READ: usize = 32;
 
@@ -660,16 +661,15 @@ pub(crate) fn add_double_literals(table: &mut [u32], table_bits: u32) {
     }
 }
 
-/// Read a single byte from the output buffer (for match copy source).
-#[inline(always)]
-fn load_byte(output: &[u8], pos: usize) -> u8 {
-    output[pos]
-}
-
-/// Forward match copy in the fastloop. Handles all overlap cases.
-/// Uses safe indexing everywhere — benchmarking showed that `get_unchecked`
-/// paths actually regress 5-6% on mixed/photo data because LLVM loses
-/// bounds information that enables better optimization.
+/// Fastloop match copy in fixed 16-byte chunks (each compiles to one vector
+/// load and store, no `memmove` call), as image-rs's fdeflate does. Requires
+/// `out_pos + length + 15 <= output.len()` (the fastloop margin).
+///
+/// - offset >= 16: chunks don't overlap their source.
+/// - offset 1: a run; 16-byte splats of the byte.
+/// - offset 2..=15: 16-byte copies stepping by `offset`: each chunk's first
+///   `offset` bytes come from output that is already final, and the rest are
+///   overwritten by the next chunk.
 #[inline(always)]
 pub(crate) fn fastloop_match_copy(
     output: &mut [u8],
@@ -678,24 +678,33 @@ pub(crate) fn fastloop_match_copy(
     length: usize,
     offset: usize,
 ) {
-    let end = out_pos + length;
-    if offset >= length {
-        // Non-overlapping: memcpy via copy_within (SIMD-optimized in libc)
-        output.copy_within(src_start..src_start + length, out_pos);
+    if offset >= 16 {
+        let mut i = 0;
+        loop {
+            output.copy_within(src_start + i..src_start + i + 16, out_pos + i);
+            i += 16;
+            if i >= length {
+                break;
+            }
+        }
     } else if offset == 1 {
-        // RLE: fill with repeated byte (memset, SIMD-optimized in libc)
-        let byte = load_byte(output, src_start);
-        output[out_pos..end].fill(byte);
-    } else if offset < 8 {
-        // Small offset (2-7): byte-by-byte to handle overlap correctly.
-        for i in 0..length {
-            output[out_pos + i] = output[src_start + i];
+        let splat = [output[src_start]; 16];
+        let mut i = 0;
+        loop {
+            output[out_pos + i..out_pos + i + 16].copy_from_slice(&splat);
+            i += 16;
+            if i >= length {
+                break;
+            }
         }
     } else {
-        // Overlapping with offset >= 8: copy first `offset` bytes, then forward
-        output.copy_within(src_start..src_start + offset, out_pos);
-        for i in offset..length {
-            output[out_pos + i] = output[src_start + i];
+        let mut i = 0;
+        loop {
+            output.copy_within(src_start + i..src_start + i + 16, out_pos + i);
+            i += offset;
+            if i >= length {
+                break;
+            }
         }
     }
 }
