@@ -375,6 +375,11 @@ fn parse_block(
     stop: &impl enough::Stop,
 ) -> Result<usize, CompressionError> {
     let max_len = DEFLATE_MAX_MATCH_LEN as usize;
+    // The parse reads only before `end`: bounding the slice once lets the
+    // loads below go without per-load bounds checks. (The hash inserts after
+    // a match use the full input, as before.)
+    let full_input = input;
+    let input = &input[..end];
     // 8-byte loads at the cursor must stay inside the block.
     let scan_end = end.saturating_sub(8);
 
@@ -427,9 +432,9 @@ fn parse_block(
         if dist > 1
             && let Some(mf) = mf.as_deref_mut()
         {
-            let hi = m_end.min(input.len() - 8);
+            let hi = m_end.min(full_input.len() - 8);
             for p in ip + 1..hi {
-                mf.insert(load_u64_le(input, p) << cfg.mm_shift, p);
+                mf.insert(load_u64_le(full_input, p) << cfg.mm_shift, p);
             }
         }
 
