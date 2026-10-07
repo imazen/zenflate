@@ -479,6 +479,42 @@ impl RunsGuard {
             self.skip -= 1;
             return Ok(None);
         }
+        let runs_bits = self.parse_runs(input, begin, end, static_codes, stop)?;
+        let main_bits = block_bits(freqs, main_codes, static_codes);
+        Ok(Some(self.judge(runs_bits, main_bits)))
+    }
+
+    /// For parsers that build their own codes (the near-optimal `png()`
+    /// rungs): parse `input[begin..end]` runs-only and report whether it beats
+    /// a main parse of `main_bits` (as [`encoded_bits`] counts them). `false`
+    /// while paused after a clear loss; when `true`, [`parse`](Self::parse)
+    /// holds the runs-only parse with its codes.
+    pub(crate) fn runs_beat(
+        &mut self,
+        input: &[u8],
+        begin: usize,
+        end: usize,
+        main_bits: u32,
+        static_codes: &DeflateCodes,
+        stop: &impl enough::Stop,
+    ) -> Result<bool, CompressionError> {
+        if self.skip > 0 {
+            self.skip -= 1;
+            return Ok(false);
+        }
+        let runs_bits = self.parse_runs(input, begin, end, static_codes, stop)?;
+        Ok(self.judge(runs_bits, main_bits))
+    }
+
+    /// Runs-only parse of `input[begin..end]`; returns its size in bits.
+    fn parse_runs(
+        &mut self,
+        input: &[u8],
+        begin: usize,
+        end: usize,
+        static_codes: &DeflateCodes,
+        stop: &impl enough::Stop,
+    ) -> Result<u32, CompressionError> {
         // png(2)'s runs-only settings.
         let cfg = ParseCfg {
             skip_shift: 4,
@@ -498,12 +534,15 @@ impl RunsGuard {
             &mut r.freqs,
             stop,
         )?;
-        let main_bits = block_bits(freqs, main_codes, static_codes);
-        let runs_bits = block_bits(&r.freqs, &mut r.codes, static_codes);
+        Ok(block_bits(&r.freqs, &mut r.codes, static_codes))
+    }
+
+    /// Whether runs-only (`runs_bits`) wins; pauses after a clear loss.
+    fn judge(&mut self, runs_bits: u32, main_bits: u32) -> bool {
         if runs_bits > main_bits + main_bits / 8 {
             self.skip = 3;
         }
-        Ok(Some(runs_bits < main_bits))
+        runs_bits < main_bits
     }
 
     /// The last runs-only parse: its sequences, frequencies and codes.
@@ -514,6 +553,20 @@ impl RunsGuard {
             &self.parse.codes,
         )
     }
+}
+
+/// Size (bits) of the cheaper of the dynamic and static encodings of a block
+/// whose frequencies (end-of-block included) and dynamic codes are given; the
+/// same count [`RunsGuard`] uses for its runs-only parse.
+pub(crate) fn encoded_bits(
+    freqs: &DeflateFreqs,
+    codes: &DeflateCodes,
+    static_codes: &DeflateCodes,
+) -> u32 {
+    let dynamic = block_symbol_cost(freqs, &codes.lens_litlen, &codes.lens_offset)
+        + dynamic_header_bits(codes);
+    let fixed = block_symbol_cost(freqs, &static_codes.lens_litlen, &static_codes.lens_offset);
+    dynamic.min(fixed)
 }
 
 /// Size (bits) of the cheaper of the dynamic and static Huffman encodings of
@@ -866,9 +919,10 @@ mod tests {
     fn png_level_mapping() {
         assert_eq!(CompressionLevel::png(0).effort(), 0);
         assert_eq!(CompressionLevel::png(500).effort(), 200);
-        // 19-22 use new(23)'s near-optimal parser; 23+ equal new(23+).
+        // 19-30 are near-optimal with png() block ends and the runs-only
+        // guard; 31+ (full optimal) equal new(31+).
         let img = filtered_image(200, 100, 7);
-        for (effort, general) in [(19, 23), (22, 23), (23, 23), (26, 26)] {
+        for (effort, general) in [(31, 31), (40, 40)] {
             let a = CompressionLevel::png(effort);
             let b = CompressionLevel::new(general);
             assert_eq!(
@@ -897,7 +951,8 @@ mod tests {
     }
 
     /// The runs-only guard only ever swaps in a cheaper block: on flat-colour
-    /// art the guarded lazy rungs beat the same lazy parser without it.
+    /// art the guarded lazy and near-optimal rungs beat the same parsers
+    /// without it.
     #[test]
     fn png_lazy_rungs_guarded() {
         // Flat colour bands with sparse noise: far matches split the runs.
@@ -916,25 +971,47 @@ mod tests {
                 });
             }
         }
-        let size = |effort: u32, guard: bool| {
+        // Near-optimal rungs: wider bands (period 51 bytes), noise 1 in 61.
+        let mut bands = Vec::new();
+        for y in 0..300 {
+            bands.push(0);
+            for i in 0..900 {
+                x ^= x << 13;
+                x ^= x >> 17;
+                x ^= x << 5;
+                bands.push(if x.is_multiple_of(61) {
+                    x as u8
+                } else {
+                    ((i / 51 + y / 9) % 3) as u8 * 85
+                });
+            }
+        }
+        let sized = |img: &[u8], effort: u32, guard: bool| {
             let mut c = Compressor::new(CompressionLevel::png(effort));
             if !guard {
                 c.runs_guard = None;
             }
             let mut out = vec![0u8; Compressor::zlib_compress_bound(img.len())];
-            c.zlib_compress(&img, &mut out, enough::Unstoppable)
-                .unwrap()
+            c.zlib_compress(img, &mut out, enough::Unstoppable).unwrap()
         };
-        let mut smaller = 0;
-        for effort in [10, 12, 15, 18] {
-            let (with, without) = (size(effort, true), size(effort, false));
+        for (img, efforts) in [
+            (&img, &[10, 12, 15, 18][..]),
+            (&bands, &[19, 20, 22, 26][..]),
+        ] {
+            let mut smaller = 0;
+            for &effort in efforts {
+                let (with, without) = (sized(img, effort, true), sized(img, effort, false));
+                assert!(
+                    with <= without,
+                    "png({effort}): {with} vs {without} unguarded"
+                );
+                smaller += usize::from(with < without);
+            }
             assert!(
-                with <= without,
-                "png({effort}): {with} vs {without} unguarded"
+                smaller > 0,
+                "the guard never picked the runs-only parse in {efforts:?}"
             );
-            smaller += usize::from(with < without);
         }
-        assert!(smaller > 0, "the guard never picked the runs-only parse");
     }
 
     /// png(10..=18) take block ends from the input alone
@@ -967,6 +1044,42 @@ mod tests {
             let back = miniz_oxide::inflate::decompress_to_vec_zlib(&out[..n]).unwrap();
             assert!(back == img, "png({effort}) roundtrip");
         }
+    }
+
+    /// png(19..=30) (near-optimal) end their blocks where
+    /// `input_block_end` says, like the lazy rungs, and never lose to their
+    /// own parse by more than the runs-only guard allows: each round-trips.
+    #[test]
+    fn png_near_optimal_rungs_share_block_ends() {
+        let img = filtered_image(900, 300, 3);
+        let mut want = vec![];
+        let mut b = 0;
+        while b < img.len() {
+            b = crate::compress::block_split::input_block_end(
+                &img,
+                b,
+                img.len(),
+                crate::compress::SOFT_MAX_BLOCK_LENGTH,
+            );
+            want.push(b);
+        }
+        assert!(want.len() > 1, "test image should split");
+        for effort in [19, 20, 21, 22, 23, 26, 30] {
+            let mut c = Compressor::new(CompressionLevel::png(effort));
+            let mut out = vec![0u8; Compressor::zlib_compress_bound(img.len())];
+            let n = c
+                .zlib_compress(&img, &mut out, enough::Unstoppable)
+                .unwrap();
+            assert_eq!(c.test_block_ends, want, "png({effort}) block ends");
+            let back = miniz_oxide::inflate::decompress_to_vec_zlib(&out[..n]).unwrap();
+            assert!(back == img, "png({effort}) roundtrip");
+        }
+        // new() keeps libdeflate's parse-driven splitting.
+        let mut c = Compressor::new(CompressionLevel::new(23));
+        let mut out = vec![0u8; Compressor::zlib_compress_bound(img.len())];
+        c.zlib_compress(&img, &mut out, enough::Unstoppable)
+            .unwrap();
+        assert_ne!(c.test_block_ends, want);
     }
 
     #[cfg(feature = "threads")]

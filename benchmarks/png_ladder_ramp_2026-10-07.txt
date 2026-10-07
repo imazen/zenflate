@@ -1,0 +1,170 @@
+# png(19..=22) time ramp, shared block ends and runs-only guard for png(19..=30), 2026-10-07
+#
+# Host: arm-big (Ampere Altra Neoverse-N1, Hetzner cax31), one pinned core (taskset -c 3, sweeps
+# also on core 5), nice 19. Inputs: 86 PNG IDAT streams (zenpng scripts/vs_png_inputs.sh, 64-1024 px,
+# ~/tmp/zfab-in-nolarge on arm-big), inflated to the filtered rows exactly as stored.
+# Command: cargo run --release --example png_ladder_pareto -- <dir> --rounds 3 --arms ... --tsv ...
+# Times: total over the 86 images of the per-image median of 3 rounds. TSVs (per image):
+# lilith.lan /mnt/v/output/zenflate/png-ladder-ramp-2026-10-07/.
+# Base: png-mode 66ead6f7 (png(19..=22) = new(23)'s settings, parse-driven block splitting, no guard).
+
+## Final ladder (this change), Neoverse-N1
+86 images, 111.4 MB filtered
+arm                     bytes     ratio   ms total      MB/s  front
+zen_png1             36207520    3.0777       99.6      1118  *
+fdeflate_ultra       39306166    2.8351      158.2       704  
+zen_png2             33168424    3.3597      240.8       463  *
+zen_png3             31186670    3.5732      529.1       211  *
+zlibrs_1             43021962    2.5902      551.5       202  
+libdeflate_1         30862262    3.6107      566.8       197  *
+zen_png4             30520272    3.6512      666.8       167  *
+miniz_1              34839642    3.1985      670.1       166  
+zen_png6             30085945    3.7039      890.6       125  *
+zen_png9             29547825    3.7713     1187.8        94  *
+libdeflate_6         29031035    3.8385     1734.4        64  *
+zen_png10            29147033    3.8232     2010.9        55  
+zlibrs_6             28845127    3.8632     2298.8        48  *
+zen_png12            28552739    3.9028     3390.3        33  *
+zen_png14            28374472    3.9273     4461.9        25  *
+miniz_6              28953307    3.8488     5402.7        21  
+zen_png16            28226652    3.9479     6424.4        17  *
+libdeflate_9         28371321    3.9277     7572.7        15  
+zen_png18            28154462    3.9580     8421.9        13  *
+zlibrs_9             28046333    3.9733    11690.8        10  *
+miniz_9              28496171    3.9105    14098.8         8  
+zen_png19            27269295    4.0865    15991.7         7  *
+zen_png20            27177500    4.1003    16950.7         7  *
+zen_png21            27125101    4.1082    18374.8         6  *
+zen_png22            27099203    4.1121    19012.7         6  *
+zen_png23            27081971    4.1147    19764.9         6  *
+zen_png26            26949263    4.1350    37671.7         3  *
+libdeflate_12        26889565    4.1442    45334.7         2  *
+zen_png30            26912814    4.1406    66818.5         2  
+
+## Per-image inversions from png(18) up: this change
+png19 larger than min(png18..png18) on 4/86; worst [(0.813, '9007_rgb16_1024'), (0.378, '6807_gray8_1024'), (0.07, '9227_rgb8_64')]
+png20 larger than min(png18..png19) on 7/86; worst [(0.378, '6807_gray8_1024'), (0.028, '5307_rgb8_64'), (0.026, '3007_rgb8_64')]
+png21 larger than min(png18..png20) on 10/86; worst [(0.378, '6807_gray8_1024'), (0.31, '1407_rgb8_256'), (0.136, '6007_rgb8_64')]
+png22 larger than min(png18..png21) on 11/86; worst [(0.378, '6807_gray8_1024'), (0.274, '1407_rgb8_256'), (0.103, '8007_rgb8_64')]
+png23 larger than min(png18..png22) on 16/86; worst [(0.378, '6807_gray8_1024'), (0.27, '1407_rgb8_256'), (0.159, '1207_rgba8_1024')]
+png26 larger than min(png18..png23) on 1/86; worst [(0.378, '6807_gray8_1024')]
+png30 larger than min(png18..png26) on 17/86; worst [(0.378, '6807_gray8_1024'), (0.309, '1407_rgb8_64'), (0.135, '2407_rgb8_256')]
+
+## Per-image inversions from png(18) up: before (png(19..=23) = new(23), parse-driven splits, no guard)
+OLD png23 larger than min(png[18]) on 6/86; worst [(1.12, '8107_gray8_1024'), (0.706, '6007_rgb8_1024'), (0.289, '6007_rgb8_256')]
+OLD png24 larger than min(png[18, 23]) on 9/86; worst [(1.181, '8107_gray8_1024'), (1.151, '1207_gray8_1024'), (0.362, '6007_rgb8_1024')]
+OLD png25 larger than min(png[18, 23, 24]) on 13/86; worst [(1.129, '1207_gray8_1024'), (0.448, '8107_gray8_1024'), (0.389, '9227_rgb8_64')]
+OLD png26 larger than min(png[18, 23, 24, 25]) on 3/86; worst [(0.923, '1207_gray8_1024'), (0.28, '6807_gray8_1024'), (0.013, '9097_rgb8_256')]
+OLD png28 larger than min(png[18, 23, 24, 25, 26]) on 29/86; worst [(0.909, '1207_gray8_1024'), (0.309, '1407_rgb8_64'), (0.28, '6807_gray8_1024')]
+OLD png30 larger than min(png[18, 23, 24, 25, 26, 28]) on 30/86; worst [(0.909, '1207_gray8_1024'), (0.335, '5207_interlaced_1024'), (0.309, '1407_rgb8_64')]
+
+## Choosing png(19..=22): near-optimal (depth, nice, passes) sweeps, before shared blocks/guard
+## (rows named png19..22 carry the config listed in CFG order)
+CFG 19:4,24,1;20:8,24,1;21:8,48,1;22:12,48,1
+zen_png19            28481791    3.9125     7971.3        14  *
+zen_png20            27992494    3.9809     9678.0        12  *
+zen_png21            27842367    4.0024    10833.3        10  *
+zen_png22            27552542    4.0445    12302.4         9  *
+CFG 19:16,32,1;20:24,64,1;21:35,75,1;22:8,32,2
+zen_png19            27490857    4.0535    12122.6         9  *
+zen_png22            27747392    4.0161    12400.6         9  
+zen_png20            27256145    4.0884    15145.9         7  *
+zen_png21            27205835    4.0960    16308.4         7  *
+CFG 19:12,48,2;20:16,32,2;21:16,64,2;22:24,48,2
+zen_png20            27338162    4.0762    14553.8         8  *
+zen_png19            27385786    4.0691    15103.1         7  
+zen_png22            27143195    4.1055    16941.5         7  *
+zen_png21            27188750    4.0986    17167.4         6  
+CFG 19:4,32,1;20:6,32,1;21:24,75,2;22:35,48,2
+zen_png19            28435634    3.9189     8371.1        13  *
+zen_png20            28139666    3.9601     9462.4        12  *
+zen_png22            27120066    4.1090    17421.2         6  *
+zen_png21            27070117    4.1165    19016.6         6  *
+
+
+## Same, with shared blocks + guard; configs per run in vs-png18 lines below
+zen_png18            28154462    3.9580     8404.6        13  *
+zen_png19            27519922    4.0493    12223.2         9  *
+zen_png20            27432920    4.0621    12816.2         9  *
+zen_png21            27425619    4.0632    12957.2         9  *
+zen_png22            27302724    4.0815    14655.7         8  *
+
+zen_png18            28154462    3.9580     8432.9        13  *
+zen_png21            27424812    4.0633    13012.3         9  *
+zen_png19            27331461    4.0772    14251.6         8  *
+zen_png20            27236815    4.0913    16383.2         7  *
+zen_png22            27152319    4.1041    17368.2         6  *
+
+zen_png18            28154462    3.9580     8456.6        13  *
+zen_png19            27766003    4.0134    12560.3         9  *
+zen_png20            27506546    4.0512    13803.1         8  *
+zen_png21            27369207    4.0716    14590.1         8  *
+zen_png22            27269295    4.0865    16073.1         7  *
+
+zen_png18            28154462    3.9580     8448.4        13  *
+zen_png19            27846925    4.0017    11893.9         9  *
+zen_png20            27177500    4.1003    17091.1         7  *
+zen_png21            27125101    4.1082    18506.8         6  *
+zen_png22            27099203    4.1121    19096.9         6  *
+
+zen_png17            28188170    3.9533     7379.6        15  *
+zen_png18            28154462    3.9580     8431.4        13  *
+zen_png19            27917300    3.9916    10134.4        11  *
+zen_png20            27392906    4.0680    13183.8         8  *
+zen_png21            27234099    4.0918    15900.4         7  *
+zen_png22            27092651    4.1131    18287.1         6  *
+zen_png23            27043591    4.1206    19692.3         6  *
+
+## Per-image losses to png(18) (lazy depth 800) by near-optimal config: one pass loses 4-10% on some images
+16,32,1    loses to png18 on 19; worst [(4.9, '5207_rgb8_256'), (3.27, '9007_rgb16_1024'), (2.64, '5307_rgb8_256')]
+24,32,1    loses to png18 on 11; worst [(4.7, '5207_rgb8_256'), (2.34, '9007_rgb16_1024'), (2.28, '5307_rgb8_256')]
+35,32,1    loses to png18 on 13; worst [(5.29, '5207_rgb8_256'), (2.26, '5307_rgb8_256'), (1.9, '9007_rgb16_1024')]
+35,48,1    loses to png18 on  7; worst [(4.02, '5207_rgb8_256'), (1.21, '6807_rgb8_64'), (0.88, '5307_rgb8_256')]
+24,48,1    loses to png18 on  8; worst [(4.33, '5207_rgb8_256'), (1.44, '5307_rgb8_256'), (1.21, '6807_rgb8_64')]
+35,75,1    loses to png18 on  5; worst [(3.82, '5207_rgb8_256'), (1.21, '6807_rgb8_64'), (0.48, '5307_rgb8_256')]
+50,32,1    loses to png18 on 13; worst [(5.29, '5207_rgb8_256'), (2.24, '5307_rgb8_256'), (1.9, '9007_rgb16_1024')]
+35,48,2    loses to png18 on  2; worst [(0.38, '6807_gray8_1024'), (0.0, '9097_rgb8_1024')]
+8,32,2     loses to png18 on 15; worst [(8.03, '5207_rgba8_1024'), (6.1, '9007_rgb16_1024'), (5.79, '8107_rgba8_1024')]
+12,32,2    loses to png18 on 11; worst [(3.72, '9007_rgb16_1024'), (2.74, '5207_rgba8_1024'), (1.93, '9007_rgba8_1024')]
+16,32,2    loses to png18 on  7; worst [(2.7, '9007_rgb16_1024'), (0.67, '9007_rgb8_1024'), (0.47, '8107_rgb8_64')]
+16,48,2    loses to png18 on  4; worst [(0.81, '9007_rgb16_1024'), (0.38, '6807_gray8_1024'), (0.07, '9227_rgb8_64')]
+8,24,2     loses to png18 on 17; worst [(9.97, '5207_rgba8_1024'), (8.57, '9007_rgba8_1024'), (7.61, '9007_rgb16_1024')]
+24,48,2    loses to png18 on  2; worst [(0.38, '6807_gray8_1024'), (0.0, '9097_rgb8_1024')]
+24,64,2    loses to png18 on  2; worst [(0.38, '6807_gray8_1024'), (0.0, '9097_rgb8_1024')]
+35,64,2    loses to png18 on  2; worst [(0.38, '6807_gray8_1024'), (0.0, '9097_rgb8_1024')]
+
+## Runs-only guard on the near-optimal rungs (shared blocks in both): guard off vs on
+OFF
+zen_png18            28154462    3.9580     8442.9        13  *
+zen_png19            27273587    4.0858    15930.1         7  *
+zen_png20            27181469    4.0997    16871.1         7  *
+zen_png21            27128338    4.1077    18282.7         6  *
+zen_png22            27102174    4.1117    18936.3         6  *
+zen_png23            27085271    4.1142    19667.4         6  *
+zen_png26            26950579    4.1348    37554.9         3  *
+ON
+zen_png18            28154462    3.9580     8443.4        13  *
+zen_png19            27269295    4.0865    16026.2         7  *
+zen_png20            27177500    4.1003    16937.3         7  *
+zen_png21            27125101    4.1082    18380.7         6  *
+zen_png22            27099203    4.1121    19014.7         6  *
+zen_png23            27081971    4.1147    19770.9         6  *
+zen_png26            26949263    4.1350    37718.1         3  *
+Per image: png(19) guard helps 14/86 (up to 1.89% 6007_rgb8_256), hurts 1 (<0.001%); png(26) helps 8/86 (up to 0.30%).
+
+## x86: i265 Core Ultra 7 265K, core 2 under the zenbench lock, zenpng's 91 inputs (~/tmp/pareto_in_le1024), this change
+91 images, 112.3 MB filtered
+arm                     bytes     ratio   ms total      MB/s  front
+zen_png17            28559411    3.9329     3427.5        33  *
+zen_png18            28525274    3.9376     3804.7        30  *
+zen_png19            27587745    4.0714     7774.8        14  *
+zen_png20            27494233    4.0852     8262.3        14  *
+zen_png21            27440681    4.0932     8887.0        13  *
+zen_png22            27413939    4.0972     9192.6        12  *
+zen_png23            27395794    4.0999     9547.9        12  *
+zen_png24            27344930    4.1075    10777.7        10  *
+zen_png25            27310330    4.1127    12582.0         9  *
+zen_png26            27257959    4.1206    17186.4         7  *
+zen_png28            27231699    4.1246    24013.6         5  *
+zen_png30            27220716    4.1263    29127.5         4  *
+Time vs png(17): png(18) 1.11x, png(19) 2.27x, png(20) 2.41x, png(21) 2.59x, png(22) 2.68x, png(23) 2.79x.

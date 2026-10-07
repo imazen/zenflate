@@ -225,8 +225,9 @@ impl CompressionLevel {
     /// | 3 | Runs + hashed repeats of 8+ bytes |
     /// | 4-9 | Runs + hashed repeats of 5+ bytes, hash chains of growing depth |
     /// | 10-18 | Lazy matching, search depth 16 → 800, with the runs-only guard |
-    /// | 19-22 | Near-optimal parsing, as [`new(23)`](Self::new) |
-    /// | 23-200 | Same parsers as [`new(effort)`](Self::new) |
+    /// | 19-22 | Near-optimal parsing, search depth 16 → 35, with the runs-only guard |
+    /// | 23-30 | [`new(effort)`](Self::new)'s near-optimal settings, with the runs-only guard |
+    /// | 31-200 | Same as [`new(effort)`](Self::new) (full optimal parsing) |
     ///
     /// Efforts 1-9 were chosen on 146 held-out imazen-26 cluster
     /// representatives at native sizes (adaptive filter). Efforts 10-18 use
@@ -237,12 +238,14 @@ impl CompressionLevel {
     /// higher effort only widens the search within the same blocks. On 86 PNG filtered streams (64-1024 px) they
     /// are never larger per image than libdeflate 5/6/7 and lie on the
     /// size/speed front; below about 10 MB/s near-optimal parsing beats any
-    /// lazy depth, so efforts 19-22 all use it
-    /// (`benchmarks/png_ladder_pareto_*_2026-10-06.txt`).
+    /// lazy depth (`benchmarks/png_ladder_pareto_*_2026-10-06.txt`).
+    /// Efforts 19-22 ramp its search up to effort 23's; efforts 19-30 use the
+    /// same input-derived block ends and runs-only guard as 10-18, so they
+    /// differ from `new(19..=30)` (`benchmarks/png_ladder_ramp_2026-10-07.txt`).
     ///
     /// # Monotonicity
     ///
-    /// Within the ladder the search only gets wider, and efforts 3-18 compare
+    /// Within the ladder the search only gets wider, and efforts 3-30 compare
     /// every block against its runs-only parse. Four switches change the
     /// algorithm, and [`monotonicity_fallback`](Self::monotonicity_fallback)
     /// covers each one: ultra-fast to exact Huffman (`png(2)` → `png(1)`),
@@ -279,7 +282,7 @@ impl CompressionLevel {
             InternalStrategy::Lazy
         } else if (19..=22).contains(&effort) {
             // Below ~10 MB/s near-optimal parsing beats any lazy depth on PNG
-            // data; efforts 19-23 all get new(23)'s near-optimal settings.
+            // data; 19-22 ramp its search depth (see `compression_params`).
             InternalStrategy::NearOptimal
         } else {
             match png_mode::png_params(effort) {
@@ -461,8 +464,8 @@ impl CompressionLevel {
         }
     }
 
-    /// Effort the near-optimal block writer sees: `png(19..=22)` use
-    /// `new(23)`'s near-optimal parser in full, so they report 23.
+    /// Effort the near-optimal block writer sees: `png(19..=22)` write
+    /// blocks as `new(23)` does (its best-precode search), so they report 23.
     pub(crate) fn near_optimal_effort(self) -> u32 {
         if self.png_family {
             self.effort.max(23)
@@ -514,6 +517,24 @@ impl CompressionLevel {
                 16 => (450, DEFLATE_MAX_MATCH_LEN),
                 17 => (600, DEFLATE_MAX_MATCH_LEN),
                 _ => (800, DEFLATE_MAX_MATCH_LEN),
+            };
+            return CompressionParams {
+                max_search_depth: depth,
+                nice_match_length: nice,
+                good_match: DISABLED,
+                max_lazy: DISABLED,
+            };
+        }
+        if self.png_family && (19..=22).contains(&self.effort) {
+            // png(19..=22): near-optimal parsing (two passes, as new(23)) with
+            // a shallower binary-tree search, a time ramp up to png(23)'s
+            // (35, 75). One pass, or a depth under 16, lost to png(18) by up
+            // to 10% on some images (benchmarks/png_ladder_ramp_2026-10-07.txt).
+            let (depth, nice) = match self.effort {
+                19 => (16, 48),
+                20 => (24, 48),
+                21 => (24, 64),
+                _ => (35, 64),
             };
             return CompressionParams {
                 max_search_depth: depth,
@@ -686,6 +707,10 @@ pub struct Compressor {
     png_ultra: Option<Box<UltraState>>,
     /// Runs-only guard for `png()` rungs on the lazy parsers.
     runs_guard: Option<Box<RunsGuard>>,
+    /// Input positions where the near-optimal parser ended its blocks in the
+    /// last call (tests check the png() rungs' shared block ends).
+    #[cfg(test)]
+    test_block_ends: Vec<usize>,
     /// Starting offset: skip dictionary bytes at the start of input.
     /// Set by `deflate_compress_chunk`; 0 for normal operation.
     chunk_start: usize,
@@ -785,6 +810,8 @@ impl Clone for Compressor {
             png_mf: self.png_mf.clone(),
             png_ultra: self.png_ultra.clone(),
             runs_guard: self.runs_guard.clone(),
+            #[cfg(test)]
+            test_block_ends: Vec::new(),
             chunk_start: self.chunk_start,
             force_nonfinal: self.force_nonfinal,
             incremental_pos: self.incremental_pos,
@@ -900,11 +927,17 @@ impl Compressor {
                 _ => None,
             },
             runs_guard: match strategy {
-                InternalStrategy::Lazy | InternalStrategy::Lazy2 if level.png_family => {
+                InternalStrategy::Lazy
+                | InternalStrategy::Lazy2
+                | InternalStrategy::NearOptimal
+                    if level.png_family =>
+                {
                     Some(Box::new(RunsGuard::new(SOFT_MAX_BLOCK_LENGTH)))
                 }
                 _ => None,
             },
+            #[cfg(test)]
+            test_block_ends: Vec::new(),
             chunk_start: 0,
             force_nonfinal: false,
             incremental_pos: 0,
@@ -3160,6 +3193,14 @@ impl Compressor {
         stop: &impl enough::Stop,
     ) -> Result<(), CompressionError> {
         ns.bt_mf.init();
+        if let Some(g) = self.runs_guard.as_deref_mut() {
+            g.reset();
+        }
+        #[cfg(test)]
+        self.test_block_ends.clear();
+        // png() near-optimal rungs take block ends from the input alone (as
+        // the lazy rungs do), so every rung splits a given input identically.
+        let shared_blocks = self.level.png_family;
 
         let in_end = input.len();
         let mut in_next = self.chunk_start;
@@ -3222,8 +3263,11 @@ impl Compressor {
         loop {
             stop.check()?;
             // Starting a new DEFLATE block
-            let in_max_block_end =
-                choose_max_block_end(in_block_begin, in_end, SOFT_MAX_BLOCK_LENGTH);
+            let in_max_block_end = if shared_blocks {
+                block_split::input_block_end(input, in_block_begin, in_end, SOFT_MAX_BLOCK_LENGTH)
+            } else {
+                choose_max_block_end(in_block_begin, in_end, SOFT_MAX_BLOCK_LENGTH)
+            };
             let mut prev_end_block_check: Option<usize> = None;
             let mut change_detected = false;
             let mut next_observation = in_next;
@@ -3325,6 +3369,10 @@ impl Compressor {
                 // Avoids degenerate behavior on highly redundant data.
                 if best_len >= DEFLATE_MIN_MATCH_LEN && best_len >= nice_len {
                     let mut skip = best_len - 1;
+                    if shared_blocks {
+                        // Stop at the shared block end.
+                        skip = skip.min((in_max_block_end - in_next) as u32);
+                    }
                     while skip > 0 {
                         let remaining = in_end - in_next;
                         if in_next == in_next_slide {
@@ -3381,6 +3429,9 @@ impl Compressor {
                 if cache_idx >= MATCH_CACHE_LENGTH {
                     break;
                 }
+                if shared_blocks {
+                    continue;
+                }
                 // Not ready to check block end?
                 if !self
                     .split_stats
@@ -3433,6 +3484,13 @@ impl Compressor {
                     max_search_depth,
                     self.level.near_optimal_effort(),
                     self.level.is_libdeflate_compat(),
+                    self.runs_guard
+                        .as_deref_mut()
+                        .map(|guard| near_optimal::NearOptGuard {
+                            guard,
+                            input,
+                            begin: in_block_begin,
+                        }),
                 );
 
                 // Move remaining cache entries to beginning
@@ -3465,8 +3523,17 @@ impl Compressor {
                     max_search_depth,
                     self.level.near_optimal_effort(),
                     self.level.is_libdeflate_compat(),
+                    self.runs_guard
+                        .as_deref_mut()
+                        .map(|guard| near_optimal::NearOptGuard {
+                            guard,
+                            input,
+                            begin: in_block_begin,
+                        }),
                 );
 
+                #[cfg(test)]
+                self.test_block_ends.push(in_next);
                 cache_idx = 0;
                 save_stats(&self.split_stats, ns);
                 init_stats(&mut self.split_stats, ns);

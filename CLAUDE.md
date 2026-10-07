@@ -54,7 +54,9 @@ Pure Rust DEFLATE/zlib/gzip compression and decompression.
   512 KiB); png(2) runs-only;
   png(3) hash min match 8; png(4..9) min match 5, chains; png(10..18) lazy (libdeflate
   5/6/7 settings, then deeper, no good_match/max_lazy shortcuts) + runs-only guard
-  (`RunsGuard`); png(19..22) = new(23)'s near-optimal parser; png(23..) = new(23..).
+  (`RunsGuard`); png(19..22) near-optimal ramp (2 passes, depth/nice 16/48 .. 35/64);
+  png(19..30) near-optimal with input-derived block ends + runs guard (`NearOptGuard`);
+  png(31..) = new(31..).
   Skip-ahead step capped at 256. Validated on 146-150 held-out K300 reps at 3 sizes:
   `benchmarks/png_mode_2026-10-06.md`, tooling in `benchmarks/harnesses/png-mode/validation/`.
 - [x] Phase 12 (unreleased): `zenflate::png::{StripCompressor, StripDecoder}` for iDOT
@@ -422,6 +424,28 @@ two-thread decode pipeline is bounded by inflate, so this is zenpng's lever.
   beats every lazy rung (3-byte lazy matches suit 16-bit samples poorly). new() keeps
   parse-driven splitting.
 - Before the guard, e13 was larger than png(12) on 41/86 images (up to 8.6%).
+
+### png(19..=30) ramp, shared blocks, guard (2026-10-07, `benchmarks/png_ladder_ramp_2026-10-07.txt`)
+
+- zenpng asked for a time ramp between png(18) and png(23) (all of 19-23 were
+  byte-identical, a 1.04x -> 3.37x jump on x86) and for png(23+) not to lose to
+  png(19..22) (1207_gray8_1024 +1.15%).
+- One near-optimal pass, at any depth, loses 4-5% to lazy png(18) on
+  5207_rgb8_256 (the first pass's cost model); depth under 16 loses up to 10% on
+  rgba line art (5207/8107_rgba8_1024) even with two passes. So the ramp keeps
+  two passes and only lowers depth/nice. There is no safe rung near 1.5x png(17);
+  the cheapest safe one is ~2.2x on Neoverse.
+- Input-derived block ends (as png(10..18)) for the near-optimal rungs: worst
+  inversion from png(19) up 1.18% -> 0.81% (0.38% from png(20)), +0.14% total.
+  The long-match skip must stop at the shared block end, and the parse-driven
+  end-of-block check is skipped. Match-cache overflow can still end a block
+  early (rare).
+- The runs-only guard on near-optimal blocks (`NearOptGuard`, compares with
+  `encoded_bits`) helps 14/86 images at png(19), up to 1.9%; ~0.5% time.
+- Open: png(10) is now dominated by libdeflate 6 on Neoverse (2011 ms / 3.823
+  vs 1734 ms / 3.839); png(30) is 0.09% larger than libdeflate 12 (faster).
+  Greedy png(7) > png(6) by 0.73% on 6807_rgb8_2560 (filter None); a
+  distance-aware candidate score (8*len - log2 dist) didn't change it.
 
 ### Strategy state must survive early returns (2026-10-06)
 

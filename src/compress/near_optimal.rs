@@ -18,11 +18,12 @@ use crate::matchfinder::bt::{BtMatchfinder, LzMatch};
 use super::bitstream::OutputBitstream;
 use super::block::{
     BlockOutput, DeflateCodes, DeflateFreqs, EXTRA_PRECODE_BITS, LENGTH_SLOT,
-    compute_precode_items, compute_precode_items_best, flush_block, flush_block_best,
-    make_huffman_codes, make_huffman_codes_best,
+    compute_precode_items, compute_precode_items_best, finish_block_with_codes, flush_block,
+    flush_block_best, make_huffman_codes, make_huffman_codes_best,
 };
 use super::block_split::{BlockSplitStats, MIN_BLOCK_LENGTH, NUM_OBSERVATION_TYPES};
 use super::huffman::{make_huffman_code, optimize_huffman_for_rle};
+use super::png_mode::{RunsGuard, encoded_bits};
 use super::sequences::Sequence;
 use super::{SOFT_MAX_BLOCK_LENGTH, choose_min_match_len};
 
@@ -863,6 +864,59 @@ pub(crate) fn find_min_cost_path(
 
 // ---- Block optimization ----
 
+/// The runs-only guard for the near-optimal `png()` rungs: before a block is
+/// written, its runs-only parse replaces it when that is smaller (see
+/// [`RunsGuard`]).
+pub(crate) struct NearOptGuard<'a> {
+    pub(crate) guard: &'a mut RunsGuard,
+    /// The whole input; the block is `input[begin..begin + block_length]`.
+    pub(crate) input: &'a [u8],
+    pub(crate) begin: usize,
+}
+
+impl NearOptGuard<'_> {
+    /// Write the block runs-only if that beats the parse in `freqs`/`codes`
+    /// (end-of-block counted); returns whether it did.
+    fn flush_if_runs_win(
+        &mut self,
+        os: &mut OutputBitstream<'_>,
+        block_length: u32,
+        freqs: &DeflateFreqs,
+        codes: &DeflateCodes,
+        static_codes: &DeflateCodes,
+        is_final_block: bool,
+    ) -> bool {
+        let begin = self.begin;
+        let end = begin + block_length as usize;
+        let main_bits = encoded_bits(freqs, codes, static_codes);
+        // The caller checks the stop token per block; this parse is bounded
+        // by one block.
+        let runs_win = self.guard.runs_beat(
+            self.input,
+            begin,
+            end,
+            main_bits,
+            static_codes,
+            &enough::Unstoppable,
+        );
+        if !matches!(runs_win, Ok(true)) {
+            return false;
+        }
+        let (seqs, runs_freqs, runs_codes) = self.guard.parse();
+        finish_block_with_codes(
+            os,
+            &self.input[begin..],
+            block_length as usize,
+            seqs,
+            runs_freqs,
+            runs_codes,
+            static_codes,
+            is_final_block,
+        );
+        true
+    }
+}
+
 /// Optimize and flush a near-optimal block.
 ///
 /// Runs multiple optimization passes, considers literal-only and static blocks,
@@ -885,6 +939,7 @@ pub(crate) fn optimize_and_flush_block(
     max_search_depth: u32,
     effort: u32,
     libdeflate_compat: bool,
+    mut guard: Option<NearOptGuard<'_>>,
 ) -> bool {
     // In libdeflate compat mode, suppress all ECT-derived optimizations
     // to maintain byte-identical output with C libdeflate.
@@ -1123,6 +1178,11 @@ pub(crate) fn optimize_and_flush_block(
             // Literal-only is best
             choose_all_literals(block_begin, block_length, freqs, codes);
             set_costs_from_codes(&mut ns.costs, codes);
+            if let Some(g) = guard.as_mut()
+                && g.flush_if_runs_win(os, block_length, freqs, codes, static_codes, is_final_block)
+            {
+                return false;
+            }
 
             let seq = Sequence {
                 litrunlen_and_length: block_length,
@@ -1183,6 +1243,11 @@ pub(crate) fn optimize_and_flush_block(
     let use_best_codes = !libdeflate_compat && effort >= 26;
     if use_best_codes {
         make_huffman_codes_best(freqs, codes);
+    }
+    if let Some(g) = guard.as_mut()
+        && g.flush_if_runs_win(os, block_length, freqs, codes, static_codes, is_final_block)
+    {
+        return used_only_literals;
     }
 
     let flush_fn = if use_best_precode {
