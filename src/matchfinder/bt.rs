@@ -12,9 +12,9 @@
 //! but requires nearly twice as much memory.
 
 #[cfg(not(feature = "std"))]
-use alloc::vec::Vec;
-
 #[cfg(not(feature = "unchecked"))]
+use alloc::boxed::Box;
+
 use super::lz_extend;
 use super::{
     MATCHFINDER_INITVAL, MATCHFINDER_WINDOW_SIZE, lz_hash, matchfinder_init, matchfinder_rebase,
@@ -67,9 +67,8 @@ pub(crate) struct LzMatch {
 
 /// Binary tree matchfinder for near-optimal compression (levels 10-12).
 ///
-/// With `unchecked`, uses fixed arrays so the whole NearOptimalState
-/// becomes a single allocation via `Box::new_uninit()`.
-/// Without `unchecked`, uses Vec (separate heap allocations per field).
+/// Tables are fixed-size boxed arrays (one heap allocation each), so masked
+/// indices need no bounds checks.
 ///
 #[derive(Clone)]
 pub(crate) struct BtMatchfinder {
