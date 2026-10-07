@@ -335,6 +335,19 @@ fn extend_forward(data: &[u8], ai: usize, bi: usize, max: usize) -> usize {
 }
 
 /// Per-call parser settings derived from [`PngParams`].
+/// png(2)'s settings: the runs-only parse every guard compares against.
+/// The guards must use exactly these, so a guarded block is never larger
+/// than png(2)'s. Using the level's own skip shift and minimum match (as
+/// png(3..=9) did) made png(5..=9) up to 0.22% larger than png(4) on
+/// unfiltered palette images, where runs-only wins every block.
+const RUNS_ONLY_CFG: ParseCfg = ParseCfg {
+    skip_shift: 4,
+    mm: 8,
+    mm_shift: 0,
+    depth: 1,
+    nice: DEFLATE_MAX_MATCH_LEN as usize,
+};
+
 struct ParseCfg {
     skip_shift: u32,
     mm: usize,
@@ -515,21 +528,13 @@ impl RunsGuard {
         static_codes: &DeflateCodes,
         stop: &impl enough::Stop,
     ) -> Result<u32, CompressionError> {
-        // png(2)'s runs-only settings.
-        let cfg = ParseCfg {
-            skip_shift: 4,
-            mm: 8,
-            mm_shift: 0,
-            depth: 1,
-            nice: DEFLATE_MAX_MATCH_LEN as usize,
-        };
         let r = &mut self.parse;
         r.n = parse_block(
             input,
             begin,
             end,
             None,
-            &cfg,
+            &RUNS_ONLY_CFG,
             &mut r.seqs,
             &mut r.freqs,
             stop,
@@ -678,7 +683,7 @@ impl Compressor {
                         begin,
                         end,
                         None,
-                        &cfg,
+                        &RUNS_ONLY_CFG,
                         &mut runs.seqs,
                         &mut runs.freqs,
                         stop,
@@ -948,6 +953,56 @@ mod tests {
         assert_eq!(chain(CompressionLevel::png(16)), [16, 9, 3]);
         assert_eq!(chain(CompressionLevel::png(20)), [20, 18, 9, 3]);
         assert_eq!(chain(CompressionLevel::png(40)), [40, 30, 18, 9, 3]);
+    }
+
+    /// png(3..=9) compare every block with png(2)'s own runs-only parse, so
+    /// none is larger than png(2) (same fixed-size blocks), and where
+    /// runs-only wins every block they emit png(2)'s exact bytes. Before the
+    /// guard used png(2)'s settings, png(5..=9) parsed "runs-only" with their
+    /// own skip shift and minimum match, and were up to 0.22% larger than
+    /// png(4) on unfiltered palette images.
+    #[test]
+    fn png_hash_rungs_never_lose_to_runs_only() {
+        let zlib = |effort: u32, img: &[u8]| {
+            let mut c = Compressor::new(CompressionLevel::png(effort));
+            let mut out = vec![0u8; Compressor::zlib_compress_bound(img.len())];
+            let n = c.zlib_compress(img, &mut out, enough::Unstoppable).unwrap();
+            out.truncate(n);
+            out
+        };
+        // Palette-like rows where runs-only wins every block.
+        let runs_win = |k: u32| {
+            let mut x = 0x2545_F491u32 ^ k;
+            let mut img = Vec::new();
+            for y in 0..400usize {
+                img.push(0);
+                for i in 0..1024usize {
+                    x ^= x << 13;
+                    x ^= x >> 17;
+                    x ^= x << 5;
+                    img.push(match k {
+                        0 if x.is_multiple_of(23) => (x >> 8) as u8 % 16,
+                        0 => ((i / 37 + y / 11) % 5) as u8,
+                        _ if (i + 7 * y) % 160 < 140 => (x >> 8) as u8 % 16,
+                        _ => ((i + 7 * y) / 160 % 7) as u8,
+                    });
+                }
+            }
+            img
+        };
+        for img in [runs_win(0), runs_win(1)] {
+            let base = zlib(2, &img);
+            for effort in 3..=9 {
+                assert!(zlib(effort, &img) == base, "png({effort}) != png(2)");
+            }
+        }
+        for img in [filtered_image(600, 200, 5), filtered_image(64, 64, 9)] {
+            let base = zlib(2, &img).len();
+            for effort in 3..=9 {
+                let n = zlib(effort, &img).len();
+                assert!(n <= base, "png({effort}) {n} > png(2) {base}");
+            }
+        }
     }
 
     /// The runs-only guard only ever swaps in a cheaper block: on flat-colour
