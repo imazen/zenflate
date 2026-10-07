@@ -344,6 +344,20 @@ two-thread decode pipeline is bounded by inflate, so this is zenpng's lever.
   core was 1.8-2.5% slower, and so were full-width 11-bit tables with a
   constant mask, 12-bit tables, and bounds-check-free typed table lookups
   (LLVM's checks evidently help its codegen here). Measure; don't assume.
+- **AVX-512 (v4) builds, Zen 4 only so far** (2026-10-07, lilith-wsl 7950X,
+  pinned core, ratios to fdeflate, 2-3 interleaved runs; not measured on Zen
+  5): a v4 `#[arcane]` build of the one-shot core is 1-2% faster (tip PNG
+  1.006 -> 0.993, Silesia/Canterbury 0.910 -> 0.891); a v3 one-shot build on
+  Zen 4 gets about half of that (the 265K measured v3 one-shot slower). A v4
+  build of the streaming loop gains nothing over its v3 build (PNG 1.054 ->
+  1.047, raw 0.917 -> 0.936). Not landed: confirm the one-shot v4 build on dev
+  (Zen 5) before adding an AVX-512-only dispatch. The patch is a thin wrapper:
+  `deflate_decompress_core` -> `#[inline(always)] _impl` + `#[arcane]
+  X64V4Token` fn under `cfg(feature = "avx512")`.
+- **AVX-512BW masked stores can't remove the one-shot output tail**: the safe
+  `_mm512_mask_storeu_epi8` (safe_unaligned_simd via archmage) takes `&mut
+  [u8; 64]`, so all 64 bytes must be in the slice anyway; it would only avoid
+  writing slack bytes on AVX-512 machines, so the documented contract stays.
 - Consumers checked against these changes (2026-10-07, copies in ~/tmp with a
   path dep): heic (`unci`, one-shot, default-features=false: 32 suites incl. 36
   unci tests), zenzop (checksums only), zensim-validate - all pass. No-`simd`
