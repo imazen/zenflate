@@ -147,7 +147,8 @@ fn zen_stream(p: &Png) -> usize {
         idx: 0,
         off: 0,
     };
-    let mut d = StreamDecompressor::zlib(src, capacity).with_skip_checksum(true);
+    let mut d =
+        StreamDecompressor::zlib(src, capacity).with_checksum(zenflate::ChecksumPolicy::Ignore);
     let mut total = 0usize;
     let mut sink = 0u8;
     loop {

@@ -219,6 +219,29 @@ pub struct DecompressOutcome {
 /// let result = d.deflate_decompress(&compressed[..csize], &mut output, Unstoppable).unwrap();
 /// assert_eq!(&output[..result.output_written], &data[..]);
 /// ```
+/// What the zlib and gzip decoders do with the stream's checksum (zlib's
+/// Adler-32, gzip's CRC-32). Set with
+/// [`Decompressor::with_checksum`] or
+/// [`StreamDecompressor::with_checksum`](crate::StreamDecompressor::with_checksum).
+/// Raw DEFLATE has no checksum, so the policy doesn't apply to it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum ChecksumPolicy {
+    /// Compute the checksum and compare it with the stream's; a mismatch is
+    /// [`DecompressionError::ChecksumMismatch`]. The default.
+    #[default]
+    Verify,
+    /// Compute and compare, but report a mismatch through
+    /// `checksum_matched()` (`Some(false)`) instead of failing. The output
+    /// is still returned.
+    Report,
+    /// Neither compute nor compare: skips the checksum pass over the output.
+    /// `checksum_matched()` returns `None`. The trailer is still read, and
+    /// gzip's length field is still checked: a wrong length is
+    /// [`DecompressionError::ChecksumMismatch`].
+    Ignore,
+}
+
 pub struct Decompressor {
     pub(crate) precode_lens: [u8; DEFLATE_NUM_PRECODE_SYMS],
     pub(crate) precode_decode_table: [u32; PRECODE_ENOUGH],
@@ -230,7 +253,7 @@ pub struct Decompressor {
     pub(crate) litlen_tablebits: u32,
     /// The litlen table holds double-literal entries (see `add_double_literals`).
     pub(crate) litlen_doubles: bool,
-    skip_checksum: bool,
+    checksum: ChecksumPolicy,
     checksum_matched: Option<bool>,
     max_output_size: Option<usize>,
 }
@@ -239,7 +262,7 @@ impl core::fmt::Debug for Decompressor {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("Decompressor")
             .field("static_codes_loaded", &self.static_codes_loaded)
-            .field("skip_checksum", &self.skip_checksum)
+            .field("checksum", &self.checksum)
             .field("checksum_matched", &self.checksum_matched)
             .field("max_output_size", &self.max_output_size)
             .finish_non_exhaustive()
@@ -265,7 +288,7 @@ impl Decompressor {
             static_codes_loaded: false,
             litlen_tablebits: 0,
             litlen_doubles: false,
-            skip_checksum: false,
+            checksum: ChecksumPolicy::Verify,
             checksum_matched: None,
             max_output_size: None,
         }
@@ -366,22 +389,31 @@ impl Decompressor {
         self
     }
 
-    /// When true, checksum mismatches in zlib/gzip wrappers are recorded
-    /// instead of returning an error. The decompressed data is still returned.
-    ///
-    /// After decompression, call [`checksum_matched()`](Self::checksum_matched)
-    /// to see if the checksum was correct.
+    /// What to do with the zlib/gzip checksum (see [`ChecksumPolicy`]).
+    /// Default: [`ChecksumPolicy::Verify`].
     #[must_use]
-    pub fn with_skip_checksum(mut self, skip: bool) -> Self {
-        self.skip_checksum = skip;
+    pub fn with_checksum(mut self, policy: ChecksumPolicy) -> Self {
+        self.checksum = policy;
         self
+    }
+
+    /// `true` is [`with_checksum(ChecksumPolicy::Report)`](Self::with_checksum),
+    /// `false` is [`ChecksumPolicy::Verify`]. Prefer `with_checksum`.
+    #[must_use]
+    pub fn with_skip_checksum(self, skip: bool) -> Self {
+        self.with_checksum(if skip {
+            ChecksumPolicy::Report
+        } else {
+            ChecksumPolicy::Verify
+        })
     }
 
     /// Whether the wrapper checksum matched after decompression.
     ///
-    /// - `None` — footer not yet processed (raw DEFLATE or not yet decompressed)
+    /// - `None` — footer not yet processed (raw DEFLATE or not yet
+    ///   decompressed), or the policy is [`ChecksumPolicy::Ignore`]
     /// - `Some(true)` — checksum matched
-    /// - `Some(false)` — checksum mismatch (only possible when `skip_checksum` is set)
+    /// - `Some(false)` — checksum mismatch (only with [`ChecksumPolicy::Report`])
     #[must_use]
     pub fn checksum_matched(&self) -> Option<bool> {
         self.checksum_matched
@@ -462,11 +494,14 @@ impl Decompressor {
             input[footer_start + 2],
             input[footer_start + 3],
         ]);
-        let actual = checksum::adler32(1, &output[..output_written]);
-        let matched = actual == expected;
-        self.checksum_matched = Some(matched);
-        if !matched && !self.skip_checksum {
-            return Err(DecompressionError::ChecksumMismatch);
+        self.checksum_matched = None;
+        if self.checksum != ChecksumPolicy::Ignore {
+            let actual = checksum::adler32(1, &output[..output_written]);
+            let matched = actual == expected;
+            self.checksum_matched = Some(matched);
+            if !matched && self.checksum == ChecksumPolicy::Verify {
+                return Err(DecompressionError::ChecksumMismatch);
+            }
         }
 
         Ok(DecompressOutcome {
@@ -579,7 +614,8 @@ impl Decompressor {
             input[footer_start + 2],
             input[footer_start + 3],
         ]);
-        let crc_ok = checksum::crc32(0, &output[..output_written]) == expected_crc;
+        let ignore = self.checksum == ChecksumPolicy::Ignore;
+        let crc_ok = ignore || checksum::crc32(0, &output[..output_written]) == expected_crc;
 
         // ISIZE (little-endian, mod 2^32)
         let expected_size = u32::from_le_bytes([
@@ -591,8 +627,8 @@ impl Decompressor {
         let size_ok = (output_written as u32) == expected_size;
 
         let matched = crc_ok && size_ok;
-        self.checksum_matched = Some(matched);
-        if !matched && !self.skip_checksum {
+        self.checksum_matched = if ignore { None } else { Some(matched) };
+        if !matched && self.checksum != ChecksumPolicy::Report {
             return Err(DecompressionError::ChecksumMismatch);
         }
 
@@ -2051,6 +2087,69 @@ mod tests {
             .unwrap();
         assert_eq!(result.output_written, data.len());
         assert_eq!(&output[..result.output_written], &data[..]);
+        assert_eq!(d.checksum_matched(), Some(false));
+    }
+
+    /// ChecksumPolicy on the one-shot decoders: Verify fails a corrupt
+    /// checksum, Report records it, Ignore neither computes nor records it,
+    /// and gzip's length field fails under every policy but Report.
+    #[test]
+    fn checksum_policy_one_shot() {
+        let data: Vec<u8> = (0..=255).cycle().take(5000).collect();
+        let mut c = libdeflater::Compressor::new(libdeflater::CompressionLvl::new(6).unwrap());
+        let mut z = vec![0u8; c.zlib_compress_bound(data.len())];
+        let zn = c.zlib_compress(&data, &mut z).unwrap();
+        let mut g = vec![0u8; c.gzip_compress_bound(data.len())];
+        let gn = c.gzip_compress(&data, &mut g).unwrap();
+        let (mut z, mut g) = (z[..zn].to_vec(), g[..gn].to_vec());
+        let mut out = vec![0u8; data.len()];
+        let run = |d: &mut Decompressor, gz: bool, input: &[u8], out: &mut [u8]| {
+            if gz {
+                d.gzip_decompress(input, out, enough::Unstoppable)
+            } else {
+                d.zlib_decompress(input, out, enough::Unstoppable)
+            }
+        };
+        for gz in [false, true] {
+            let input = if gz { &mut g } else { &mut z };
+            // Valid stream.
+            for (policy, matched) in [
+                (ChecksumPolicy::Verify, Some(true)),
+                (ChecksumPolicy::Report, Some(true)),
+                (ChecksumPolicy::Ignore, None),
+            ] {
+                let mut d = Decompressor::new().with_checksum(policy);
+                run(&mut d, gz, input, &mut out).unwrap();
+                assert_eq!(out, data);
+                assert_eq!(d.checksum_matched(), matched, "{policy:?} gz={gz}");
+            }
+            // Corrupt checksum (CRC-32 for gzip, Adler-32 for zlib).
+            let at = if gz { input.len() - 8 } else { input.len() - 1 };
+            input[at] ^= 0xFF;
+            let mut d = Decompressor::new().with_checksum(ChecksumPolicy::Verify);
+            assert_eq!(
+                run(&mut d, gz, input, &mut out).unwrap_err(),
+                DecompressionError::ChecksumMismatch
+            );
+            let mut d = Decompressor::new().with_checksum(ChecksumPolicy::Report);
+            run(&mut d, gz, input, &mut out).unwrap();
+            assert_eq!(d.checksum_matched(), Some(false));
+            // A reused decoder: Ignore clears the previous call's result.
+            let mut d = d.with_checksum(ChecksumPolicy::Ignore);
+            run(&mut d, gz, input, &mut out).unwrap();
+            assert_eq!((d.checksum_matched(), &out), (None, &data));
+            input[at] ^= 0xFF;
+        }
+        // gzip length field: Ignore still fails it, Report records it.
+        let at = g.len() - 4;
+        g[at] ^= 0x01;
+        let mut d = Decompressor::new().with_checksum(ChecksumPolicy::Ignore);
+        assert_eq!(
+            run(&mut d, true, &g, &mut out).unwrap_err(),
+            DecompressionError::ChecksumMismatch
+        );
+        let mut d = Decompressor::new().with_checksum(ChecksumPolicy::Report);
+        run(&mut d, true, &g, &mut out).unwrap();
         assert_eq!(d.checksum_matched(), Some(false));
     }
 

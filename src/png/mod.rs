@@ -187,7 +187,7 @@ impl<S: InputSource> StripDecoder<S> {
     /// Panics if `capacity` is 0.
     pub fn new(source: S, first_strip: bool, capacity: usize) -> Self {
         let inner = if first_strip {
-            StreamDecompressor::zlib(source, capacity).with_skip_checksum(true)
+            StreamDecompressor::zlib(source, capacity).with_checksum(crate::ChecksumPolicy::Report)
         } else {
             StreamDecompressor::zlib_continuation(source, capacity)
         };

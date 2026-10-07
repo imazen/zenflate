@@ -17,7 +17,7 @@ use alloc::vec::Vec;
 use crate::error::{DecompressionError, StreamError};
 
 use super::{
-    DEFLATE_BLOCKTYPE_DYNAMIC_HUFFMAN, DEFLATE_BLOCKTYPE_STATIC_HUFFMAN,
+    ChecksumPolicy, DEFLATE_BLOCKTYPE_DYNAMIC_HUFFMAN, DEFLATE_BLOCKTYPE_STATIC_HUFFMAN,
     DEFLATE_BLOCKTYPE_UNCOMPRESSED, DEFLATE_MAX_PRE_CODEWORD_LEN, DEFLATE_NUM_PRECODE_SYMS,
     DEFLATE_PRECODE_LENS_PERMUTATION, Decompressor, FASTLOOP_MAX_BYTES_READ,
     FASTLOOP_MAX_BYTES_WRITTEN, GZIP_CM_DEFLATE, GZIP_FCOMMENT, GZIP_FEXTRA, GZIP_FHCRC,
@@ -271,8 +271,8 @@ pub struct StreamDecompressor<S> {
     // Position in buffer up to which checksum has been computed
     checksum_watermark: usize,
 
-    // Checksum leniency
-    skip_checksum: bool,
+    // What to do with the wrapper checksum.
+    checksum_policy: ChecksumPolicy,
     checksum_matched: Option<bool>,
 
     // Output size limit (decompression bomb defense)
@@ -317,17 +317,29 @@ impl<S> StreamDecompressor<S> {
         &self.source
     }
 
-    /// When true, checksum mismatches in zlib/gzip wrappers are recorded
-    /// instead of returning an error. The decompressed data is still returned.
-    ///
-    /// After decompression completes ([`is_done()`](Self::is_done) returns
-    /// true), call [`checksum_matched()`](Self::checksum_matched) to see if
-    /// the checksum was correct.
+    /// What to do with the zlib/gzip checksum (see [`ChecksumPolicy`]).
+    /// Default: [`ChecksumPolicy::Verify`]. With
+    /// [`Ignore`](ChecksumPolicy::Ignore) decoding skips the checksum pass
+    /// over the output (PNG decoders commonly ignore the IDAT Adler-32).
+    /// Check [`checksum_matched()`](Self::checksum_matched) once
+    /// [`is_done()`](Self::is_done). Kept across [`reset`](Self::reset).
     #[must_use]
     #[inline(always)]
-    pub fn with_skip_checksum(mut self, skip: bool) -> Self {
-        self.skip_checksum = skip;
+    pub fn with_checksum(mut self, policy: ChecksumPolicy) -> Self {
+        self.checksum_policy = policy;
         self
+    }
+
+    /// `true` is [`with_checksum(ChecksumPolicy::Report)`](Self::with_checksum),
+    /// `false` is [`ChecksumPolicy::Verify`]. Prefer `with_checksum`.
+    #[must_use]
+    #[inline(always)]
+    pub fn with_skip_checksum(self, skip: bool) -> Self {
+        self.with_checksum(if skip {
+            ChecksumPolicy::Report
+        } else {
+            ChecksumPolicy::Verify
+        })
     }
 
     /// Whether the wrapper checksum matched after decompression.
@@ -438,7 +450,7 @@ impl<S: InputSource> StreamDecompressor<S> {
             checksum: checksum_init,
             total_output: 0,
             checksum_watermark: 0,
-            skip_checksum: false,
+            checksum_policy: ChecksumPolicy::Verify,
             checksum_matched: None,
             max_output_size: None,
             total_decompressed: 0,
@@ -591,7 +603,8 @@ impl<S: InputSource> StreamDecompressor<S> {
         self.checksum = checksum_init;
         self.total_output = 0;
         self.checksum_watermark = 0;
-        // Preserve skip_checksum and max_output_size across reset; clear result
+        // Preserve the checksum policy and max_output_size across reset;
+        // clear the result
         self.checksum_matched = None;
         self.total_decompressed = 0;
         self.blocks_without_output = 0;
@@ -698,6 +711,11 @@ impl<S: InputSource> StreamDecompressor<S> {
             return;
         }
         let data = &self.buffer[self.checksum_watermark..self.write_pos];
+        if self.checksum_policy == ChecksumPolicy::Ignore {
+            self.total_output += data.len() as u64;
+            self.checksum_watermark = self.write_pos;
+            return;
+        }
         match self.wrapper {
             WrapperFormat::Zlib => {
                 self.checksum = crate::checksum::adler32(self.checksum, data);
@@ -1803,8 +1821,18 @@ impl<S: InputSource> StreamDecompressor<S> {
             self.state = StreamState::Done;
             return Ok(());
         }
+        if self.checksum_policy == ChecksumPolicy::Ignore {
+            let size_ok = self.wrapper != WrapperFormat::Gzip
+                || (self.total_output as u32)
+                    == u32::from_le_bytes([footer[4], footer[5], footer[6], footer[7]]);
+            if !size_ok {
+                return Err(DecompressionError::ChecksumMismatch.into());
+            }
+            self.state = StreamState::Done;
+            return Ok(());
+        }
         self.checksum_matched = Some(matched);
-        if !matched && !self.skip_checksum {
+        if !matched && self.checksum_policy == ChecksumPolicy::Verify {
             return Err(DecompressionError::ChecksumMismatch.into());
         }
 
@@ -2309,6 +2337,51 @@ mod tests {
         assert_eq!(output.len(), data.len());
         assert_eq!(output, data);
         assert_eq!(dec.checksum_matched(), Some(false));
+    }
+
+    /// ignore_checksum: corrupt Adler-32 / CRC-32 footers decode without
+    /// error and checksum_matched() stays None; gzip's length field is still
+    /// checked; the setting survives reset().
+    #[test]
+    fn stream_ignore_checksum() {
+        let data: Vec<u8> = (0..=255).cycle().take(5000).collect();
+        let mut c = libdeflater::Compressor::new(libdeflater::CompressionLvl::new(6).unwrap());
+        let mut z = vec![0u8; c.zlib_compress_bound(data.len())];
+        let zn = c.zlib_compress(&data, &mut z).unwrap();
+        let mut g = vec![0u8; c.gzip_compress_bound(data.len())];
+        let gn = c.gzip_compress(&data, &mut g).unwrap();
+        let (mut z, mut g) = (z[..zn].to_vec(), g[..gn].to_vec());
+
+        // Valid streams.
+        let mut d =
+            StreamDecompressor::zlib(z.as_slice(), 1024).with_checksum(ChecksumPolicy::Ignore);
+        assert_eq!(stream_decompress_all(&mut d).unwrap(), data);
+        assert_eq!(d.checksum_matched(), None);
+
+        // Corrupt checksums decode without error.
+        z[zn - 1] ^= 0xFF;
+        g[gn - 8] ^= 0xFF;
+        let mut d =
+            StreamDecompressor::zlib(z.as_slice(), 1024).with_checksum(ChecksumPolicy::Ignore);
+        assert_eq!(stream_decompress_all(&mut d).unwrap(), data);
+        assert_eq!(d.checksum_matched(), None);
+        d.reset(z.as_slice());
+        assert_eq!(stream_decompress_all(&mut d).unwrap(), data, "after reset");
+        let mut d =
+            StreamDecompressor::gzip(g.as_slice(), 1024).with_checksum(ChecksumPolicy::Ignore);
+        assert_eq!(stream_decompress_all(&mut d).unwrap(), data);
+        assert_eq!(d.checksum_matched(), None);
+
+        // A wrong gzip length is still an error.
+        g[gn - 4] ^= 0x01;
+        let mut d =
+            StreamDecompressor::gzip(g.as_slice(), 1024).with_checksum(ChecksumPolicy::Ignore);
+        assert!(matches!(
+            stream_decompress_all(&mut d),
+            Err(StreamError::Decompress(
+                DecompressionError::ChecksumMismatch
+            ))
+        ));
     }
 
     /// Valid zlib stream with skip_checksum: checksum_matched() == Some(true).
