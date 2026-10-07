@@ -64,6 +64,11 @@ let result = decompressor
 
 For gzip and zlib, use `gzip_decompress` / `zlib_decompress` (identical shape).
 
+The one-shot decoders may overwrite up to about 32 bytes of `output` past
+`output_written` when the buffer is larger than the decoded data (the fast
+loop copies matches in fixed-size chunks). Bytes past `output_written` are not
+preserved, so don't decode into part of a buffer whose tail you need.
+
 **Server safety — bound the output.** The one-shot decompressors write into the
 `&mut [u8]` you pass, so **that buffer is the size cap**: for untrusted input you
 don't know the decompressed length up front (the gzip trailer is attacker-
@@ -219,15 +224,23 @@ when speed matters more than the last few percent of compression.
 `CompressionLevel::png(effort)` is tuned for PNG IDAT streams: filtered
 scanlines with long byte runs and literal-heavy residuals.
 
-- `png(1)` is an ultra-fast encoder: literals and zero runs, one Huffman table
-  per stream, built from the input's token counts (sampled above 64 KiB).
-- `png(2)` encodes runs only, with exact Huffman tables per block.
-- `png(3)` adds hashed repeats of 8+ bytes, `png(4..=5)` repeats of 5+ bytes.
-- `png(6..=12)` use hash chains of growing depth.
-- From effort 13 up it is the same as `new(effort)`.
+| Effort | Encoder |
+|--------|---------|
+| `png(1)` | Ultra-fast: literals and zero runs, one Huffman table per stream |
+| `png(2)` | Runs only, exact Huffman tables per block |
+| `png(3)` | Runs + hashed repeats of 8+ bytes |
+| `png(4..=9)` | Runs + hashed repeats of 5+ bytes, hash chains of growing depth |
+| `png(10..=18)` | Lazy matching, search depth 16 → 800 |
+| `png(19..=22)` | Near-optimal parsing, search depth 16 → 35 |
+| `png(23..=30)` | `new(23..=30)`'s near-optimal settings |
+| `png(31..)` | Same as `new(31..)` (full optimal parsing) |
 
-Each hash effort also parses every block runs-only and keeps the cheaper
-result, so it never loses to runs-only on flat-colour art.
+From `png(3)` through `png(30)` every block is also parsed runs-only and the
+smaller parse is written, so no level loses to runs-only on flat-colour art.
+From `png(10)` through `png(30)` block boundaries come from the input alone, so
+every level splits a given image the same way and a higher level only searches
+harder inside the same blocks. `monotonicity_fallback()` names the lower level
+to compare against at each change of algorithm.
 
 ```rust
 use zenflate::{Compressor, CompressionLevel, Unstoppable};
@@ -237,25 +250,58 @@ let mut idat = vec![0u8; Compressor::zlib_compress_bound(filtered_rows.len())];
 let size = compressor.zlib_compress(&filtered_rows, &mut idat, Unstoppable)?;
 ```
 
-Measured on 146 held-out imazen-26 images at their native sizes, adaptively
-filtered, each against the nearest `new()` effort or fdeflate level:
+Measured on 86 PNG filtered streams (64–1024 px), Ampere Altra Neoverse-N1,
+one core, each library compressing the same bytes:
 
-| Effort | Ratio | MiB/s | Comparison |
-|--------|-------|-------|------------|
-| `png(1)` | 2.237 | 2780 | fdeflate ultra-fast: 2.087 @ 1273 |
-| `png(2)` | 2.329 | 1161 | |
-| `png(3)` | 2.428 | 531 | fdeflate L1: 2.438 @ 399 |
-| `png(4)` | 2.502 | 365 | `new(1)`: 2.438 @ 315 |
-| `png(9)` | 2.564 | 181 | `new(10)`: 2.533 @ 158 |
-| `png(12)` | 2.579 | 123 | `new(12)`: 2.572 @ 128 |
+| zenflate | Ratio | MB/s | Nearby levels of other libraries |
+|----------|-------|------|----------------------------------|
+| `png(1)` | 3.078 | 1118 | fdeflate ultra-fast: 2.835 @ 704 |
+| `png(2)` | 3.360 | 463 | |
+| `png(3)` | 3.573 | 211 | libdeflate 1: 3.611 @ 197, zlib-rs 1: 2.590 @ 202 |
+| `png(4)` | 3.651 | 167 | miniz_oxide 1: 3.199 @ 166 |
+| `png(9)` | 3.771 | 94 | |
+| `png(10)` | 3.823 | 55 | libdeflate 6: 3.839 @ 64 |
+| `png(12)` | 3.903 | 33 | zlib-rs 6: 3.863 @ 48 |
+| `png(16)` | 3.948 | 17 | miniz_oxide 6: 3.849 @ 21, libdeflate 9: 3.928 @ 15 |
+| `png(18)` | 3.958 | 13 | zlib-rs 9: 3.973 @ 10, miniz_oxide 9: 3.911 @ 8 |
+| `png(19)` | 4.087 | 7 | |
+| `png(23)` | 4.115 | 6 | |
+| `png(26)` | 4.135 | 3 | |
+| `png(30)` | 4.141 | 2 | libdeflate 12: 4.144 @ 2 |
 
-On unfiltered rows (filter None, typical for palette images) and on small
-images, `new(10..)` compresses better than `png(10..=12)` at similar speed.
-On 64×64 images every level up to `png(17)` takes under 0.1 ms, and `png(2)`
-is as fast as `png(1)` and compresses smaller.
-Per-level statistics (mean ± CI, per-image inversions) and the fallbacks
-that keep higher efforts from producing larger files:
+Higher levels can still produce a slightly larger file than a lower one on
+some images: on this set by at most 0.81% from `png(19)` up, and libdeflate 6
+beats `png(10)` on both size and speed. Per-image data:
+[`benchmarks/png_ladder_ramp_2026-10-07.txt`](https://github.com/imazen/zenflate/blob/main/benchmarks/png_ladder_ramp_2026-10-07.txt);
+held-out validation of `png(1..=9)`:
 [`benchmarks/png_mode_2026-10-06.md`](https://github.com/imazen/zenflate/blob/main/benchmarks/png_mode_2026-10-06.md).
+
+### PNG strips for parallel encode and decode
+
+`zenflate::png::{StripCompressor, StripDecoder}` split one PNG zlib stream into
+independent strips of whole rows (PNG's `iDOT` layout). Each strip is
+compressed without history from earlier strips, so strips can be compressed
+on separate threads, and the concatenation is still one valid zlib stream that
+any decoder reads. `StripDecoder` inflates one strip on its own (streaming,
+`fill`/`peek`/`advance`) and reports whether it ended where the next strip
+begins, so an `iDOT`-aware decoder can inflate strips in parallel and verify
+the result against the stream's Adler-32.
+
+```rust
+use zenflate::png::StripCompressor;
+use zenflate::{CompressionLevel, Unstoppable, adler32, adler32_combine};
+
+let mut c = StripCompressor::new(CompressionLevel::png(4));
+let mut z = c.zlib_header().to_vec();
+let mut adler = 1;
+for (k, strip) in strips.iter().enumerate() {
+    let mut out = vec![0u8; StripCompressor::bound(strip.len())];
+    let n = c.compress(strip, k + 1 == strips.len(), &mut out, Unstoppable)?;
+    z.extend_from_slice(&out[..n]);
+    adler = adler32_combine(adler, adler32(1, strip), strip.len());
+}
+z.extend_from_slice(&adler.to_be_bytes());
+```
 
 ### Parallel gzip compression
 
@@ -365,6 +411,13 @@ output to C libdeflate at every level.
 On realistic data zenflate is the **fastest Rust decoder** (13–15% ahead of
 zlib-rs/flate2, ~20% ahead of zune-inflate) and within ~5% of C libdeflate.
 
+**PNG streams** (106 IDAT streams, 64–2560 px, median time per image relative to
+fdeflate, current main after 0.4.0, Core Ultra 7 265K one core): one-shot
+0.96×, streaming 0.98×; Ryzen 9 9950X3D (Zen 5) one-shot 0.98× with the
+AVX-512 build; Neoverse-N1 one-shot 0.83×, streaming 0.87×
+([`benchmarks/chunk32_copy_2026-10-07.txt`](https://github.com/imazen/zenflate/blob/main/benchmarks/chunk32_copy_2026-10-07.txt),
+[`benchmarks/oneshot_v4_2026-10-07.txt`](https://github.com/imazen/zenflate/blob/main/benchmarks/oneshot_v4_2026-10-07.txt)).
+
 **Checksums** (1 MiB sequential, `avx512` default-on):
 
 | Algorithm | zenflate | libdeflate (C) | vs C | Implementation |
@@ -431,6 +484,9 @@ pressure differences and bounds checking.
   algorithm for Huffman RLE encoding
 - [pigz](https://zlib.net/pigz/) by Mark Adler — parallel gzip chunking
   strategy with dictionary overlap
+- [fdeflate](https://github.com/image-rs/fdeflate) (image-rs) — the PNG
+  ultra-fast, runs-only and greedy compressors that `png(1..=9)` adapt, and
+  the double-literal decode tables and chunked match copy in the inflate loop
 
 ### What's different from libdeflate
 
