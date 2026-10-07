@@ -1,0 +1,27 @@
+# Near-optimal bounds-check work (bt matchfinder + DP), 2026-10-07
+# arm-big Neoverse-N1, taskset -c 3, 86 PNG streams (zfab-in-nolarge), png_ladder_pareto --rounds 3, 2 interleaved runs
+# hc = main bf4c3ea9 (before); dp = this commit (binary-tree + DP changes). Sizes identical.
+== dpw-hc-1.txt
+zen_png19            27269295    4.0865    15892.4         7  *
+zen_png23            27081971    4.1147    19580.9         6  *
+zen_png26            26949263    4.1350    37362.6         3  *
+libdeflate_12        26889565    4.1442    45580.4         2  *
+zen_ld12             26889565    4.1442    56687.3         2  
+== dpw-dp-1.txt
+zen_png19            27269295    4.0865    13217.2         8  *
+zen_png23            27081971    4.1147    16408.7         7  *
+zen_png26            26949263    4.1350    30629.2         4  *
+zen_ld12             26889565    4.1442    45134.9         2  *
+libdeflate_12        26889565    4.1442    45580.6         2  
+== dpw-hc-2.txt
+zen_png19            27269295    4.0865    15852.6         7  *
+zen_png23            27081971    4.1147    19571.0         6  *
+zen_png26            26949263    4.1350    37390.3         3  *
+libdeflate_12        26889565    4.1442    45561.1         2  *
+zen_ld12             26889565    4.1442    56655.2         2  
+== dpw-dp-2.txt
+zen_png19            27269295    4.0865    13248.2         8  *
+zen_png23            27081971    4.1147    16432.0         7  *
+zen_png26            26949263    4.1350    30671.8         4  *
+zen_ld12             26889565    4.1442    45193.0         2  *
+libdeflate_12        26889565    4.1442    45627.6         2  

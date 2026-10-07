@@ -65,11 +65,17 @@ pub(crate) const OPTIMUM_LEN_MASK: u32 = (1 << OPTIMUM_OFFSET_SHIFT) - 1;
 const MATCH_CACHE_ALLOC_SIZE: usize =
     MATCH_CACHE_LENGTH + MAX_MATCHES_PER_POS + DEFLATE_MAX_MATCH_LEN as usize - 1;
 
-/// Number of optimum nodes (one per position + sentinel).
-const OPTIMUM_NODES_SIZE: usize = MAX_BLOCK_LENGTH + 1;
+/// Number of optimum nodes: one per position, a sentinel, and a full match
+/// length past the largest block so the DP can view a fixed
+/// `DP_AHEAD`-node window at every position.
+const OPTIMUM_NODES_SIZE: usize = MAX_BLOCK_LENGTH + 1 + DP_AHEAD;
 
-/// Size of the full offset-to-slot table.
-const OFFSET_SLOT_FULL_SIZE: usize = DEFLATE_MAX_MATCH_OFFSET as usize + 1;
+/// Nodes a match from one position can reach (lengths 0..=258).
+const DP_AHEAD: usize = DEFLATE_MAX_MATCH_LEN as usize + 1;
+
+/// Size of the full offset-to-slot table: indexed by a `u16` offset, so the
+/// DP's lookups need no bounds checks (offsets above 32768 never occur).
+const OFFSET_SLOT_FULL_SIZE: usize = 1 << 16;
 
 /// Size of the match length frequency tables.
 const MATCH_LEN_FREQ_SIZE: usize = DEFLATE_MAX_MATCH_LEN as usize + 1;
@@ -716,6 +722,11 @@ pub(crate) fn find_min_cost_path(
 ) {
     let end = block_length as usize;
     optimum_nodes[end].cost_to_end = 0;
+    // Fixed-size views: u16 offsets and lengths clamped to 258 index them
+    // without bounds checks.
+    let offset_slots: &[u8; OFFSET_SLOT_FULL_SIZE] = offset_slot_full[..OFFSET_SLOT_FULL_SIZE]
+        .try_into()
+        .unwrap();
 
     let mut cache_idx = cache_end;
     let mut cur_idx = end;
@@ -726,45 +737,42 @@ pub(crate) fn find_min_cost_path(
 
         let num_matches = match_cache[cache_idx].length as usize;
         let literal = match_cache[cache_idx].offset as u32;
+        let ahead: &[OptimumNode; DP_AHEAD] = optimum_nodes[cur_idx..cur_idx + DP_AHEAD]
+            .try_into()
+            .unwrap();
 
         // Literal option
-        let mut best_cost =
-            costs.literal[literal as usize] + optimum_nodes[cur_idx + 1].cost_to_end;
-        optimum_nodes[cur_idx].item = (literal << OPTIMUM_OFFSET_SHIFT) | 1;
+        let mut best_cost = costs.literal[literal as u8 as usize] + ahead[1].cost_to_end;
+        let mut best_item = (literal << OPTIMUM_OFFSET_SHIFT) | 1;
 
         // Match options
         if num_matches > 0 {
             let match_start = cache_idx - num_matches;
-            let mut match_idx = match_start;
             let mut len = DEFLATE_MIN_MATCH_LEN;
 
-            loop {
-                let offset = match_cache[match_idx].offset as u32;
-                let os_idx = offset_slot_full[offset as usize] as usize;
-                let offset_cost = costs.offset_slot[os_idx];
+            for m in &match_cache[match_start..cache_idx] {
+                let offset = m.offset as u32;
+                let os_idx = offset_slots[m.offset as usize] as usize;
+                let offset_cost = costs.offset_slot[os_idx % DEFLATE_NUM_OFFSET_SYMS as usize];
+                let max_len = (m.length as u32).min(DEFLATE_MAX_MATCH_LEN);
 
                 loop {
-                    let cost = offset_cost
-                        + costs.length[len as usize]
-                        + optimum_nodes[cur_idx + len as usize].cost_to_end;
+                    let cost =
+                        offset_cost + costs.length[len as usize] + ahead[len as usize].cost_to_end;
                     if cost < best_cost {
                         best_cost = cost;
-                        optimum_nodes[cur_idx].item = len | (offset << OPTIMUM_OFFSET_SHIFT);
+                        best_item = len | (offset << OPTIMUM_OFFSET_SHIFT);
                     }
                     len += 1;
-                    if len > match_cache[match_idx].length as u32 {
+                    if len > max_len {
                         break;
                     }
-                }
-
-                match_idx += 1;
-                if match_idx == cache_idx {
-                    break;
                 }
             }
             cache_idx -= num_matches;
         }
 
+        optimum_nodes[cur_idx].item = best_item;
         optimum_nodes[cur_idx].cost_to_end = best_cost;
     }
 
