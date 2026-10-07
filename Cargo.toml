@@ -52,14 +52,14 @@ unchecked = []
 threads = ["std", "compress"]
 
 [dependencies]
-archmage = { version = "0.9.15", default-features = false, features = ["macros"], optional = true }
-enough = { version = "0.4.3", default-features = false }
+archmage = { version = "0.9.29", default-features = false, features = ["macros"], optional = true }
+enough = { version = "0.4.4", default-features = false }
 
 
 [dev-dependencies]
-arbitrary = { version = "1.4.2", features = ["derive"] }
-codec-corpus = "1"
-crc32fast = "1.5.1"
+arbitrary = { version = "1.5.0", features = ["derive"] }
+codec-corpus = "1.1.0"
+crc32fast = "1.5.2"
 zenutils-fuzz = "0.1.0"
 fdeflate = "0.3.7"
 miniz_oxide = "0.9.1"
@@ -69,16 +69,16 @@ simd-adler32 = "0.3.10"
 # Comparison benchmarks and bench harness — native only.
 # libdeflate-sys requires C compilation (needs WASI SDK for wasm32).
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
-zenbench = { version = "0.1.2", features = ["criterion-compat"] }
+zenbench = { version = "0.1.10", features = ["criterion-compat"] }
 # DEV-only: lets benches/checksum_tiers.rs disable the baseline SIMD token
 # (NEON on aarch64) so the "scalar" arm is real rather than a second
 # measurement of the SIMD path. Feature unification keeps this to test/bench
 # builds, so consumers are unaffected.
-archmage = { version = "0.9.28", features = ["testable_dispatch"] }
-libdeflater = "1.25.2"
-flate2 = { version = "1.1.9", default-features = false, features = ["zlib-rs"] }
-zlib-rs = "0.6.6"
-libflate = "2.3.0"
+archmage = { version = "0.9.29", features = ["testable_dispatch"] }
+libdeflater = "1.26.1"
+flate2 = { version = "1.1.10", default-features = false, features = ["zlib-rs"] }
+zlib-rs = "0.6.8"
+libflate = "2.3.2"
 yazi = "0.2.1"
 zune-inflate = "0.2.54"
 zopfli = "0.8.3"
