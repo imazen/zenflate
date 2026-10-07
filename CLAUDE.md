@@ -10,7 +10,7 @@ Pure Rust DEFLATE/zlib/gzip compression and decompression.
 - Side-by-side testing against C via `libdeflater` crate
 
 ## Source Reference
-- C source: `/home/lilith/work/libdeflate-src/lib/`
+- C source: [libdeflate](https://github.com/ebiggers/libdeflate) `lib/` (local checkout: `~/work/libdeflate-src/lib/`)
 
 ## Module Map
 - `src/constants.rs` — DEFLATE format constants (from deflate_constants.h)
