@@ -373,6 +373,34 @@ two-thread decode pipeline is bounded by inflate, so this is zenpng's lever.
   gate for decoder changes; the old `fuzz_decompress` only catches crashes.
   Under `cfg(test)`/`cfg(fuzzing)` the doubles threshold is 0.
 
+### Streaming decode fixed costs (zenpng asks A-F, 2026-10-07)
+
+callgrind on one 64 px streaming decode (`png_inflate --profile zenS`):
+- (A) `zlib(..).with_skip_checksum(..)` moved the ~10 KiB `StreamDecompressor`
+  twice (25K Ir memcpy). `#[inline(always)]` on the constructors/builders
+  builds it in place (-13K Ir). Boxing the `Decompressor` instead removed the
+  copies but added ~12K Ir to the generic loop (table loads through the box
+  pointer): don't box it.
+- (B) `reset()` only clears per-stream flags now; tables are rebuilt before
+  use (differential test `stream_reset_matches_fresh_decoder`). Fresh
+  construction still zero-fills tables + buffers (~36K Ir at 64 px): safe
+  Rust needs initialized memory; callers that decode many small streams
+  should reuse one decoder with `reset()`.
+- (D) The 'refill loop called `fill_input` (which compacts) on every
+  re-entry; now only below 4 KiB staged (-1M Ir on a 1024 px RGB decode).
+  The remaining cost is one copy of each input byte into staging; decoding
+  from the source's slices in place would mean restructuring the bit reader.
+- (E) `with_ignore_checksum` (PR #11): skip-checksum still computed the
+  Adler-32 so `checksum_matched()` could report it; ignoring saves 1-4.5% Ir.
+- (F) Fixed-Huffman tables are built once per process (std, `OnceLock`) and
+  copied: 1x1 PNG one-shot 1.3 -> 0.4 us (fdeflate 0.5).
+- (C) The `if doubles` test in the fastloop literal path runs per literal
+  (LLVM doesn't unswitch). Hardwiring it false measured only ~1-1.5% at 64 px
+  (and nothing larger, where doubles are on): not worth duplicating the loop.
+- Deferring buffer growth until a symbol needs room (when the caller drained
+  everything) measured no change; reverted, test kept
+  (`stream_exact_capacity_and_rows`).
+
 ### PNG ladder on identical filtered bytes (2026-10-06)
 
 `examples/png_ladder_pareto.rs`, `benchmarks/png_ladder_pareto_{arm,mac}_2026-10-06.txt`,
