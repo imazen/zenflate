@@ -1,0 +1,37 @@
+# 32-byte vs 16-byte fastloop match-copy chunks, 2026-10-07
+# base = png-mode 4641d937; c32 = base + 32-byte chunks for offset >= 32 (margin +32)
+# zen4 rows: lilith-wsl 7950X (Zen 4, not measured on Zen 5); c32 there also has v4 one-shot+streaming builds (exp, not landed), compared against v4b = v4 builds without c32; o3 = one-shot v3 build
+# cmd: png_inflate <106 zenpng PNG IDAT inputs> --rounds 5 ; png_inflate --raw silesia canterbury --rounds 5 ; pinned 1 core (taskset), interleaved
+# values: median per-image time ratio vs fdeflate (lower = faster)
+x86 base 1 png: median ratio vs fdeflate over 106 images: zen one-shot 0.971, zen stream 0.995, libdeflate 0.911
+x86 base 1 raw: median ratio vs fdeflate over 23 images: zen one-shot 0.897, zen stream 0.894, libdeflate 0.736
+x86 c32 1 png: median ratio vs fdeflate over 106 images: zen one-shot 0.959, zen stream 0.975, libdeflate 0.916
+x86 c32 1 raw: median ratio vs fdeflate over 23 images: zen one-shot 0.897, zen stream 0.865, libdeflate 0.737
+x86 base 2 png: median ratio vs fdeflate over 106 images: zen one-shot 0.974, zen stream 1.000, libdeflate 0.925
+x86 base 2 raw: median ratio vs fdeflate over 23 images: zen one-shot 0.898, zen stream 0.896, libdeflate 0.743
+x86 c32 2 png: median ratio vs fdeflate over 106 images: zen one-shot 0.964, zen stream 0.980, libdeflate 0.909
+x86 c32 2 raw: median ratio vs fdeflate over 23 images: zen one-shot 0.901, zen stream 0.866, libdeflate 0.738
+arm base 1 png: median ratio vs fdeflate over 106 images: zen one-shot 0.838, zen stream 0.878, libdeflate 0.745
+arm base 1 raw: median ratio vs fdeflate over 23 images: zen one-shot 0.869, zen stream 0.859, libdeflate 0.679
+arm c32 1 png: median ratio vs fdeflate over 106 images: zen one-shot 0.827, zen stream 0.869, libdeflate 0.754
+arm c32 1 raw: median ratio vs fdeflate over 23 images: zen one-shot 0.849, zen stream 0.845, libdeflate 0.676
+arm base 2 png: median ratio vs fdeflate over 106 images: zen one-shot 0.839, zen stream 0.873, libdeflate 0.746
+arm base 2 raw: median ratio vs fdeflate over 23 images: zen one-shot 0.872, zen stream 0.862, libdeflate 0.676
+arm c32 2 png: median ratio vs fdeflate over 106 images: zen one-shot 0.827, zen stream 0.870, libdeflate 0.749
+arm c32 2 raw: median ratio vs fdeflate over 23 images: zen one-shot 0.848, zen stream 0.840, libdeflate 0.670
+zen4 base 1 png: median ratio vs fdeflate over 106 images: zen one-shot 1.025, zen stream 1.074, libdeflate 0.919
+zen4 base 1 raw: median ratio vs fdeflate over 23 images: zen one-shot 0.920, zen stream 0.926, libdeflate 0.696
+zen4 v4b 1 png: median ratio vs fdeflate over 106 images: zen one-shot 1.011, zen stream 1.062, libdeflate 0.921
+zen4 v4b 1 raw: median ratio vs fdeflate over 23 images: zen one-shot 0.890, zen stream 0.942, libdeflate 0.715
+zen4 o3 1 png: median ratio vs fdeflate over 106 images: zen one-shot 1.019, zen stream 1.066, libdeflate 0.901
+zen4 o3 1 raw: median ratio vs fdeflate over 23 images: zen one-shot 0.903, zen stream 0.916, libdeflate 0.711
+zen4 c32 1 png: median ratio vs fdeflate over 106 images: zen one-shot 0.998, zen stream 1.050, libdeflate 0.913
+zen4 c32 1 raw: median ratio vs fdeflate over 23 images: zen one-shot 0.885, zen stream 0.926, libdeflate 0.708
+zen4 base 2 png: median ratio vs fdeflate over 106 images: zen one-shot 1.029, zen stream 1.077, libdeflate 0.921
+zen4 base 2 raw: median ratio vs fdeflate over 23 images: zen one-shot 0.926, zen stream 0.915, libdeflate 0.706
+zen4 v4b 2 png: median ratio vs fdeflate over 106 images: zen one-shot 1.004, zen stream 1.077, libdeflate 0.927
+zen4 v4b 2 raw: median ratio vs fdeflate over 23 images: zen one-shot 0.898, zen stream 0.929, libdeflate 0.710
+zen4 o3 2 png: median ratio vs fdeflate over 106 images: zen one-shot 1.017, zen stream 1.060, libdeflate 0.900
+zen4 o3 2 raw: median ratio vs fdeflate over 23 images: zen one-shot 0.896, zen stream 0.928, libdeflate 0.714
+zen4 c32 2 png: median ratio vs fdeflate over 106 images: zen one-shot 0.994, zen stream 1.044, libdeflate 0.916
+zen4 c32 2 raw: median ratio vs fdeflate over 23 images: zen one-shot 0.890, zen stream 0.937, libdeflate 0.716

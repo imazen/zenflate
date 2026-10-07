@@ -39,11 +39,11 @@ pub(crate) const CONSUMABLE_NBITS: u32 = 56; // MAX_BITSLEFT(63) - 7
 // Fastloop safety margins — how many bytes the fastloop can read/write per iteration.
 // Max bytes one fastloop iteration can write from its starting position: up to
 // two litlen entries (two bytes each, one possibly scratch for a single
-// literal), then a match whose 16-byte chunked copy can run up to 15 bytes
-// past its end. Bytes past the decoded output may be scribbled (within this
+// literal), then a match whose chunked copy (32-byte chunks) can run up to
+// 31 bytes past its end. Bytes past the decoded output may be scribbled (within this
 // margin) and are overwritten by later output or left beyond `output_written`.
 pub(crate) const FASTLOOP_MAX_BYTES_WRITTEN: usize =
-    4 + crate::constants::DEFLATE_MAX_MATCH_LEN as usize + 16;
+    4 + crate::constants::DEFLATE_MAX_MATCH_LEN as usize + 32;
 // Input: worst-case bytes consumed per iteration + 8-byte read-ahead for branchless refill
 pub(crate) const FASTLOOP_MAX_BYTES_READ: usize = 32;
 
@@ -328,7 +328,7 @@ impl Decompressor {
     /// the compiler eliminates all checks.
     ///
     /// Bytes of `output` past the returned `output_written` may be
-    /// overwritten (the fast decode loop stores in 16-byte chunks within a
+    /// overwritten (the fast decode loop stores in chunks of up to 32 bytes within a
     /// margin below `output.len()`); don't keep data there.
     pub fn deflate_decompress(
         &mut self,
@@ -350,7 +350,7 @@ impl Decompressor {
     /// parameter.
     ///
     /// Bytes of `output` past the returned `output_written` may be
-    /// overwritten (the fast decode loop stores in 16-byte chunks within a
+    /// overwritten (the fast decode loop stores in chunks of up to 32 bytes within a
     /// margin below `output.len()`); don't keep data there.
     pub fn zlib_decompress(
         &mut self,
@@ -410,7 +410,7 @@ impl Decompressor {
     /// parameter.
     ///
     /// Bytes of `output` past the returned `output_written` may be
-    /// overwritten (the fast decode loop stores in 16-byte chunks within a
+    /// overwritten (the fast decode loop stores in chunks of up to 32 bytes within a
     /// margin below `output.len()`); don't keep data there.
     pub fn gzip_decompress(
         &mut self,
@@ -673,11 +673,15 @@ pub(crate) fn add_double_literals(table: &mut [u32], table_bits: u32) {
     }
 }
 
-/// Fastloop match copy in fixed 16-byte chunks (each compiles to one vector
-/// load and store, no `memmove` call), as image-rs's fdeflate does. Requires
-/// `out_pos + length + 15 <= output.len()` (the fastloop margin).
+/// Fastloop match copy in fixed-size chunks (each compiles to vector loads and
+/// stores, no `memmove` call), as image-rs's fdeflate does with 16-byte
+/// chunks. Requires `out_pos + length + 31 <= output.len()` (the fastloop
+/// margin).
 ///
-/// - offset >= 16: chunks don't overlap their source.
+/// - offset >= 32: 32-byte chunks; they don't overlap their source. (Measured
+///   faster than 16-byte chunks on Core Ultra 7 265K, Ryzen 7950X and
+///   Neoverse-N1, `examples/png_inflate.rs`.)
+/// - offset 16..=31: 16-byte chunks; they don't overlap their source.
 /// - offset 1: a run; 16-byte splats of the byte.
 /// - offset 2..=15: 16-byte copies stepping by `offset`: each chunk's first
 ///   `offset` bytes come from output that is already final, and the rest are
@@ -690,7 +694,16 @@ pub(crate) fn fastloop_match_copy(
     length: usize,
     offset: usize,
 ) {
-    if offset >= 16 {
+    if offset >= 32 {
+        let mut i = 0;
+        loop {
+            output.copy_within(src_start + i..src_start + i + 32, out_pos + i);
+            i += 32;
+            if i >= length {
+                break;
+            }
+        }
+    } else if offset >= 16 {
         let mut i = 0;
         loop {
             output.copy_within(src_start + i..src_start + i + 16, out_pos + i);
