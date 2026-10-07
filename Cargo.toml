@@ -86,6 +86,11 @@ zopfli = "0.8.3"
 [profile.release]
 debug = true
 
+# The fuzz_api checks it replays call `gzip_compress_parallel`.
+[[test]]
+name = "fuzz_regression"
+required-features = ["threads"]
+
 [[bench]]
 name = "throughput"
 harness = false
