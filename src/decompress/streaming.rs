@@ -560,7 +560,7 @@ impl<S: InputSource> StreamDecompressor<S> {
             _ => 0,
         };
         self.source = source;
-        self.inner = Decompressor::new();
+        self.inner.reset_stream_state();
         self.write_pos = 0;
         self.read_pos = 0;
         self.lookback_valid = 0;
@@ -988,44 +988,7 @@ impl<S: InputSource> StreamDecompressor<S> {
             if !self.inner.static_codes_loaded {
                 self.inner.static_codes_loaded = true;
 
-                for i in 0..144 {
-                    self.inner.lens[i] = 8;
-                }
-                for i in 144..256 {
-                    self.inner.lens[i] = 9;
-                }
-                for i in 256..280 {
-                    self.inner.lens[i] = 7;
-                }
-                for i in 280..288 {
-                    self.inner.lens[i] = 8;
-                }
-                for i in 288..320 {
-                    self.inner.lens[i] = 5;
-                }
-
-                if !build_decode_table(
-                    &mut self.inner.offset_decode_table,
-                    &self.inner.lens[288..],
-                    32,
-                    &OFFSET_DECODE_RESULTS,
-                    OFFSET_TABLEBITS,
-                    15,
-                    &mut self.inner.sorted_syms,
-                    None,
-                ) {
-                    return Err(bad.into());
-                }
-                if !build_decode_table(
-                    &mut self.inner.litlen_decode_table,
-                    &self.inner.lens,
-                    288,
-                    &LITLEN_DECODE_RESULTS,
-                    LITLEN_TABLEBITS,
-                    15,
-                    &mut self.inner.sorted_syms,
-                    Some(&mut self.inner.litlen_tablebits),
-                ) {
+                if !self.inner.load_static_tables() {
                     return Err(bad.into());
                 }
                 // Double literals are added once enough input is staged.
@@ -2609,6 +2572,70 @@ mod tests {
             other => panic!(
                 "expected DecompressionError::BadData on tiny-capacity stream, got {other:?}"
             ),
+        }
+    }
+
+    /// `reset` keeps the previous stream's decode tables (they are rebuilt
+    /// before use), so a reused decoder must decode, and fail, exactly like a
+    /// fresh one: dynamic and static blocks, truncations and corruptions,
+    /// after streams that loaded different tables.
+    #[test]
+    fn stream_reset_matches_fresh_decoder() {
+        let mut x = 0x9E37_79B9u32;
+        let mut streams: Vec<Vec<u8>> = Vec::new();
+        for (len, level) in [
+            (0usize, 6),
+            (10, 1),
+            (300, 12),
+            (5000, 6),
+            (70_000, 9),
+            (200, 0),
+        ] {
+            let data: Vec<u8> = (0..len)
+                .map(|i| {
+                    x ^= x << 13;
+                    x ^= x >> 17;
+                    x ^= x << 5;
+                    if (i / 700) % 2 == 0 {
+                        (i % 13) as u8
+                    } else {
+                        x as u8
+                    }
+                })
+                .collect();
+            let mut c =
+                libdeflater::Compressor::new(libdeflater::CompressionLvl::new(level).unwrap());
+            let mut z = vec![0u8; c.deflate_compress_bound(data.len())];
+            let n = c.deflate_compress(&data, &mut z).unwrap();
+            z.truncate(n);
+            streams.push(z);
+        }
+        // Malformed variants: truncated, and with flipped bits.
+        let n = streams.len();
+        for k in 0..n {
+            let z = streams[k].clone();
+            if z.len() > 4 {
+                streams.push(z[..z.len() / 2].to_vec());
+                let mut flipped = z.clone();
+                for i in (1..flipped.len()).step_by(7) {
+                    flipped[i] ^= 0x10;
+                }
+                streams.push(flipped);
+            }
+        }
+        let run = |d: &mut StreamDecompressor<&[u8]>| -> Result<Vec<u8>, String> {
+            stream_decompress_all(d).map_err(|e| format!("{e:?}"))
+        };
+        for capacity in [64, DEFAULT_CAPACITY] {
+            for a in &streams {
+                for b in &streams {
+                    let fresh = run(&mut StreamDecompressor::deflate(b.as_slice(), capacity));
+                    let mut d = StreamDecompressor::deflate(a.as_slice(), capacity);
+                    let _ = run(&mut d);
+                    d.reset(b.as_slice());
+                    assert_eq!(run(&mut d), fresh, "capacity {capacity}");
+                }
+            }
         }
     }
 

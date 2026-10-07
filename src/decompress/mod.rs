@@ -271,6 +271,77 @@ impl Decompressor {
         }
     }
 
+    /// Clear per-stream decode state so the tables can serve a new stream
+    /// (streaming `reset`). The tables themselves are not cleared: every
+    /// block builds its tables before reading them.
+    #[cfg(feature = "alloc")]
+    pub(crate) fn reset_stream_state(&mut self) {
+        self.static_codes_loaded = false;
+        self.litlen_doubles = false;
+        self.checksum_matched = None;
+    }
+
+    /// Load the fixed Huffman tables (RFC 1951 section 3.2.6). With `std`
+    /// they are built once per process and copied: building them cost about
+    /// 16K instructions per stream that starts with a fixed-Huffman block.
+    pub(crate) fn load_static_tables(&mut self) -> bool {
+        #[cfg(feature = "std")]
+        {
+            struct StaticTables {
+                litlen: [u32; LITLEN_ENOUGH],
+                offset: [u32; OFFSET_ENOUGH],
+                litlen_tablebits: u32,
+            }
+            static CACHE: std::sync::OnceLock<Option<Box<StaticTables>>> =
+                std::sync::OnceLock::new();
+            let cached = CACHE.get_or_init(|| {
+                let mut d = Box::new(Decompressor::new());
+                d.build_static_tables().then(|| {
+                    Box::new(StaticTables {
+                        litlen: d.litlen_decode_table,
+                        offset: d.offset_decode_table,
+                        litlen_tablebits: d.litlen_tablebits,
+                    })
+                })
+            });
+            if let Some(t) = cached {
+                self.litlen_decode_table = t.litlen;
+                self.offset_decode_table = t.offset;
+                self.litlen_tablebits = t.litlen_tablebits;
+                return true;
+            }
+        }
+        self.build_static_tables()
+    }
+
+    fn build_static_tables(&mut self) -> bool {
+        self.lens[..144].fill(8);
+        self.lens[144..256].fill(9);
+        self.lens[256..280].fill(7);
+        self.lens[280..288].fill(8);
+        // Fixed offset code: all 5 bits
+        self.lens[288..320].fill(5);
+        build_decode_table(
+            &mut self.offset_decode_table,
+            &self.lens[288..],
+            32,
+            &OFFSET_DECODE_RESULTS,
+            OFFSET_TABLEBITS,
+            15,
+            &mut self.sorted_syms,
+            None,
+        ) && build_decode_table(
+            &mut self.litlen_decode_table,
+            &self.lens,
+            288,
+            &LITLEN_DECODE_RESULTS,
+            LITLEN_TABLEBITS,
+            15,
+            &mut self.sorted_syms,
+            Some(&mut self.litlen_tablebits),
+        )
+    }
+
     /// Set a maximum output size limit for decompression.
     ///
     /// When set, decompression will return
@@ -1177,46 +1248,7 @@ impl Decompressor {
                 if !self.static_codes_loaded {
                     self.static_codes_loaded = true;
 
-                    // Fixed literal/length code lengths (RFC 1951 section 3.2.6)
-                    for i in 0..144 {
-                        self.lens[i] = 8;
-                    }
-                    for i in 144..256 {
-                        self.lens[i] = 9;
-                    }
-                    for i in 256..280 {
-                        self.lens[i] = 7;
-                    }
-                    for i in 280..288 {
-                        self.lens[i] = 8;
-                    }
-                    // Fixed offset code: all 5 bits
-                    for i in 288..320 {
-                        self.lens[i] = 5;
-                    }
-
-                    if !build_decode_table(
-                        &mut self.offset_decode_table,
-                        &self.lens[288..],
-                        32,
-                        &OFFSET_DECODE_RESULTS,
-                        OFFSET_TABLEBITS,
-                        15,
-                        &mut self.sorted_syms,
-                        None,
-                    ) {
-                        return Err(bad);
-                    }
-                    if !build_decode_table(
-                        &mut self.litlen_decode_table,
-                        &self.lens,
-                        288,
-                        &LITLEN_DECODE_RESULTS,
-                        LITLEN_TABLEBITS,
-                        15,
-                        &mut self.sorted_syms,
-                        Some(&mut self.litlen_tablebits),
-                    ) {
+                    if !self.load_static_tables() {
                         return Err(bad);
                     }
                     self.litlen_doubles = wants_double_literals(input.len() - in_pos);
@@ -1525,6 +1557,21 @@ impl Decompressor {
 #[cfg(all(test, not(miri), not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
+
+    /// The process-wide fixed-Huffman tables (std) equal freshly built ones,
+    /// and a second load (served from the cache) does too.
+    #[test]
+    fn static_tables_cache_matches_build() {
+        let mut built = Decompressor::new();
+        assert!(built.build_static_tables());
+        for _ in 0..2 {
+            let mut loaded = Decompressor::new();
+            assert!(loaded.load_static_tables());
+            assert_eq!(loaded.litlen_decode_table, built.litlen_decode_table);
+            assert_eq!(loaded.offset_decode_table, built.offset_decode_table);
+            assert_eq!(loaded.litlen_tablebits, built.litlen_tablebits);
+        }
+    }
 
     #[test]
     fn test_decompress_empty_static() {
