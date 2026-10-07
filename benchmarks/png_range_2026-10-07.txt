@@ -1,0 +1,77 @@
+# Every png() level (1..=30) vs other libraries, 2026-10-07
+# arm-big Neoverse-N1, taskset -c 3, 86 PNG streams (zenpng vs_png inputs, 64-1024 px), png_ladder_pareto --rounds 3, zenflate main f041b61b
+# TSV (per image): lilith.lan /mnt/v/output/zenflate/png-ladder-ramp-2026-10-07/range-arm.tsv
+86 images, 111.4 MB filtered
+arm                     bytes     ratio   ms total      MB/s  front
+zen_png1             36207520    3.0777       98.9      1126  *
+fdeflate_ultra       39306166    2.8351      157.5       707  
+zen_png2             33168424    3.3597      237.1       470  *
+zen_png3             31186670    3.5732      522.1       213  *
+zlibrs_1             43021962    2.5902      544.3       205  
+libdeflate_1         30862262    3.6107      565.7       197  *
+zen_png4             30520272    3.6512      656.7       170  *
+miniz_1              34839642    3.1985      668.4       167  
+zen_png5             30318744    3.6755      731.7       152  *
+zen_png6             30089461    3.7035      847.6       131  *
+zen_png7             29902616    3.7266      921.5       121  *
+zen_png8             29720153    3.7495     1017.2       110  *
+zen_png9             29548690    3.7712     1141.5        98  *
+libdeflate_6         29031035    3.8385     1729.9        64  *
+zen_png10            29147033    3.8232     1877.9        59  
+zen_png11            28876318    3.8591     2282.8        49  *
+zlibrs_6             28845127    3.8632     2290.8        49  *
+zen_png12            28552739    3.9028     3233.8        34  *
+zen_png13            28440837    3.9181     3794.3        29  *
+zen_png14            28374472    3.9273     4298.7        26  *
+zen_png15            28292902    3.9386     5170.7        22  *
+miniz_6              28953307    3.8488     5386.0        21  
+zen_png16            28226652    3.9479     6257.2        18  *
+zen_png17            28188170    3.9533     7187.4        16  *
+libdeflate_9         28371321    3.9277     7567.2        15  
+zen_png18            28154462    3.9580     8211.5        14  *
+zlibrs_9             28046333    3.9733    11675.6        10  *
+zen_png19            27267549    4.0867    13349.7         8  *
+miniz_9              28496171    3.9105    14065.9         8  
+zen_png20            27175828    4.1005    14253.0         8  *
+zen_png21            27125383    4.1082    15322.3         7  *
+zen_png22            27098706    4.1122    15898.7         7  *
+zen_png23            27080392    4.1150    16534.7         7  *
+zen_png24            27031095    4.1225    18839.5         6  *
+zen_png25            26996996    4.1277    22484.9         5  *
+zen_png26            26947557    4.1353    30790.4         4  *
+zen_png27            26905370    4.1417    36190.2         3  *
+zen_png28            26895392    4.1433    44240.5         3  *
+libdeflate_12        26889565    4.1442    45324.7         2  *
+zen_png29            26887424    4.1445    53680.3         2  *
+zen_png30            26883852    4.1451    53758.3         2  *
+
+Per-image inversions vs the next lower level (png(4)/png(3) and png(10)/png(9) are algorithm switches covered by monotonicity_fallback()):
+png2 vs png1: larger on 4/86, worst 0.866% 6007_rgb8_64
+png3 vs png2: larger on 0/86, worst 0% 
+png4 vs png3: larger on 21/86, worst 3.358% 1207_rgba8_1024
+png5 vs png4: larger on 1/86, worst 0.015% 6007_gray1_1024
+png6 vs png5: larger on 0/86, worst 0% 
+png7 vs png6: larger on 0/86, worst 0% 
+png8 vs png7: larger on 0/86, worst 0% 
+png9 vs png8: larger on 2/86, worst 0.08% 5307_rgb8_64
+png10 vs png9: larger on 24/86, worst 2.155% 2007_rgb8_1024
+png11 vs png10: larger on 5/86, worst 0.639% 5207_rgb16_1024
+png12 vs png11: larger on 2/86, worst 0.101% 8007_rgb8_64
+png13 vs png12: larger on 1/86, worst 0.606% 5207_rgb16_1024
+png14 vs png13: larger on 2/86, worst 0.055% 2007_rgb8_64
+png15 vs png14: larger on 11/86, worst 0.019% 8007_rgb8_1024
+png16 vs png15: larger on 6/86, worst 0.067% 6007_rgb8_64
+png17 vs png16: larger on 9/86, worst 0.052% 9007_rgb8_64
+png18 vs png17: larger on 9/86, worst 0.029% 5007_rgb8_64
+png19 vs png18: larger on 4/86, worst 0.813% 9007_rgb16_1024
+png20 vs png19: larger on 5/86, worst 0.028% 5307_rgb8_64
+png21 vs png20: larger on 5/86, worst 0.31% 1407_rgb8_256
+png22 vs png21: larger on 5/86, worst 0.035% 9227_rgb8_64
+png23 vs png22: larger on 5/86, worst 0.148% 2407_rgb8_64
+png24 vs png23: larger on 4/86, worst 0.02% 6807_rgb16_1024
+png25 vs png24: larger on 2/86, worst 0.389% 9227_rgb8_64
+png26 vs png25: larger on 0/86, worst 0% 
+png27 vs png26: larger on 16/86, worst 0.476% 5207_interlaced_1024
+png28 vs png27: larger on 31/86, worst 0.309% 1407_rgb8_64
+png29 vs png28: larger on 7/86, worst 0.278% 9227_rgb8_1024
+png30 vs png29: larger on 15/86, worst 0.257% 5207_rgb16_1024
