@@ -7,7 +7,7 @@
 //! heaptrack cargo run --release --example setup_cost -- --one e19   # peak heap of one level
 //! ```
 //!
-//! Level specs: `e<N>` = `CompressionLevel::new(N)`.
+//! Level specs: `e<N>` = `CompressionLevel::new(N)`, `p<N>` = `CompressionLevel::png(N)`.
 use std::hint::black_box;
 use std::time::Instant;
 
@@ -17,7 +17,8 @@ fn level(spec: &str) -> CompressionLevel {
     let n: u32 = spec[1..].parse().expect("level number");
     match &spec[..1] {
         "e" => CompressionLevel::new(n),
-        _ => panic!("level spec is e<N>"),
+        "p" => CompressionLevel::png(n),
+        _ => panic!("level spec is e<N> or p<N>"),
     }
 }
 
@@ -72,7 +73,7 @@ fn main() {
     }
     let specs = [
         "e0", "e1", "e5", "e8", "e10", "e13", "e15", "e17", "e19", "e22", "e24", "e26", "e30",
-        "e31",
+        "e31", "p1", "p2", "p3", "p6", "p12",
     ];
     let inputs = [
         ("24x24 gray", png_like(24, 24, 1, 3)),

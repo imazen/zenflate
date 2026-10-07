@@ -17,6 +17,7 @@
 //! (full)") adds inputs up to 1 MiB and runs in release.
 #![cfg(feature = "compress")]
 
+use zenflate::png::{StripCompressor, StripDecoder};
 use zenflate::{CompressionLevel, Compressor, Decompressor, Unstoppable};
 
 fn full() -> bool {
@@ -219,6 +220,7 @@ fn inputs() -> Vec<(String, Vec<u8>)> {
 enum Family {
     New(u32),
     Libdeflate(u32),
+    Png(u32),
 }
 
 fn levels() -> Vec<(String, Family, CompressionLevel)> {
@@ -236,6 +238,13 @@ fn levels() -> Vec<(String, Family, CompressionLevel)> {
             format!("libdeflate({l})"),
             Family::Libdeflate(l),
             CompressionLevel::libdeflate(l),
+        )
+    }));
+    v.extend((0..=17).map(|e| {
+        (
+            format!("png({e})"),
+            Family::Png(e),
+            CompressionLevel::png(e),
         )
     }));
     v
@@ -320,6 +329,8 @@ fn incremental_supported(family: Family) -> bool {
     match family {
         Family::Libdeflate(l) => (1..=9).contains(&l),
         Family::New(e) => (10..=22).contains(&e),
+        // png(13..=22) use the same parsers as new(13..=22).
+        Family::Png(e) => (13..=22).contains(&e),
     }
 }
 
@@ -358,6 +369,96 @@ fn check_incremental(name: &str, level: CompressionLevel, data: &[u8]) {
             .unwrap_or_else(|e| panic!("{name} incremental {scheme} final: {e:?}"));
         stream.extend_from_slice(&out[..n]);
         decode_all(&format!("{name} incremental {scheme}"), &stream, data);
+    }
+}
+
+/// Independent segments (PNG iDOT layout), each into an exactly-bound
+/// buffer with one reused compressor, framed as zlib: decodes as one stream,
+/// and every segment decodes alone to its slice of the input.
+fn check_segmented(name: &str, level: CompressionLevel, data: &[u8]) {
+    let n = data.len();
+    for seg_ends in [vec![n], vec![n / 3, 2 * n / 3, n]] {
+        let mut c = StripCompressor::new(level);
+        let mut z = c.zlib_header().to_vec();
+        let mut cends = Vec::new();
+        let mut start = 0;
+        for (k, &end) in seg_ends.iter().enumerate() {
+            let mut out = vec![0u8; StripCompressor::bound(end - start)];
+            let len = c
+                .compress(
+                    &data[start..end],
+                    k + 1 == seg_ends.len(),
+                    &mut out,
+                    Unstoppable,
+                )
+                .unwrap_or_else(|e| panic!("{name} segment {k} into its bound: {e:?}"));
+            z.extend_from_slice(&out[..len]);
+            cends.push(z.len());
+            start = end;
+        }
+        z.extend_from_slice(&zenflate::adler32(1, data).to_be_bytes());
+        *cends.last_mut().unwrap() = z.len();
+        let mz = miniz_oxide::inflate::decompress_to_vec_zlib(&z)
+            .unwrap_or_else(|e| panic!("{name} segmented: miniz decode: {e:?}"));
+        assert!(mz == data, "{name} segmented: miniz content");
+        // Each strip alone, with an empty window: a non-final strip plus an
+        // empty final block (`03 00`) must decode in full, which holds only
+        // if it ends byte-aligned on a block boundary with no final block.
+        let mut prev = 2;
+        for (k, (&cend, &dend)) in cends.iter().zip(&seg_ends).enumerate() {
+            let last = k + 1 == seg_ends.len();
+            let mut src = z[prev..if last { cend - 4 } else { cend }].to_vec();
+            if !last {
+                src.extend_from_slice(&[0x03, 0x00]);
+            }
+            let dstart = if k == 0 { 0 } else { seg_ends[k - 1] };
+            let mut got = vec![0u8; dend - dstart];
+            let r = Decompressor::new()
+                .deflate_decompress(&src, &mut got, Unstoppable)
+                .unwrap_or_else(|e| panic!("{name} segment {k} alone: {e:?}"));
+            assert_eq!(
+                (r.input_consumed, r.output_written),
+                (src.len(), got.len()),
+                "{name} segment {k} alone: framing"
+            );
+            assert!(
+                got == data[dstart..dend],
+                "{name} segment {k} alone: content"
+            );
+            prev = cend;
+        }
+        // The same strips through the public strip decoder, verified via the
+        // combined Adler-32 against the trailer.
+        let mut prev = 0;
+        let mut adler = 1;
+        let mut trailer = None;
+        for (k, (&cend, &dend)) in cends.iter().zip(&seg_ends).enumerate() {
+            let mut d = StripDecoder::new(&z[prev..cend], k == 0, 1 << 16);
+            let mut got = Vec::new();
+            while !d.is_done() {
+                let o = d
+                    .fill()
+                    .unwrap_or_else(|e| panic!("{name} strip decoder {k}: {e:?}"));
+                let m = o.len();
+                got.extend_from_slice(o);
+                d.advance(m);
+            }
+            let dstart = if k == 0 { 0 } else { seg_ends[k - 1] };
+            assert!(
+                got == data[dstart..dend],
+                "{name} strip decoder {k}: content"
+            );
+            let last = k + 1 == seg_ends.len();
+            assert_eq!(
+                d.ended_at_strip_boundary(),
+                !last,
+                "{name} strip decoder {k}"
+            );
+            adler = zenflate::adler32_combine(adler, d.adler32(), got.len());
+            trailer = d.trailer();
+            prev = cend;
+        }
+        assert_eq!(trailer, Some(adler), "{name} strip decoder: trailer");
     }
 }
 
@@ -418,6 +519,7 @@ fn run_levels(filter: impl Fn(Family) -> bool) {
             }
             #[cfg(feature = "threads")]
             check_parallel(&name, level, data);
+            check_segmented(&name, level, data);
         }
     }
 }
@@ -617,4 +719,14 @@ fn recovery_new_levels() {
 #[test]
 fn recovery_libdeflate_levels() {
     check_recovery(|f| matches!(f, Family::Libdeflate(_)));
+}
+
+#[test]
+fn conformance_png_levels() {
+    run_levels(|f| matches!(f, Family::Png(_)));
+}
+
+#[test]
+fn recovery_png_levels() {
+    check_recovery(|f| matches!(f, Family::Png(_)));
 }

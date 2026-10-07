@@ -21,12 +21,31 @@ use super::{
     DEFLATE_BLOCKTYPE_UNCOMPRESSED, DEFLATE_MAX_PRE_CODEWORD_LEN, DEFLATE_NUM_PRECODE_SYMS,
     DEFLATE_PRECODE_LENS_PERMUTATION, Decompressor, FASTLOOP_MAX_BYTES_READ,
     FASTLOOP_MAX_BYTES_WRITTEN, GZIP_CM_DEFLATE, GZIP_FCOMMENT, GZIP_FEXTRA, GZIP_FHCRC,
-    GZIP_FNAME, GZIP_FRESERVED, GZIP_ID1, GZIP_ID2, HUFFDEC_END_OF_BLOCK, HUFFDEC_EXCEPTIONAL,
-    HUFFDEC_LITERAL, HUFFDEC_SUBTABLE_POINTER, LITLEN_DECODE_RESULTS, LITLEN_TABLEBITS,
-    OFFSET_DECODE_RESULTS, OFFSET_TABLEBITS, PRECODE_DECODE_RESULTS, PRECODE_TABLEBITS,
-    ZLIB_CINFO_32K_WINDOW, ZLIB_CM_DEFLATE, bitmask, build_decode_table, extract_varbits,
-    extract_varbits8, refill_bits, refill_bits_fast, table_lookup,
+    GZIP_FNAME, GZIP_FRESERVED, GZIP_ID1, GZIP_ID2, HUFFDEC_DOUBLE_LITERAL, HUFFDEC_END_OF_BLOCK,
+    HUFFDEC_EXCEPTIONAL, HUFFDEC_LITERAL, HUFFDEC_SUBTABLE_POINTER, LITLEN_DECODE_RESULTS,
+    LITLEN_TABLEBITS, OFFSET_DECODE_RESULTS, OFFSET_TABLEBITS, PRECODE_DECODE_RESULTS,
+    PRECODE_TABLEBITS, ZLIB_CINFO_32K_WINDOW, ZLIB_CM_DEFLATE, add_double_literals, bitmask,
+    build_decode_table, extract_varbits, extract_varbits8, put_lits, refill_bits, refill_bits_fast,
+    table_lookup, wants_double_literals,
 };
+
+/// x86-64-v3 (AVX2, BMI1/2) build of the streaming decode loop: variable
+/// shifts and bit masks become `shrx`/`bzhi`, as in libdeflate's BMI2 build.
+/// Streaming inflate on zenpng's 106 PNG inputs, Core Ultra 7 265K: 1.105 ->
+/// 1.066 of fdeflate's time. (The one-shot decoder measured slower with it.)
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+mod v3 {
+    use super::*;
+    use archmage::prelude::*;
+
+    #[arcane]
+    pub(super) fn decompress_block_v3<S: InputSource>(
+        _token: X64V3Token,
+        d: &mut StreamDecompressor<S>,
+    ) -> Result<(), StreamError<S::Error>> {
+        d.decompress_block_impl()
+    }
+}
 
 // ---------------------------------------------------------------------------
 // InputSource trait
@@ -133,7 +152,14 @@ struct PendingMatch {
 // ---------------------------------------------------------------------------
 
 /// Size of the internal input staging buffer.
-const INPUT_BUF_SIZE: usize = 512;
+// 512 bytes made the fastloop exit and refill every ~480 compressed bytes;
+// 32 KiB measured 3% faster streaming on zenpng's 106 PNG inputs (4 KiB: 2.9%).
+const INPUT_BUF_SIZE: usize = 32 * 1024;
+
+/// Initial staging size; doubles up to [`INPUT_BUF_SIZE`] while the source
+/// keeps filling it, so small streams don't zero 32 KiB they never use (64 px
+/// PNG streams decoded 4% slower on x86 with a 32 KiB initial buffer).
+const INPUT_BUF_INITIAL: usize = 4 * 1024;
 
 /// Minimum lookback required for match references (32KB window).
 const LOOKBACK_SIZE: usize = 32 * 1024;
@@ -191,7 +217,11 @@ pub struct StreamDecompressor<S> {
     source: S,
     inner: Decompressor,
 
-    // Output buffer: [lookback (32KB) | peekable (capacity)]
+    // Output buffer: starts at `capacity` bytes with output from offset 0, and
+    // doubles toward [lookback (32KB) | peekable (capacity)] each time output
+    // outgrows it, so a stream that fits in `capacity` never zero-fills the
+    // 32 KiB window. Back-references are bounded by
+    // `lookback_valid`, never by buffer position.
     buffer: Vec<u8>,
     capacity: usize,
     write_pos: usize,
@@ -200,10 +230,10 @@ pub struct StreamDecompressor<S> {
     // valid back-reference targets. Saturates at `LOOKBACK_SIZE` (the maximum
     // legal DEFLATE back-ref distance).
     //
-    // This is NOT `write_pos - LOOKBACK_SIZE`: at construction `write_pos`
-    // starts at `LOOKBACK_SIZE`, but the bytes before it are zero-fill, not
-    // real output. A malicious stream emitting a back-ref as the very first
-    // symbol would otherwise read those implicit zeros as "lookback".
+    // This is NOT derived from `write_pos`: after `reset` the buffer may still
+    // hold a previous stream's bytes, and before the first compaction no
+    // window exists at all. A malicious stream emitting a back-ref as the very
+    // first symbol must not read stale bytes as "lookback".
     //
     // Updated by every write to `write_pos`, and re-clamped by
     // `compact_output` (which may reduce `write_pos`).
@@ -224,6 +254,13 @@ pub struct StreamDecompressor<S> {
     is_final_block: bool,
     pending_match: Option<PendingMatch>,
     pending_literal: Option<u8>,
+    /// Second literal of a double-literal entry that did not fit either;
+    /// written after `pending_literal`.
+    pending_literal2: Option<u8>,
+    /// The current block's litlen table has no double-literal entries yet;
+    /// the compressed-data loop adds them once enough input is staged
+    /// (see `DOUBLE_LITERAL_MIN_INPUT`).
+    doubles_pending: bool,
 
     // Wrapper format
     wrapper: WrapperFormat,
@@ -245,6 +282,17 @@ pub struct StreamDecompressor<S> {
 
     // Stall detection: blocks processed without output progress
     blocks_without_output: u64,
+
+    // Segment mode: end cleanly when input runs out at a byte-aligned block
+    // boundary (see `with_segment_end`).
+    segment_end: bool,
+    ended_at_segment_boundary: bool,
+
+    // zlib continuation: the header was consumed elsewhere and the footer is
+    // recorded (not verified), because this decoder's checksum covers only
+    // its own part of the stream.
+    verify_footer: bool,
+    footer_checksum: Option<u32>,
 }
 
 impl<S: core::fmt::Debug> core::fmt::Debug for StreamDecompressor<S> {
@@ -276,6 +324,7 @@ impl<S> StreamDecompressor<S> {
     /// true), call [`checksum_matched()`](Self::checksum_matched) to see if
     /// the checksum was correct.
     #[must_use]
+    #[inline(always)]
     pub fn with_skip_checksum(mut self, skip: bool) -> Self {
         self.skip_checksum = skip;
         self
@@ -291,6 +340,46 @@ impl<S> StreamDecompressor<S> {
         self.checksum_matched
     }
 
+    /// Decode one *segment* of a larger DEFLATE stream.
+    ///
+    /// When enabled, running out of input exactly at a block boundary that is
+    /// byte-aligned — with no unread bits left and no BFINAL block seen —
+    /// ends the stream cleanly instead of reporting truncation:
+    /// [`is_done()`](Self::is_done) and
+    /// [`ended_at_segment_boundary()`](Self::ended_at_segment_boundary) both
+    /// return true. This is the shape a zlib full flush (`00 00 ff ff`) or
+    /// a non-final PNG strip produces. Public through
+    /// [`png::StripDecoder`](crate::png::StripDecoder).
+    ///
+    /// The check is strict on purpose: if the segment ends mid-block, or
+    /// with leftover bits, a decoder reading the whole stream serially would
+    /// continue the current block (or read the next block header from those
+    /// bits) rather than start fresh at the next segment's first byte. Such
+    /// input still errors, so a caller that decodes segments independently
+    /// can rely on "every non-final segment ended at a segment boundary"
+    /// meaning its concatenated output equals a serial decode — provided each
+    /// later segment is also decoded with this decompressor, which rejects
+    /// back-references to data before its own start.
+    ///
+    /// A stream that reaches its BFINAL block ends normally (the wrapper
+    /// footer is still read) and `ended_at_segment_boundary()` stays false.
+    /// With the zlib wrapper, a segment end skips the Adler-32 footer, so
+    /// [`checksum_matched()`](Self::checksum_matched) stays `None`.
+    #[must_use]
+    #[inline(always)]
+    pub(crate) fn with_segment_end(mut self, enable: bool) -> Self {
+        self.segment_end = enable;
+        self
+    }
+
+    /// True when the stream ended at a segment boundary (see
+    /// [`with_segment_end`](Self::with_segment_end)) rather than at a BFINAL
+    /// block.
+    #[must_use]
+    pub(crate) fn ended_at_segment_boundary(&self) -> bool {
+        self.ended_at_segment_boundary
+    }
+
     /// Set a maximum output size limit for decompression.
     ///
     /// When set, decompression will return
@@ -301,16 +390,21 @@ impl<S> StreamDecompressor<S> {
     ///
     /// `None` (the default) means unlimited.
     #[must_use]
+    #[inline(always)]
     pub fn with_max_output_size(mut self, max: Option<usize>) -> Self {
         self.max_output_size = max;
         self
     }
 }
 
+/// Staged input below which the decode loop refills from the source.
+const REFILL_BELOW: usize = 4096;
+
 impl<S: InputSource> StreamDecompressor<S> {
+    #[inline(always)]
     fn new(source: S, capacity: usize, wrapper: WrapperFormat) -> Self {
         assert!(capacity > 0, "capacity must be at least 1");
-        let buf_size = LOOKBACK_SIZE + capacity;
+        let buf_size = capacity;
         let initial_state = if wrapper == WrapperFormat::Raw {
             StreamState::BlockHeader
         } else {
@@ -325,10 +419,10 @@ impl<S: InputSource> StreamDecompressor<S> {
             inner: Decompressor::new(),
             buffer: vec![0u8; buf_size],
             capacity,
-            write_pos: LOOKBACK_SIZE,
-            read_pos: LOOKBACK_SIZE,
+            write_pos: 0,
+            read_pos: 0,
             lookback_valid: 0,
-            input_buf: vec![0u8; INPUT_BUF_SIZE],
+            input_buf: vec![0u8; INPUT_BUF_INITIAL],
             input_len: 0,
             input_pos: 0,
             bitbuf: 0,
@@ -338,15 +432,21 @@ impl<S: InputSource> StreamDecompressor<S> {
             is_final_block: false,
             pending_match: None,
             pending_literal: None,
+            pending_literal2: None,
+            doubles_pending: false,
             wrapper,
             checksum: checksum_init,
             total_output: 0,
-            checksum_watermark: LOOKBACK_SIZE,
+            checksum_watermark: 0,
             skip_checksum: false,
             checksum_matched: None,
             max_output_size: None,
             total_decompressed: 0,
             blocks_without_output: 0,
+            segment_end: false,
+            ended_at_segment_boundary: false,
+            verify_footer: true,
+            footer_checksum: None,
         }
     }
 
@@ -359,6 +459,7 @@ impl<S: InputSource> StreamDecompressor<S> {
     /// # Panics
     ///
     /// Panics if `capacity` is 0.
+    #[inline(always)]
     pub fn deflate(source: S, capacity: usize) -> Self {
         Self::new(source, capacity, WrapperFormat::Raw)
     }
@@ -370,8 +471,47 @@ impl<S: InputSource> StreamDecompressor<S> {
     /// # Panics
     ///
     /// Panics if `capacity` is 0.
+    #[inline(always)]
     pub fn zlib(source: S, capacity: usize) -> Self {
         Self::new(source, capacity, WrapperFormat::Zlib)
+    }
+
+    /// Create a streaming decompressor for the *tail* of a zlib stream whose
+    /// 2-byte header (and earlier segments) were consumed elsewhere — for
+    /// example the last of several independently decoded segments.
+    ///
+    /// Decoding starts at a block header. The Adler-32 footer is read but
+    /// not verified, since this decoder only sees part of the stream: it is
+    /// reported by [`footer_checksum()`](Self::footer_checksum), and this
+    /// decoder's own Adler-32 (starting from 1, over its output only) by
+    /// [`running_checksum()`](Self::running_checksum). Join the per-segment
+    /// values with [`adler32_combine`](crate::adler32_combine) to verify.
+    /// [`checksum_matched()`](Self::checksum_matched) stays `None`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `capacity` is 0.
+    pub(crate) fn zlib_continuation(source: S, capacity: usize) -> Self {
+        let mut d = Self::new(source, capacity, WrapperFormat::Zlib);
+        d.state = StreamState::BlockHeader;
+        d.verify_footer = false;
+        d
+    }
+
+    /// The checksum (Adler-32 for zlib, CRC-32 for gzip) of all output this
+    /// decoder has produced so far, including output not yet consumed via
+    /// [`advance()`](Self::advance). Always 0 for raw DEFLATE.
+    pub(crate) fn running_checksum(&mut self) -> u32 {
+        self.flush_checksum();
+        self.checksum
+    }
+
+    /// The checksum stored in the stream's footer, once the footer has been
+    /// read (zlib: the big-endian Adler-32; gzip: the CRC-32). `None` before
+    /// the footer, for raw DEFLATE, and after a segment-boundary end.
+    #[must_use]
+    pub(crate) fn footer_checksum(&self) -> Option<u32> {
+        self.footer_checksum
     }
 
     /// Create a streaming decompressor for gzip-wrapped data.
@@ -381,6 +521,7 @@ impl<S: InputSource> StreamDecompressor<S> {
     /// # Panics
     ///
     /// Panics if `capacity` is 0.
+    #[inline(always)]
     pub fn gzip(source: S, capacity: usize) -> Self {
         Self::new(source, capacity, WrapperFormat::Gzip)
     }
@@ -426,26 +567,30 @@ impl<S: InputSource> StreamDecompressor<S> {
             _ => 0,
         };
         self.source = source;
-        self.inner = Decompressor::new();
-        self.write_pos = LOOKBACK_SIZE;
-        self.read_pos = LOOKBACK_SIZE;
+        self.inner.reset_stream_state();
+        self.write_pos = 0;
+        self.read_pos = 0;
         self.lookback_valid = 0;
         self.input_len = 0;
         self.input_pos = 0;
         self.bitbuf = 0;
         self.bitsleft = 0;
         self.overread_count = 0;
-        self.state = if wrapper == WrapperFormat::Raw {
+        self.state = if wrapper == WrapperFormat::Raw || !self.verify_footer {
             StreamState::BlockHeader
         } else {
             StreamState::WrapperHeader
         };
         self.is_final_block = false;
+        self.ended_at_segment_boundary = false;
+        self.footer_checksum = None;
         self.pending_match = None;
         self.pending_literal = None;
+        self.pending_literal2 = None;
+        self.doubles_pending = false;
         self.checksum = checksum_init;
         self.total_output = 0;
-        self.checksum_watermark = LOOKBACK_SIZE;
+        self.checksum_watermark = 0;
         // Preserve skip_checksum and max_output_size across reset; clear result
         self.checksum_matched = None;
         self.total_decompressed = 0;
@@ -466,19 +611,26 @@ impl<S: InputSource> StreamDecompressor<S> {
             self.input_len -= self.input_pos;
             self.input_pos = 0;
         }
-        // Fill remaining space from source
-        while self.input_len < INPUT_BUF_SIZE {
-            let src = self.source.fill_buf()?;
-            if src.is_empty() {
-                break;
+        // Fill remaining space from source, doubling the buffer (up to
+        // INPUT_BUF_SIZE) each time the source fills it.
+        loop {
+            while self.input_len < self.input_buf.len() {
+                let src = self.source.fill_buf()?;
+                if src.is_empty() {
+                    return Ok(());
+                }
+                let can_copy = src.len().min(self.input_buf.len() - self.input_len);
+                self.input_buf[self.input_len..self.input_len + can_copy]
+                    .copy_from_slice(&src[..can_copy]);
+                self.input_len += can_copy;
+                self.source.consume(can_copy);
             }
-            let can_copy = src.len().min(INPUT_BUF_SIZE - self.input_len);
-            self.input_buf[self.input_len..self.input_len + can_copy]
-                .copy_from_slice(&src[..can_copy]);
-            self.input_len += can_copy;
-            self.source.consume(can_copy);
+            if self.input_buf.len() >= INPUT_BUF_SIZE {
+                return Ok(());
+            }
+            let grown = (self.input_buf.len() * 2).min(INPUT_BUF_SIZE);
+            self.input_buf.resize(grown, 0);
         }
-        Ok(())
     }
 
     /// Ensure the staging buffer has at least `min_bytes` available.
@@ -499,6 +651,17 @@ impl<S: InputSource> StreamDecompressor<S> {
     /// Compact the output buffer. Keeps the last 32KB as lookback.
     /// Must be called only after updating checksum up to write_pos.
     fn compact_output(&mut self) {
+        let full = LOOKBACK_SIZE + self.capacity;
+        if self.buffer.len() < full {
+            // Output outgrew the buffer before it reached its full size: grow
+            // instead of compacting. Doubling (not jumping straight to the
+            // full window) keeps a stream that just fills `capacity` from
+            // zeroing 32 KiB for the end-of-stream call that follows (half of
+            // a 64x64 PNG's streaming decode instructions).
+            self.buffer
+                .resize((self.buffer.len() * 2).clamp(64, full), 0);
+            return;
+        }
         if self.read_pos <= LOOKBACK_SIZE {
             return;
         }
@@ -574,7 +737,16 @@ impl<S: InputSource> StreamDecompressor<S> {
                 }
                 StreamState::BlockHeader => {
                     self.fill_input().map_err(StreamError::Source)?;
-                    self.parse_block_header()?;
+                    if self.segment_end
+                        && self.input_pos >= self.input_len
+                        && self.bitsleft as usize == 8 * self.overread_count
+                    {
+                        // Input exhausted at a byte-aligned block boundary.
+                        self.ended_at_segment_boundary = true;
+                        self.state = StreamState::Done;
+                    } else {
+                        self.parse_block_header()?;
+                    }
                 }
                 StreamState::DynamicPrecodeLens {
                     num_litlen_syms,
@@ -823,46 +995,12 @@ impl<S: InputSource> StreamDecompressor<S> {
             if !self.inner.static_codes_loaded {
                 self.inner.static_codes_loaded = true;
 
-                for i in 0..144 {
-                    self.inner.lens[i] = 8;
-                }
-                for i in 144..256 {
-                    self.inner.lens[i] = 9;
-                }
-                for i in 256..280 {
-                    self.inner.lens[i] = 7;
-                }
-                for i in 280..288 {
-                    self.inner.lens[i] = 8;
-                }
-                for i in 288..320 {
-                    self.inner.lens[i] = 5;
-                }
-
-                if !build_decode_table(
-                    &mut self.inner.offset_decode_table,
-                    &self.inner.lens[288..],
-                    32,
-                    &OFFSET_DECODE_RESULTS,
-                    OFFSET_TABLEBITS,
-                    15,
-                    &mut self.inner.sorted_syms,
-                    None,
-                ) {
+                if !self.inner.load_static_tables() {
                     return Err(bad.into());
                 }
-                if !build_decode_table(
-                    &mut self.inner.litlen_decode_table,
-                    &self.inner.lens,
-                    288,
-                    &LITLEN_DECODE_RESULTS,
-                    LITLEN_TABLEBITS,
-                    15,
-                    &mut self.inner.sorted_syms,
-                    Some(&mut self.inner.litlen_tablebits),
-                ) {
-                    return Err(bad.into());
-                }
+                // Double literals are added once enough input is staged.
+                self.doubles_pending = true;
+                self.inner.litlen_doubles = false;
             }
 
             self.state = StreamState::CompressedData;
@@ -1029,6 +1167,9 @@ impl<S: InputSource> StreamDecompressor<S> {
         ) {
             return Err(bad.into());
         }
+        // Double literals are added once enough input is staged.
+        self.doubles_pending = true;
+        self.inner.litlen_doubles = false;
 
         self.state = StreamState::CompressedData;
         Ok(())
@@ -1038,7 +1179,21 @@ impl<S: InputSource> StreamDecompressor<S> {
     // Compressed data decoding (Huffman)
     // -----------------------------------------------------------------------
 
+    /// Decode compressed data until the output buffer fills or the block
+    /// ends. On x86-64-v3 CPUs this runs a BMI2 build (see `v3` below).
     fn decompress_block(&mut self) -> Result<(), StreamError<S::Error>> {
+        #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+        {
+            use archmage::SimdToken;
+            if let Some(token) = archmage::X64V3Token::summon() {
+                return v3::decompress_block_v3(token, self);
+            }
+        }
+        self.decompress_block_impl()
+    }
+
+    #[inline(always)]
+    fn decompress_block_impl(&mut self) -> Result<(), StreamError<S::Error>> {
         let bad = DecompressionError::BadData;
 
         // Handle pending match from previous fill()
@@ -1065,8 +1220,8 @@ impl<S: InputSource> StreamDecompressor<S> {
             }
         }
 
-        // Handle pending literal from previous fill() (buffer was full)
-        if let Some(lit) = self.pending_literal.take() {
+        // Handle pending literals from previous fill() (buffer was full)
+        while let Some(lit) = self.pending_literal.take() {
             if self.write_pos >= self.buffer.len() {
                 self.pending_literal = Some(lit);
                 return Ok(());
@@ -1074,6 +1229,7 @@ impl<S: InputSource> StreamDecompressor<S> {
             self.buffer[self.write_pos] = lit;
             self.write_pos += 1;
             self.lookback_valid = (self.lookback_valid + 1).min(LOOKBACK_SIZE);
+            self.pending_literal = self.pending_literal2.take();
             if self.peek_len() >= self.capacity {
                 return Ok(());
             }
@@ -1088,8 +1244,22 @@ impl<S: InputSource> StreamDecompressor<S> {
         // initial 512-byte staging buffer fill), leaving all subsequent
         // decompression to the slower generic loop.
         'refill: loop {
-            // Refill staging buffer from source
-            self.fill_input().map_err(StreamError::Source)?;
+            // Refill the staging buffer only when it runs low: fill_input
+            // compacts (moves the unread tail to the front), and this loop is
+            // re-entered every time the output buffer fills, so refilling
+            // unconditionally moved up to 32 KiB of staged input per entry.
+            if self.input_len - self.input_pos < REFILL_BELOW {
+                self.fill_input().map_err(StreamError::Source)?;
+            }
+            if self.doubles_pending && wants_double_literals(self.input_len - self.input_pos) {
+                // Same decodes, fewer lookups: safe to switch mid-block.
+                add_double_literals(
+                    &mut self.inner.litlen_decode_table,
+                    self.inner.litlen_tablebits,
+                );
+                self.doubles_pending = false;
+                self.inner.litlen_doubles = true;
+            }
 
             let input = &self.input_buf[..self.input_len];
             let in_fastloop_end = input.len().saturating_sub(FASTLOOP_MAX_BYTES_READ);
@@ -1104,14 +1274,22 @@ impl<S: InputSource> StreamDecompressor<S> {
                 let mut bitsleft = self.bitsleft;
                 let mut in_pos = self.input_pos;
                 let mut out_pos = self.write_pos;
-                // Local mirror of `self.lookback_valid` updated as we emit
-                // literals/matches in the fastloop. Saturates at LOOKBACK_SIZE
-                // so it never overflows the legal back-ref range.
-                let mut lookback_valid = self.lookback_valid;
+                // Every byte from `real_start` to `out_pos` is real output (the
+                // buffer holds zero-fill before the stream's first byte), so a
+                // back-reference is valid iff `offset <= out_pos - real_start`.
+                // Fixed for the whole fastloop: no per-symbol bookkeeping.
+                let real_start = out_pos - self.lookback_valid;
+                let doubles = self.inner.litlen_doubles;
+                let litlen_tablebits = self.inner.litlen_tablebits;
+                // Locals, not `self.` paths: through `&mut self` LLVM can't
+                // prove the stores leave the Vec header and tables alone, and
+                // reloads them every iteration.
+                let litlen_table = &self.inner.litlen_decode_table;
+                let offset_table = &self.inner.offset_decode_table;
+                let buf = &mut self.buffer[..];
 
                 refill_bits_fast(&mut bitbuf, &mut bitsleft, input, &mut in_pos);
-                let mut entry =
-                    table_lookup(&self.inner.litlen_decode_table, bitbuf & litlen_tablemask);
+                let mut entry = table_lookup(litlen_table, bitbuf & litlen_tablemask);
 
                 // Fastloop exit reason (avoids early returns that skip write-back)
                 #[derive(PartialEq)]
@@ -1128,39 +1306,27 @@ impl<S: InputSource> StreamDecompressor<S> {
                         bitsleft -= entry & 0xFF;
 
                         if entry & HUFFDEC_LITERAL != 0 {
-                            let lit = (entry >> 16) as u8;
-                            entry = table_lookup(
-                                &self.inner.litlen_decode_table,
-                                bitbuf & litlen_tablemask,
-                            );
+                            let lits = entry;
+                            entry = table_lookup(litlen_table, bitbuf & litlen_tablemask);
                             saved_bitbuf = bitbuf;
                             bitbuf >>= (entry & 0xFF) as u64;
                             bitsleft -= entry & 0xFF;
-                            self.buffer[out_pos] = lit;
-                            out_pos += 1;
-                            lookback_valid = (lookback_valid + 1).min(LOOKBACK_SIZE);
+                            let n = put_lits(buf, out_pos, lits, doubles);
+                            out_pos += n;
 
                             if entry & HUFFDEC_LITERAL != 0 {
-                                let lit = (entry >> 16) as u8;
-                                entry = table_lookup(
-                                    &self.inner.litlen_decode_table,
-                                    bitbuf & litlen_tablemask,
-                                );
+                                let lits = entry;
+                                entry = table_lookup(litlen_table, bitbuf & litlen_tablemask);
                                 saved_bitbuf = bitbuf;
                                 bitbuf >>= (entry & 0xFF) as u64;
                                 bitsleft -= entry & 0xFF;
-                                self.buffer[out_pos] = lit;
-                                out_pos += 1;
-                                lookback_valid = (lookback_valid + 1).min(LOOKBACK_SIZE);
+                                let n = put_lits(buf, out_pos, lits, doubles);
+                                out_pos += n;
 
                                 if entry & HUFFDEC_LITERAL != 0 {
-                                    self.buffer[out_pos] = (entry >> 16) as u8;
-                                    out_pos += 1;
-                                    lookback_valid = (lookback_valid + 1).min(LOOKBACK_SIZE);
-                                    entry = table_lookup(
-                                        &self.inner.litlen_decode_table,
-                                        bitbuf & litlen_tablemask,
-                                    );
+                                    let n = put_lits(buf, out_pos, entry, doubles);
+                                    out_pos += n;
+                                    entry = table_lookup(litlen_table, bitbuf & litlen_tablemask);
                                     refill_bits_fast(
                                         &mut bitbuf,
                                         &mut bitsleft,
@@ -1180,7 +1346,7 @@ impl<S: InputSource> StreamDecompressor<S> {
                                 break 'fastloop Exit::EndOfBlock;
                             }
                             entry = table_lookup(
-                                &self.inner.litlen_decode_table,
+                                litlen_table,
                                 (entry >> 16) as u64 + extract_varbits(bitbuf, (entry >> 8) & 0x3F),
                             );
                             saved_bitbuf = bitbuf;
@@ -1188,13 +1354,9 @@ impl<S: InputSource> StreamDecompressor<S> {
                             bitsleft -= entry & 0xFF;
 
                             if entry & HUFFDEC_LITERAL != 0 {
-                                self.buffer[out_pos] = (entry >> 16) as u8;
+                                buf[out_pos] = (entry >> 16) as u8;
                                 out_pos += 1;
-                                lookback_valid = (lookback_valid + 1).min(LOOKBACK_SIZE);
-                                entry = table_lookup(
-                                    &self.inner.litlen_decode_table,
-                                    bitbuf & litlen_tablemask,
-                                );
+                                entry = table_lookup(litlen_table, bitbuf & litlen_tablemask);
                                 refill_bits_fast(&mut bitbuf, &mut bitsleft, input, &mut in_pos);
                                 if in_pos < in_fastloop_end && out_pos < out_fastloop_end {
                                     continue;
@@ -1212,15 +1374,13 @@ impl<S: InputSource> StreamDecompressor<S> {
                                 as usize;
 
                         // Decode match offset
-                        let mut oentry = table_lookup(
-                            &self.inner.offset_decode_table,
-                            bitbuf & bitmask(OFFSET_TABLEBITS),
-                        );
+                        let mut oentry =
+                            table_lookup(offset_table, bitbuf & bitmask(OFFSET_TABLEBITS));
 
                         // Conditional refill: after a multi-literal chain +
                         // length decode, bitsleft may be too low to consume
                         // the full offset entry and preload next litlen.
-                        if bitsleft < 28 + self.inner.litlen_tablebits {
+                        if bitsleft < 28 + litlen_tablebits {
                             refill_bits_fast(&mut bitbuf, &mut bitsleft, input, &mut in_pos);
                         }
 
@@ -1228,7 +1388,7 @@ impl<S: InputSource> StreamDecompressor<S> {
                             bitbuf >>= OFFSET_TABLEBITS as u64;
                             bitsleft -= OFFSET_TABLEBITS;
                             oentry = table_lookup(
-                                &self.inner.offset_decode_table,
+                                offset_table,
                                 (oentry >> 16) as u64
                                     + extract_varbits(bitbuf, (oentry >> 8) & 0x3F),
                             );
@@ -1243,11 +1403,10 @@ impl<S: InputSource> StreamDecompressor<S> {
                                 as usize;
 
                         // Reject back-refs that point past produced output.
-                        // `out_pos` alone is not the right bound: at stream
-                        // start the output buffer holds `LOOKBACK_SIZE` bytes
-                        // of zero-fill that are NOT real lookback. Track the
-                        // count of real bytes immediately behind `out_pos`.
-                        if offset == 0 || offset > lookback_valid {
+                        // `out_pos` alone is not the right bound: after a
+                        // reset the buffer can hold a previous stream's bytes,
+                        // which are NOT real lookback (see `lookback_valid`).
+                        if offset == 0 || offset > out_pos - real_start {
                             break 'fastloop Exit::BadData;
                         }
 
@@ -1256,20 +1415,10 @@ impl<S: InputSource> StreamDecompressor<S> {
                         // read stale zero bits. Refilling first ensures enough valid
                         // bits for the table lookup.
                         refill_bits_fast(&mut bitbuf, &mut bitsleft, input, &mut in_pos);
-                        entry = table_lookup(
-                            &self.inner.litlen_decode_table,
-                            bitbuf & litlen_tablemask,
-                        );
+                        entry = table_lookup(litlen_table, bitbuf & litlen_tablemask);
 
-                        super::fastloop_match_copy(
-                            &mut self.buffer,
-                            out_pos,
-                            out_pos - offset,
-                            length,
-                            offset,
-                        );
+                        super::fastloop_match_copy(buf, out_pos, out_pos - offset, length, offset);
                         out_pos += length;
-                        lookback_valid = (lookback_valid + length).min(LOOKBACK_SIZE);
 
                         if in_pos >= in_fastloop_end || out_pos >= out_fastloop_end {
                             break 'fastloop Exit::Bounds;
@@ -1282,7 +1431,7 @@ impl<S: InputSource> StreamDecompressor<S> {
                 self.bitsleft = bitsleft;
                 self.input_pos = in_pos;
                 self.write_pos = out_pos;
-                self.lookback_valid = lookback_valid;
+                self.lookback_valid = (out_pos - real_start).min(LOOKBACK_SIZE);
 
                 match exit {
                     Exit::EndOfBlock => {
@@ -1339,7 +1488,10 @@ impl<S: InputSource> StreamDecompressor<S> {
                 self.bitbuf >>= (entry & 0xFF) as u64;
                 self.bitsleft -= entry & 0xFF;
 
-                if entry & HUFFDEC_SUBTABLE_POINTER != 0 {
+                // A double literal's second byte overlaps the flag bits, so
+                // rule out literals before testing for a subtable pointer.
+                if entry & (HUFFDEC_LITERAL | HUFFDEC_SUBTABLE_POINTER) == HUFFDEC_SUBTABLE_POINTER
+                {
                     entry = table_lookup(
                         &self.inner.litlen_decode_table,
                         (entry >> 16) as u64 + extract_varbits(self.bitbuf, (entry >> 8) & 0x3F),
@@ -1352,14 +1504,26 @@ impl<S: InputSource> StreamDecompressor<S> {
                 let value = entry >> 16;
 
                 if entry & HUFFDEC_LITERAL != 0 {
+                    let second =
+                        (entry & HUFFDEC_DOUBLE_LITERAL != 0).then_some((entry >> 8) as u8);
                     if self.write_pos >= self.buffer.len() {
-                        // Output buffer full — save literal and return to let fill() compact.
+                        // Output buffer full — save literals and return to let fill() compact.
                         self.pending_literal = Some(value as u8);
+                        self.pending_literal2 = second;
                         return Ok(());
                     }
                     self.buffer[self.write_pos] = value as u8;
                     self.write_pos += 1;
                     self.lookback_valid = (self.lookback_valid + 1).min(LOOKBACK_SIZE);
+                    if let Some(lit) = second {
+                        if self.write_pos >= self.buffer.len() {
+                            self.pending_literal = Some(lit);
+                            return Ok(());
+                        }
+                        self.buffer[self.write_pos] = lit;
+                        self.write_pos += 1;
+                        self.lookback_valid = (self.lookback_valid + 1).min(LOOKBACK_SIZE);
+                    }
                     if self.peek_len() >= self.capacity {
                         return Ok(());
                     }
@@ -1631,6 +1795,14 @@ impl<S: InputSource> StreamDecompressor<S> {
             WrapperFormat::Raw => unreachable!(),
         };
 
+        self.footer_checksum = Some(match self.wrapper {
+            WrapperFormat::Zlib => u32::from_be_bytes([footer[0], footer[1], footer[2], footer[3]]),
+            _ => u32::from_le_bytes([footer[0], footer[1], footer[2], footer[3]]),
+        });
+        if !self.verify_footer {
+            self.state = StreamState::Done;
+            return Ok(());
+        }
         self.checksum_matched = Some(matched);
         if !matched && !self.skip_checksum {
             return Err(DecompressionError::ChecksumMismatch.into());
@@ -1947,6 +2119,42 @@ mod tests {
         let mut dec = StreamDecompressor::gzip(source, 4096);
         let output = stream_decompress_all(&mut dec).unwrap();
         assert_eq!(output, data);
+    }
+
+    /// The streaming decode loop has an x86-64-v3 build chosen at runtime;
+    /// disable tokens in every combination so the plain build is exercised
+    /// too, at capacities that hit the fastloop, the slow path and pending
+    /// literals/matches.
+    #[test]
+    #[cfg(feature = "simd")]
+    fn stream_all_dispatch_tiers() {
+        use archmage::testing::{CompileTimePolicy, for_each_token_permutation};
+
+        let mut data = Vec::new();
+        let mut x = 0x1234_5678u32;
+        for i in 0..300_000usize {
+            x ^= x << 13;
+            x ^= x >> 17;
+            x ^= x << 5;
+            data.push(match (i / 4096) % 3 {
+                0 => (i % 251) as u8,
+                1 => (i / 64) as u8,
+                _ => x as u8,
+            });
+        }
+        let mut c = libdeflater::Compressor::new(libdeflater::CompressionLvl::new(6).unwrap());
+        let mut z = vec![0u8; c.zlib_compress_bound(data.len())];
+        let n = c.zlib_compress(&data, &mut z).unwrap();
+        let z = &z[..n];
+
+        let report = for_each_token_permutation(CompileTimePolicy::Warn, |perm| {
+            for capacity in [1, 7, 300, 4096, 1 << 18] {
+                let mut d = StreamDecompressor::zlib(z, capacity);
+                let out = stream_decompress_all(&mut d).unwrap();
+                assert!(out == data, "capacity {capacity}, tier: {perm}");
+            }
+        });
+        eprintln!("streaming permutation test: {report}");
     }
 
     #[test]
@@ -2371,6 +2579,138 @@ mod tests {
             other => panic!(
                 "expected DecompressionError::BadData on tiny-capacity stream, got {other:?}"
             ),
+        }
+    }
+
+    /// A buffer that fills exactly is grown only when a symbol needs the
+    /// room: decode at capacities around the output size, with callers that
+    /// drain everything and callers that take fixed-size rows (a partial row
+    /// left in the buffer must still get more bytes).
+    #[test]
+    fn stream_exact_capacity_and_rows() {
+        let data: Vec<u8> = (0..12_345u32)
+            .map(|i| (i * 7 % 251) as u8 ^ (i / 300) as u8)
+            .collect();
+        let mut c = libdeflater::Compressor::new(libdeflater::CompressionLvl::new(6).unwrap());
+        let mut z = vec![0u8; c.zlib_compress_bound(data.len())];
+        let n = c.zlib_compress(&data, &mut z).unwrap();
+        let z = &z[..n];
+        let len = data.len();
+        for capacity in [1, 7, 64, len - 1, len, len + 1, 2 * len] {
+            let mut d = StreamDecompressor::zlib(z, capacity);
+            assert_eq!(
+                stream_decompress_all(&mut d).unwrap(),
+                data,
+                "drain, cap {capacity}"
+            );
+            for row in [1usize, 97, 1000] {
+                let mut d = StreamDecompressor::zlib(z, capacity.max(row));
+                let mut out = Vec::new();
+                loop {
+                    while d.peek().len() < row && !d.is_done() {
+                        d.fill().unwrap();
+                    }
+                    let take = d.peek().len().min(row);
+                    if take == 0 {
+                        break;
+                    }
+                    out.extend_from_slice(&d.peek()[..take]);
+                    d.advance(take);
+                }
+                assert_eq!(out, data, "rows of {row}, cap {capacity}");
+            }
+        }
+    }
+
+    /// `reset` keeps the previous stream's decode tables (they are rebuilt
+    /// before use), so a reused decoder must decode, and fail, exactly like a
+    /// fresh one: dynamic and static blocks, truncations and corruptions,
+    /// after streams that loaded different tables.
+    #[test]
+    fn stream_reset_matches_fresh_decoder() {
+        let mut x = 0x9E37_79B9u32;
+        let mut streams: Vec<Vec<u8>> = Vec::new();
+        for (len, level) in [
+            (0usize, 6),
+            (10, 1),
+            (300, 12),
+            (5000, 6),
+            (70_000, 9),
+            (200, 0),
+        ] {
+            let data: Vec<u8> = (0..len)
+                .map(|i| {
+                    x ^= x << 13;
+                    x ^= x >> 17;
+                    x ^= x << 5;
+                    if (i / 700) % 2 == 0 {
+                        (i % 13) as u8
+                    } else {
+                        x as u8
+                    }
+                })
+                .collect();
+            let mut c =
+                libdeflater::Compressor::new(libdeflater::CompressionLvl::new(level).unwrap());
+            let mut z = vec![0u8; c.deflate_compress_bound(data.len())];
+            let n = c.deflate_compress(&data, &mut z).unwrap();
+            z.truncate(n);
+            streams.push(z);
+        }
+        // Malformed variants: truncated, and with flipped bits.
+        let n = streams.len();
+        for k in 0..n {
+            let z = streams[k].clone();
+            if z.len() > 4 {
+                streams.push(z[..z.len() / 2].to_vec());
+                let mut flipped = z.clone();
+                for i in (1..flipped.len()).step_by(7) {
+                    flipped[i] ^= 0x10;
+                }
+                streams.push(flipped);
+            }
+        }
+        let run = |d: &mut StreamDecompressor<&[u8]>| -> Result<Vec<u8>, String> {
+            stream_decompress_all(d).map_err(|e| format!("{e:?}"))
+        };
+        for capacity in [64, DEFAULT_CAPACITY] {
+            for a in &streams {
+                for b in &streams {
+                    let fresh = run(&mut StreamDecompressor::deflate(b.as_slice(), capacity));
+                    let mut d = StreamDecompressor::deflate(a.as_slice(), capacity);
+                    let _ = run(&mut d);
+                    d.reset(b.as_slice());
+                    assert_eq!(run(&mut d), fresh, "capacity {capacity}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn stream_first_symbol_backref_after_reset_is_rejected() {
+        // After `reset` the output buffer still holds the previous stream's
+        // bytes (it is no longer zero-filled), at every capacity. A back-ref
+        // as the new stream's first symbol must not read them.
+        let bad = craft_first_symbol_bad_backref();
+        // A valid stored block of 40 KiB of 0xAB fills (and, at small
+        // capacities, grows and compacts) the buffer first.
+        let payload = vec![0xABu8; 40 * 1024];
+        let mut good = vec![0x00u8];
+        for chunk in payload.chunks(0xFFFF) {
+            let n = chunk.len() as u16;
+            good.extend_from_slice(&n.to_le_bytes());
+            good.extend_from_slice(&(!n).to_le_bytes());
+            good.extend_from_slice(chunk);
+        }
+        good[0] = 0x01; // BFINAL stored block (single chunk)
+        for capacity in [16, 4096, DEFAULT_CAPACITY] {
+            let mut dec = StreamDecompressor::deflate(good.as_slice(), capacity);
+            assert_eq!(stream_decompress_all(&mut dec).unwrap(), payload);
+            dec.reset(bad.as_slice());
+            match stream_decompress_all(&mut dec) {
+                Err(StreamError::Decompress(DecompressionError::BadData)) => {}
+                other => panic!("capacity {capacity}: expected BadData after reset, got {other:?}"),
+            }
         }
     }
 }

@@ -48,7 +48,27 @@ Pure Rust DEFLATE/zlib/gzip compression and decompression.
   build (`--no-default-features --features std`): 1 dep (enough), cold build
   0.28s debug / 0.30s release vs 3.2s/3.4s full-default, 105 lib tests.
   BREAKING for default-features=false users: add `compress`/`simd` as needed.
-
+- [x] Phase 11 (unreleased): `CompressionLevel::png(effort)` (src/compress/png_mode.rs,
+  src/compress/png_ultra.rs). png(1) = ultra-fast (literals + zero runs, one table per
+  stream, counted from the whole input up to 64 KiB, sampled above; pair LUT from
+  512 KiB); png(2) runs-only;
+  png(3) hash min match 8; png(4..9) min match 5, chains; png(10..18) lazy (libdeflate
+  5/6/7 settings, then deeper, no good_match/max_lazy shortcuts) + runs-only guard
+  (`RunsGuard`); png(19..22) near-optimal ramp (2 passes, depth/nice 16/48 .. 35/64);
+  png(19..30) near-optimal with input-derived block ends + runs guard (`NearOptGuard`);
+  png(31..) = new(31..).
+  Skip-ahead step capped at 256. Validated on 146-150 held-out K300 reps at 3 sizes:
+  `benchmarks/png_mode_2026-10-06.md`, tooling in `benchmarks/harnesses/png-mode/validation/`.
+- [x] Phase 12 (unreleased): `zenflate::png::{StripCompressor, StripDecoder}` for iDOT
+  (src/png/). Shape set by the user (2026-10-06): PNG-specific types, no new free functions
+  ("free functions increasing is a red flag"), and no public PNG-only `StreamDecompressor`
+  methods. The raw layer (`Compressor::deflate_compress_segment`,
+  `StreamDecompressor::with_segment_end` / `zlib_continuation` / `ended_at_segment_boundary`
+  / `running_checksum` / `footer_checksum`) is `pub(crate)`; `StripDecoder` wraps it.
+  zenpng main (src/decoder/idot.rs) decodes iDOT strips in parallel through this, streaming
+  each strip across IDAT chunks and un-filtering row by row, so the decoder must stay
+  streaming. Caller-driven, no built-in threads: a threaded helper forced whole-image
+  buffering and blocked zenpng's per-strip filter search on its own pool.
 
 ## Performance (0.4.0)
 
@@ -234,6 +254,198 @@ native AVX-512+VNNI+VPCLMULQDQ), no `target-cpu=native`. Full data:
   as a standalone checksum library.
 - **Decision (user, 2026-07-14):** keep `avx512` in default. Opt-in removes
   nothing measurable and costs 4.3× standalone CRC. Don't revisit without new data.
+
+### PNG mode design notes (2026-10-06, `benchmarks/png_mode_2026-10-06.md`)
+
+- Aggregate Pareto picks hid per-image inversions of up to 10% (runs-only → hash on
+  flat-colour clipart). Always check per-image monotonicity across effort ladders,
+  not just corpus totals; `png-mode` harness + `ladder.py` do this.
+- A greedy bit-cost model (reject matches dearer than their literals) did NOT fix it,
+  cost 15-25% speed, and its order-0 first-block estimate hurt small inputs. Removed.
+- Demoting hashed matches to literals is not a proxy for the runs-only parse: hashed
+  matches swallow run starts. Only a real runs-only parse catches it (the guard).
+- Changing min match between rungs causes inversions; keep knobs monotone.
+- Center crops at 256x256 are denser than 1 MP crops; deep chains were 3-4x slower per
+  byte there until backward extension went forward-first + 8-byte compares.
+- fdeflate main (a713d02) L3 is larger than its L2 on 13/35 1 MP filtered images (up to 2.14%).
+- Tuning-set ladders don't survive held-out data unchanged: the 150-image held-out check
+  (K300 reps, validate+test splits, minus tuning images) found a skip-ahead runaway bug
+  (uncapped step jumped whole compressible regions; fixed with a 256-byte cap), showed the
+  deep chain levels dominated by new(13..), and that ultra's sampled table loses to
+  runs-only on 64x64 inputs. Validate ladders with paired per-image stats (mean +- CI,
+  inversion counts) on held-out data before shipping.
+- Ultra tables (2026-10-06, `tables/` in the png-mode harness): fdeflate's fixed table is
+  near the best single table for filtered PNG (a trained one: -0.9%, per channel count:
+  -1.1%, modeled on held-out streams under 64 KiB). Per-image counted tables are -12.9%;
+  codebooks of 4-16 tables picked from a 2 KiB prefix get only -5 to -7%. Counted tables
+  need priors only where the count can miss a symbol (literal 0, EOB, lengths): giving
+  every symbol a code inflates the header (+2.6-4.4% at 64x64).
+- Ultra stored fallback must compare end positions in bits, including the extra header
+  byte write_uncompressed adds when pending bits spill over: the old byte check let a
+  block land 1-2 bytes past zlib_compress_bound (tight below 5000 bytes).
+- Without the runs-only guard, even long-match-only (12-24+ byte) hash levels make
+  34-48/146 images larger than runs-only (up to 12%): any offset code beyond distance 1
+  lengthens the run codes. The guard is required for every hash level.
+- Min match 8 -> 5 is a real strategy boundary (27-38 images larger, up to 6.5%); keep it a
+  single switch with a monotonicity_fallback, don't step through 7 and 6.
+
+### Inflate on PNG streams (2026-10-06, `examples/png_inflate.rs`)
+
+Measured on zenpng's 106 vs_png inputs (each PNG's IDAT stream), median time
+per image, interleaved arms. zenpng's ST decode is ~45% inflate and its
+two-thread decode pipeline is bounded by inflate, so this is zenpng's lever.
+
+- **Double-literal litlen entries** (fdeflate's trick): `add_double_literals`
+  packs two literals into one 11-bit-table entry when both codewords fit.
+  Literal-heavy PNG streams halve their lookups. The slow paths must test
+  `HUFFDEC_LITERAL` before any flag (the second literal overlaps bits 8-15).
+- **12-bit tables measured no better** with doubles (median 1.045 vs 1.036 of
+  fdeflate's time on i265) and slower on small images. Kept 11.
+- **The pass is gated** (`DOUBLE_LITERAL_MIN_INPUT` = 16 KiB of compressed input
+  left; streaming upgrades the table mid-block once 16 KiB is staged). Ungated,
+  64 px images decoded 10% slower on Neoverse-N1.
+- **Blocks without doubles keep a single-store literal path** (`put_lits`): the
+  two-store `store_lits` makes the output position depend on the loaded entry,
+  and alone cost 64 px images +7.7% one-shot on Neoverse.
+- **Streaming:** 512-byte input staging made the fastloop exit every ~480
+  compressed bytes (32 KiB: 1.167 -> 1.129 of fdeflate's time on i265); per-literal saturating
+  `lookback_valid` updates replaced by a fixed `real_start` per fastloop entry
+  (1.129 -> 1.092 of fdeflate's time); the 32 KiB lookback window is allocated only when output outgrows
+  `capacity` (zenpng measured its zero-fill at ~26K of ~620K instructions in a
+  64x48 decode).
+- Results (new/base, median per image): x86 265K one-shot 0.972, streaming
+  0.966; Neoverse-N1 one-shot 0.980, streaming 0.984; M4 Pro one-shot 0.970,
+  streaming 0.945. A 32 KiB *initial* staging buffer cost 64 px streams 4% on
+  x86 (zeroing); it now starts at 4 KiB and doubles while the source fills it. Data: `~/tmp` runs on i265,
+  arm-big and mac (not committed; the CHANGELOG entry carries the summary).
+- On ARM zenflate was already faster than fdeflate one-shot (0.90x); on x86 it
+  was 1.11x slower one-shot and 1.18x streaming before this work.
+- **16-byte chunked match copy** (fdeflate's): the fastloop copies matches as
+  fixed 16-byte `copy_within`s (no memmove call per match; offset 2..=15 step
+  by the offset), margin +16. The biggest single x86 win: PNG one-shot 1.035 ->
+  0.97 of fdeflate's time, streaming 1.066 -> 1.007; Silesia/Canterbury one-shot
+  and streaming ~0.89 of fdeflate. Rejected variants: exact memmove for
+  length >= 64 non-overlapping, and period-doubling for small offsets - both
+  slower overall and neither fixed `nci` one-shot on Neoverse-N1 (+7% vs
+  before the chunked copy, cause unknown; its streaming decode got faster).
+  Resolved by the 32-byte chunks below: arm-big, current harness on both
+  builds, 3 interleaved runs, 9 rounds: one-shot 22.71 ms (091bb93, pre-chunk)
+  vs 22.75 ms (tip), streaming 22.24 vs 20.04 ms.
+- **32-byte chunks for offset >= 32** (2026-10-07), margin +32. Time vs 16-byte
+  chunks, ratio to fdeflate, mean of 2 runs: i265 PNG one-shot 0.973 -> 0.962,
+  streaming 0.998 -> 0.978, Silesia/Canterbury streaming 0.895 -> 0.866
+  (one-shot flat); Neoverse-N1 PNG 0.839 -> 0.827 / 0.876 -> 0.870, raw
+  0.871 -> 0.849 / 0.861 -> 0.843; Zen 4 (7950X, with v4 builds) PNG one-shot
+  1.008 -> 0.996, streaming 1.070 -> 1.047.
+- **One-shot decode may overwrite `output` past `output_written`** (up to ~32
+  bytes, only when the stream ends inside the fastloop, i.e. the buffer has
+  more than ~294 bytes of slack; exactly sized buffers are unaffected). Kept on
+  purpose (user, 2026-10-07: "speed"): exact tail copies would bring back a
+  variable-length copy on most PNG matches (< 16 bytes), the cost the chunked
+  copy removed. Documented on deflate/zlib/gzip_decompress; fdeflate's read()
+  documents the same. Don't "fix" it without re-asking.
+- **x86-64-v3 build of the streaming loop** (archmage `#[arcane]` X64V3Token):
+  streaming 1.105 -> 1.066 of fdeflate on the 265K. The same for the one-shot
+  core was 1.8-2.5% slower, and so were full-width 11-bit tables with a
+  constant mask, 12-bit tables, and bounds-check-free typed table lookups
+  (LLVM's checks evidently help its codegen here). Measure; don't assume.
+- **x86-64-v4 build of the one-shot core** (landed 2026-10-07, gated at 16
+  KiB of compressed input, `ONESHOT_V4_MIN_INPUT`). dev (9950X3D, Zen 5), ratio
+  to fdeflate, 3 interleaved runs: PNG 1.007 -> 0.976 (256/1024 px 1.00 -> 0.96),
+  Silesia/Canterbury 0.901 -> 0.880; ungated it made 64 px images (<8 KB input)
+  3.6% slower, gated they are unchanged. Zen 4 (7950X) ungated: 1-2% faster;
+  a v3 one-shot build on Zen 4 got about half that (the 265K measured v3
+  one-shot slower). A v4 build of the streaming loop gains nothing over its v3
+  build on Zen 4 (PNG 1.054 -> 1.047, raw 0.917 -> 0.936): not landed. Data:
+  `benchmarks/oneshot_v4_2026-10-07.txt`. Gotcha when A/B-ing on one box: two
+  source trees sharing one CARGO_TARGET_DIR produced byte-identical binaries
+  (md5 the binaries).
+- **AVX-512BW masked stores can't remove the one-shot output tail**: the safe
+  `_mm512_mask_storeu_epi8` (safe_unaligned_simd via archmage) takes `&mut
+  [u8; 64]`, so all 64 bytes must be in the slice anyway; it would only avoid
+  writing slack bytes on AVX-512 machines, so the documented contract stays.
+- Consumers checked against these changes (2026-10-07, copies in ~/tmp with a
+  path dep): heic (`unci`, one-shot, default-features=false: 32 suites incl. 36
+  unci tests), zenzop (checksums only), zensim-validate - all pass. No-`simd`
+  builds (heic's config) decode zlib ~6% slower than fdeflate because Adler-32
+  is scalar there; enabling `simd` in the consumer fixes that.
+- `fuzz_inflate_diff` (one-shot vs streaming vs miniz_oxide) is the correctness
+  gate for decoder changes; the old `fuzz_decompress` only catches crashes.
+  Under `cfg(test)`/`cfg(fuzzing)` the doubles threshold is 0.
+
+### PNG ladder on identical filtered bytes (2026-10-06)
+
+`examples/png_ladder_pareto.rs`, `benchmarks/png_ladder_pareto_{arm,mac}_2026-10-06.txt`,
+`benchmarks/png_ladder_lazy_guard_2026-10-06.txt` (after the png(10..) change):
+
+- zenflate beats miniz_oxide (image-png's balanced/high codec) at every size
+  point: e15 3.864 @ 45 MB/s vs miniz 6 3.849 @ 20 (Neoverse); png(1) 3.08 vs
+  fdeflate ultra-fast 2.84 at 1.6-2x its speed.
+- `new(1..=9)` are dominated by `png()` on PNG data (e1-e4 identical bytes,
+  e5-e9 identical).
+- Gap (fixed the same day): libdeflate 5/6 beat the old png(10..=12) and e12/e13 in
+  the 60-80 MB/s band (Neoverse). One-step lazy matching in png(10..=12) gave -0.5% size for
+  +32-42% time and stayed dominated: rejected.
+- What worked: libdeflate's lazy parser (3-byte matches) plus the runs-only guard,
+  without new()'s good_match/max_lazy shortcuts (those cost ~1.2% at equal speed:
+  e11 3.756 vs libdeflate 5 3.800). Guarded rungs are never larger per image than
+  libdeflate 5/6/7. The guard costs ~30% time at png(10).
+- Double-lazy (Lazy2) was worse than plain lazy at equal depth on PNG data
+  (png(15) Lazy2 depth 200 lost to png(14) lazy depth 200 on 29/86 images), and
+  deep lazy (450) beat every Lazy2 rung: png(10..=18) are all lazy.
+- Below ~10 MB/s near-optimal parsing beats any lazy depth (libdeflate 10 4.120
+  @ 7 MB/s vs lazy depth 3000 3.976 @ 7): png(19..=22) use new(23)'s parser
+  (`CompressionLevel::near_optimal_effort` keeps their output identical to
+  new(23) while `effort()` reports 19-22).
+- Block-split butterfly: lazy depth 295 -> 299 made 8007_rgb8_256 7.5% larger:
+  a 5-byte shift of the first boundary (18674 vs 18679) cascades into different
+  splits for the rest of the stream (libdeflate's statistics-based
+  `should_end_block`). Measured alternatives on the 86 inputs (png(10..=18)):
+  no early block ends: +0.6% total, up to +15% on 48/86 images, but rung
+  inversions drop to 0.04%; fixed 64 KiB blocks: +0.24% total (median +0.06%),
+  up to +9% on images with mid-stream content changes, worst inversion 0.36%
+  (32 KiB and 128 KiB were worse). Kept adaptive splitting. Idea not yet tried:
+  split points from the input alone (e.g. byte-histogram change points on the
+  filtered rows), computed once and shared by every rung and the runs-only
+  guard - adaptive and parse-independent, so rungs couldn't diverge.
+  IMPLEMENTED for png(10..=18) (`block_split::input_block_end`, zenpng asked
+  for monotone rungs): splitting on the runs-only tokenization of the input (a
+  5+ byte run = one match observation, other bytes literals) costs +0.12% total
+  vs parse-driven splitting (raw bytes as literals cost +0.55%, residual-
+  magnitude buckets +0.61%); neighbour inversions from png(12) up are <= 0.07%
+  (png(11)/png(13) 0.6% on the 16-bit image). Speed cost on Neoverse:
+  png(10) +14%, png(12) +9%, png(14) +5%, png(16..=18) +4% (about half is the
+  scan at ~18 instructions/byte after unchecked-free tightening, the rest
+  different block sizes). Blocks are capped at 3 * (SEQ_STORE_LENGTH - 1)
+  bytes so the sequence store can't end one early (a parse-dependent end).
+  Matches must not cross the shared block end, and `adjust_max_and_nice_len`
+  only lowers max_len/nice_len, so they are reset per block (forgetting that
+  made output 12-16% larger). On 5207_rgb16_1024 greedy min-match-5 png(9)
+  beats every lazy rung (3-byte lazy matches suit 16-bit samples poorly). new() keeps
+  parse-driven splitting.
+- Before the guard, e13 was larger than png(12) on 41/86 images (up to 8.6%).
+
+### png(19..=30) ramp, shared blocks, guard (2026-10-07, `benchmarks/png_ladder_ramp_2026-10-07.txt`)
+
+- zenpng asked for a time ramp between png(18) and png(23) (all of 19-23 were
+  byte-identical, a 1.04x -> 3.37x jump on x86) and for png(23+) not to lose to
+  png(19..22) (1207_gray8_1024 +1.15%).
+- One near-optimal pass, at any depth, loses 4-5% to lazy png(18) on
+  5207_rgb8_256 (the first pass's cost model); depth under 16 loses up to 10% on
+  rgba line art (5207/8107_rgba8_1024) even with two passes. So the ramp keeps
+  two passes and only lowers depth/nice. There is no safe rung near 1.5x png(17);
+  the cheapest safe one is ~2.2x on Neoverse.
+- Input-derived block ends (as png(10..18)) for the near-optimal rungs: worst
+  inversion from png(19) up 1.18% -> 0.81% (0.38% from png(20)), +0.14% total.
+  The long-match skip must stop at the shared block end, and the parse-driven
+  end-of-block check is skipped. Match-cache overflow can still end a block
+  early (rare).
+- The runs-only guard on near-optimal blocks (`NearOptGuard`, compares with
+  `encoded_bits`) helps 14/86 images at png(19), up to 1.9%; ~0.5% time.
+- Open: png(10) is now dominated by libdeflate 6 on Neoverse (2011 ms / 3.823
+  vs 1734 ms / 3.839); png(30) is 0.09% larger than libdeflate 12 (faster).
+  Greedy png(7) > png(6) by 0.73% on 6807_rgb8_2560 (filter None); a
+  distance-aware candidate score (8*len - log2 dist) didn't change it.
 
 ### Strategy state must survive early returns (2026-10-06)
 

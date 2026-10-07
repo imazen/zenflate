@@ -36,3 +36,10 @@ path = "fuzz_targets/fuzz_api.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fuzz_inflate_diff"
+path = "fuzz_targets/fuzz_inflate_diff.rs"
+test = false
+doc = false
+bench = false

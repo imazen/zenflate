@@ -1,0 +1,72 @@
+# png() ladder after the lazy + runs-only-guard rungs (png(10..=18)) and near-optimal png(19..=22), 2026-10-06
+# Host: arm-big (Neoverse-N1), taskset -c 3, nice 19; zenflate png-mode + a2ef387 (this change).
+# Command: png_ladder_pareto ~/tmp/zfab-in-nolarge --rounds 3 --arms <below> --tsv final_ladder.tsv
+# Inputs and method: see png_ladder_pareto_arm_2026-10-06.txt (86 PNGs, IDAT inflated to stored filtered bytes).
+# Per-image TSV: lilith.lan:/mnt/v/output/zenflate/png-ladder-pareto-2026-10-06/final_ladder_neoverse.tsv sha256 81091a5f6a7e16fa937cd8384e932e8fd79ad59c3c19700b93daffe4e3907679
+# Earlier sweeps of this change (lazy without guard, Lazy2 rungs, deep lazy): lazy_on/off_neoverse.tsv and guard*.tsv on ~/tmp of the session; numbers in CLAUDE.md 'PNG ladder on identical filtered bytes'.
+
+86 images, 111.4 MB filtered
+arm                     bytes     ratio   ms total      MB/s  front
+zen_png1             36207520    3.0777      101.2      1101  *
+fdeflate_ultra       39306166    2.8351      162.0       688  
+zen_png2             33168424    3.3597      244.3       456  *
+zen_png3             31186670    3.5732      542.8       205  *
+zen_e1               31536589    3.5335      560.2       199  
+libdeflate_1         30862262    3.6107      573.9       194  *
+zen_e9               31177922    3.5742      656.7       170  
+zen_png4             30520272    3.6512      678.6       164  *
+miniz_1              34839642    3.1985      683.5       163  
+zen_png5             30311470    3.6763      785.5       142  *
+zen_png6             30085945    3.7039      911.8       122  *
+zen_png7             29900094    3.7269      991.6       112  *
+libdeflate_3         29820701    3.7368     1066.2       105  *
+zen_png8             29718967    3.7496     1084.9       103  *
+zen_png9             29547825    3.7713     1212.8        92  *
+libdeflate_5         29323623    3.8002     1353.9        82  *
+libdeflate_6         29031035    3.8385     1748.1        64  *
+zen_png10            29110242    3.8280     1780.7        63  
+zen_e13              29173670    3.8197     1950.0        57  
+zen_png11            28843476    3.8634     2187.7        51  *
+zlibrs_6             28845127    3.8632     2329.7        48  
+libdeflate_7         28691566    3.8839     2690.9        41  *
+zen_e17              28691523    3.8839     3099.1        36  *
+zen_png12            28519559    3.9073     3176.8        35  *
+zen_png13            28415125    3.9217     3732.3        30  *
+zen_png14            28343935    3.9315     4267.9        26  *
+zen_png15            28257362    3.9436     5130.0        22  *
+miniz_6              28953307    3.8488     5460.7        20  
+zen_png16            28194658    3.9524     6232.9        18  *
+zen_png17            28157002    3.9576     7195.5        15  *
+libdeflate_9         28371321    3.9277     7651.1        15  
+zen_png18            28121853    3.9626     8263.7        13  *
+zen_e22              28371321    3.9277     8435.8        13  
+zlibrs_9             28046333    3.9733    11817.8         9  *
+miniz_9              28496171    3.9105    14230.3         8  
+libdeflate_10        27045984    4.1202    15401.4         7  *
+zen_png19            27043591    4.1206    20113.0         6  *
+zen_e24              26996928    4.1277    23039.2         5  *
+
+# Per-image inversions (higher rung larger than the previous one), 86 images:
+#   png2 > png1: 4/86 max 0.87% 6007_rgb8_64
+#   png3 > png2: 0/86 
+#   png4 > png3: 21/86 max 3.36% 1207_rgba8_1024
+#   png5 > png4: 6/86 max 0.06% 1207_gray8_1024
+#   png6 > png5: 0/86 
+#   png7 > png6: 0/86 
+#   png8 > png7: 0/86 
+#   png9 > png8: 2/86 max 0.08% 5307_rgb8_64
+#   png10 > png9: 20/86 max 2.43% 6007_rgb8_64
+#   png11 > png10: 12/86 max 0.41% 8007_rgb8_64
+#   png12 > png11: 7/86 max 0.19% 5207_interlaced_1024
+#   png13 > png12: 16/86 max 1.12% 5207_rgb16_1024
+#   png14 > png13: 5/86 max 0.27% 8107_rgb16_1024
+#   png15 > png14: 14/86 max 7.48% 8007_rgb8_256
+#   png16 > png15: 13/86 max 0.87% 5207_rgb16_1024
+#   png17 > png16: 12/86 max 0.64% 8007_rgb8_256
+#   png18 > png17: 14/86 max 1.27% 8007_rgb8_1024
+#   png19 > png18: 5/86 max 0.82% 6007_rgb8_1024
+#   zen_png10 > libdeflate_5: 0/86 
+#   zen_png11 > libdeflate_6: 0/86 
+#   zen_png12 > libdeflate_7: 0/86 
+#   zen_png10 > zen_png9: 20/86 max 2.43% 6007_rgb8_64
+#   zen_png19 > zen_png18: 5/86 max 0.82% 6007_rgb8_1024

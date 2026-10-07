@@ -13,6 +13,8 @@ pub(crate) mod full_optimal;
 pub(crate) mod huffman;
 pub(crate) mod katajainen;
 pub(crate) mod near_optimal;
+pub(crate) mod png_mode;
+pub(crate) mod png_ultra;
 pub(crate) mod sequences;
 
 #[cfg(not(feature = "std"))]
@@ -39,6 +41,8 @@ use self::near_optimal::{
     MATCH_CACHE_LENGTH, NearOptimalState, clear_old_stats, init_stats, merge_stats,
     optimize_and_flush_block, save_stats,
 };
+use self::png_mode::{PNG_SEQ_STORE_LENGTH, PngMatchfinder, PngParams, RunsGuard};
+use self::png_ultra::UltraState;
 use self::sequences::Sequence;
 
 /// Hash order for the ht_matchfinder (needed for initial hash computation).
@@ -91,6 +95,10 @@ pub(crate) enum InternalStrategy {
     NearOptimal,
     /// Zopfli-style forward DP with iterative cost model refinement.
     FullOptimal,
+    /// PNG-tuned greedy parser: runs + 8-byte hashed repeats + skip-ahead.
+    Png(PngParams),
+    /// PNG ultra-fast: literals + zero runs, one table per stream.
+    PngUltra,
 }
 
 /// Map effort (0-200) to internal strategy.
@@ -149,6 +157,12 @@ pub(crate) struct CompressionParams {
 /// | 23-30 | Near-optimal |
 /// | 31-200 | Full-optimal (Zopfli) |
 ///
+/// # PNG image data
+///
+/// [`png(effort)`](Self::png) uses encoders tuned for filtered PNG scanlines
+/// at efforts 1-12 (smaller than `new()` at similar speed there), and matches
+/// `new()` from effort 13 up.
+///
 /// # C libdeflate compatibility
 ///
 /// [`libdeflate(level)`](Self::libdeflate) (0-12) produces byte-identical
@@ -175,6 +189,8 @@ pub struct CompressionLevel {
     strategy: InternalStrategy,
     /// When Some, use exact C libdeflate parameters for byte-identical output.
     libdeflate_level: Option<u8>,
+    /// Created by [`png()`](Self::png): monotonicity fallbacks stay in the PNG ladder.
+    png_family: bool,
 }
 
 impl CompressionLevel {
@@ -190,6 +206,95 @@ impl CompressionLevel {
             effort,
             strategy: effort_to_strategy(effort),
             libdeflate_level: None,
+            png_family: false,
+        }
+    }
+
+    /// Create a compression level tuned for PNG image data (0-200).
+    ///
+    /// Efforts 1-12 use encoders built for filtered PNG scanlines (runs of
+    /// repeated bytes, literal-heavy residuals, occasional long repeats),
+    /// adapted from [fdeflate](https://github.com/image-rs/fdeflate)'s
+    /// ultra-fast, RLE and greedy compressors:
+    ///
+    /// | Effort | Encoder |
+    /// |--------|---------|
+    /// | 0 | Store |
+    /// | 1 | Ultra-fast: literals + zero runs, one Huffman table per stream |
+    /// | 2 | Runs only (distance-1 matches), exact Huffman per block |
+    /// | 3 | Runs + hashed repeats of 8+ bytes |
+    /// | 4-9 | Runs + hashed repeats of 5+ bytes, hash chains of growing depth |
+    /// | 10-18 | Lazy matching, search depth 16 → 800, with the runs-only guard |
+    /// | 19-22 | Near-optimal parsing, search depth 16 → 35, with the runs-only guard |
+    /// | 23-30 | [`new(effort)`](Self::new)'s near-optimal settings, with the runs-only guard |
+    /// | 31-200 | Same as [`new(effort)`](Self::new) (full optimal parsing) |
+    ///
+    /// Efforts 1-9 were chosen on 146 held-out imazen-26 cluster
+    /// representatives at native sizes (adaptive filter). Efforts 10-18 use
+    /// libdeflate 5/6/7's lazy settings and deeper ones, without `new()`'s
+    /// `good_match`/`max_lazy` shortcuts, and parse every block runs-only too,
+    /// keeping the cheaper parse. Their block boundaries come from the input
+    /// alone, so every one of them splits a given input identically and a
+    /// higher effort only widens the search within the same blocks. On 86 PNG filtered streams (64-1024 px) they
+    /// are never larger per image than libdeflate 5/6/7 and lie on the
+    /// size/speed front; below about 10 MB/s near-optimal parsing beats any
+    /// lazy depth (`benchmarks/png_ladder_pareto_*_2026-10-06.txt`).
+    /// Efforts 19-22 ramp its search up to effort 23's; efforts 19-30 use the
+    /// same input-derived block ends and runs-only guard as 10-18, so they
+    /// differ from `new(19..=30)` (`benchmarks/png_ladder_ramp_2026-10-07.txt`).
+    ///
+    /// # Monotonicity
+    ///
+    /// Within the ladder the search only gets wider, and efforts 3-30 compare
+    /// every block against its runs-only parse. Four switches change the
+    /// algorithm, and [`monotonicity_fallback`](Self::monotonicity_fallback)
+    /// covers each one: ultra-fast to exact Huffman (`png(2)` → `png(1)`),
+    /// minimum match 8 to 5 (`png(4..=9)` → `png(3)`), hashed chains to lazy
+    /// matching (`png(10..=18)` → `png(9)`), and lazy to near-optimal
+    /// (`png(19..)` → `png(18)`).
+    ///
+    /// Not supported by the incremental API
+    /// ([`deflate_compress_incremental`](Compressor::deflate_compress_incremental)).
+    ///
+    /// ```
+    /// use zenflate::{Compressor, CompressionLevel, Unstoppable};
+    ///
+    /// // Two filtered rows of an RGB image (filter byte + residuals).
+    /// let mut idat = Vec::new();
+    /// for _ in 0..64 {
+    ///     idat.push(1); // Sub filter
+    ///     idat.extend(std::iter::repeat_n(0u8, 300));
+    /// }
+    /// let mut c = Compressor::new(CompressionLevel::png(6));
+    /// let mut out = vec![0u8; Compressor::zlib_compress_bound(idat.len())];
+    /// let n = c.zlib_compress(&idat, &mut out, Unstoppable).unwrap();
+    /// assert!(n < idat.len() / 20);
+    /// ```
+    #[must_use]
+    pub fn png(effort: u32) -> Self {
+        let effort = effort.min(200);
+        let strategy = if effort == 1 {
+            InternalStrategy::PngUltra
+        } else if (10..=18).contains(&effort) {
+            // Lazy parsing (libdeflate 5/6/7 settings, then deeper), plus the
+            // runs-only guard (see `compression_params` and `RunsGuard`).
+            // Double-lazy measured worse than lazy at the same depth here.
+            InternalStrategy::Lazy
+        } else if (19..=22).contains(&effort) {
+            // Below ~10 MB/s near-optimal parsing beats any lazy depth on PNG
+            // data; 19-22 ramp its search depth (see `compression_params`).
+            InternalStrategy::NearOptimal
+        } else {
+            match png_mode::png_params(effort) {
+                Some(params) => InternalStrategy::Png(params),
+                None => effort_to_strategy(effort),
+            }
+        };
+        Self {
+            effort,
+            strategy,
+            libdeflate_level: None,
+            png_family: true,
         }
     }
 
@@ -217,6 +322,7 @@ impl CompressionLevel {
             effort,
             strategy,
             libdeflate_level: Some(level as u8),
+            png_family: false,
         }
     }
 
@@ -333,6 +439,19 @@ impl CompressionLevel {
         if self.libdeflate_level.is_some() {
             return None;
         }
+        if self.png_family {
+            // Algorithm switches in the PNG ladder: ultra-fast -> exact Huffman
+            // (2), min match 8 -> 5 (4), hashed chains -> lazy (10), lazy ->
+            // near-optimal (19). Other steps only widen the search.
+            return match self.effort {
+                2 => Some(Self::png(1)),
+                4..=9 => Some(Self::png(3)),
+                10..=18 => Some(Self::png(9)),
+                19..=30 => Some(Self::png(18)),
+                31..=200 => Some(Self::png(30)),
+                _ => None,
+            };
+        }
         // Each strategy's levels fall back to the previous strategy's max.
         // The chain terminates at FastHt (Turbo→FastHt always improves).
         match self.effort {
@@ -342,6 +461,16 @@ impl CompressionLevel {
             23..=30 => Some(Self::new(22)),  // NearOptimal → Lazy2 max
             31..=200 => Some(Self::new(30)), // FullOptimal → NearOptimal max
             _ => None,
+        }
+    }
+
+    /// Effort the near-optimal block writer sees: `png(19..=22)` write
+    /// blocks as `new(23)` does (its best-precode search), so they report 23.
+    pub(crate) fn near_optimal_effort(self) -> u32 {
+        if self.png_family {
+            self.effort.max(23)
+        } else {
+            self.effort
         }
     }
 
@@ -374,6 +503,46 @@ impl CompressionLevel {
             };
         }
 
+        if self.png_family && matches!(self.strategy, InternalStrategy::Lazy) && self.effort <= 18 {
+            // png(10..=12): libdeflate 5/6/7's lazy settings, which were on the
+            // Pareto front for PNG filtered data where new(11..=13), whose
+            // good_match/max_lazy shortcuts are on, lost ~1.2% at the same speed.
+            let (depth, nice) = match self.effort {
+                10 => (16, 30),
+                11 => (35, 65),
+                12 => (100, 130),
+                13 => (150, 160),
+                14 => (200, DEFLATE_MAX_MATCH_LEN),
+                15 => (300, DEFLATE_MAX_MATCH_LEN),
+                16 => (450, DEFLATE_MAX_MATCH_LEN),
+                17 => (600, DEFLATE_MAX_MATCH_LEN),
+                _ => (800, DEFLATE_MAX_MATCH_LEN),
+            };
+            return CompressionParams {
+                max_search_depth: depth,
+                nice_match_length: nice,
+                good_match: DISABLED,
+                max_lazy: DISABLED,
+            };
+        }
+        if self.png_family && (19..=22).contains(&self.effort) {
+            // png(19..=22): near-optimal parsing (two passes, as new(23)) with
+            // a shallower binary-tree search, a time ramp up to png(23)'s
+            // (35, 75). One pass, or a depth under 16, lost to png(18) by up
+            // to 10% on some images (benchmarks/png_ladder_ramp_2026-10-07.txt).
+            let (depth, nice) = match self.effort {
+                19 => (16, 48),
+                20 => (24, 48),
+                21 => (24, 64),
+                _ => (35, 64),
+            };
+            return CompressionParams {
+                max_search_depth: depth,
+                nice_match_length: nice,
+                good_match: DISABLED,
+                max_lazy: DISABLED,
+            };
+        }
         let (depth, nice) = match self.strategy {
             InternalStrategy::Store => (0, 0),
             InternalStrategy::StaticTurbo
@@ -419,8 +588,10 @@ impl CompressionLevel {
                 29 => (200, DEFLATE_MAX_MATCH_LEN),
                 _ => (300, DEFLATE_MAX_MATCH_LEN),
             },
-            // FullOptimal has its own matchfinder; these params are not used.
-            InternalStrategy::FullOptimal => (0, 0),
+            // FullOptimal and Png have their own matchfinders; these params are not used.
+            InternalStrategy::FullOptimal
+            | InternalStrategy::Png(_)
+            | InternalStrategy::PngUltra => (0, 0),
         };
 
         let (good_match, max_lazy) = match self.strategy {
@@ -530,6 +701,16 @@ pub struct Compressor {
     near_optimal: Option<Box<NearOptimalState>>,
     /// Full-optimal (Zopfli) state for the FullOptimal strategy.
     full_optimal: Option<Box<full_optimal::FullOptimalState>>,
+    /// Hash table for the Png strategy (when hashing is enabled).
+    png_mf: Option<Box<PngMatchfinder>>,
+    /// Code tables for the PngUltra strategy.
+    png_ultra: Option<Box<UltraState>>,
+    /// Runs-only guard for `png()` rungs on the lazy parsers.
+    runs_guard: Option<Box<RunsGuard>>,
+    /// Input positions where the near-optimal parser ended its blocks in the
+    /// last call (tests check the png() rungs' shared block ends).
+    #[cfg(test)]
+    test_block_ends: Vec<usize>,
     /// Starting offset: skip dictionary bytes at the start of input.
     /// Set by `deflate_compress_chunk`; 0 for normal operation.
     chunk_start: usize,
@@ -626,6 +807,11 @@ impl Clone for Compressor {
             hc_mf: self.hc_mf.as_ref().map(|b| Box::new((**b).clone())),
             near_optimal: self.near_optimal.as_ref().map(|b| Box::new((**b).clone())),
             full_optimal: self.full_optimal.as_ref().map(|b| Box::new((**b).clone())),
+            png_mf: self.png_mf.clone(),
+            png_ultra: self.png_ultra.clone(),
+            runs_guard: self.runs_guard.clone(),
+            #[cfg(test)]
+            test_block_ends: Vec::new(),
             chunk_start: self.chunk_start,
             force_nonfinal: self.force_nonfinal,
             incremental_pos: self.incremental_pos,
@@ -669,6 +855,8 @@ impl Compressor {
             InternalStrategy::Greedy | InternalStrategy::Lazy | InternalStrategy::Lazy2 => {
                 SEQ_STORE_LENGTH + 1
             }
+            InternalStrategy::Png(_) => PNG_SEQ_STORE_LENGTH + 1,
+            InternalStrategy::PngUltra => 0,
         };
 
         let mut freqs = DeflateFreqs::default();
@@ -728,6 +916,28 @@ impl Compressor {
             } else {
                 None
             },
+            png_ultra: match strategy {
+                InternalStrategy::PngUltra => Some(Box::new(UltraState::new())),
+                _ => None,
+            },
+            png_mf: match strategy {
+                InternalStrategy::Png(p) if p.hash => {
+                    Some(Box::new(PngMatchfinder::new(p.chain_depth > 1)))
+                }
+                _ => None,
+            },
+            runs_guard: match strategy {
+                InternalStrategy::Lazy
+                | InternalStrategy::Lazy2
+                | InternalStrategy::NearOptimal
+                    if level.png_family =>
+                {
+                    Some(Box::new(RunsGuard::new(SOFT_MAX_BLOCK_LENGTH)))
+                }
+                _ => None,
+            },
+            #[cfg(test)]
+            test_block_ends: Vec::new(),
             chunk_start: 0,
             force_nonfinal: false,
             incremental_pos: 0,
@@ -827,6 +1037,12 @@ impl Compressor {
                 let iterations = fo.iterations();
                 full_optimal::compress_full_optimal(&mut os, input, iterations, true, &stop)?;
             }
+            InternalStrategy::Png(params) => {
+                self.compress_png(&mut os, input, params, &stop)?;
+            }
+            InternalStrategy::PngUltra => {
+                self.compress_png_ultra(&mut os, input, &stop)?;
+            }
         }
 
         if os.overflow {
@@ -853,34 +1069,10 @@ impl Compressor {
         output: &mut [u8],
         stop: impl enough::Stop,
     ) -> Result<usize, CompressionError> {
-        // zlib header: CMF=0x78, FLG level hint depends on compression level.
-        // Matches C libdeflate's mapping: <2 fastest, <6 fast, <8 default, >=8 slowest.
-        let level = self.level.level();
-        let level_hint: u8 = if level < 2 {
-            0 // ZLIB_FASTEST_COMPRESSION
-        } else if level < 6 {
-            1 // ZLIB_FAST_COMPRESSION
-        } else if level < 8 {
-            2 // ZLIB_DEFAULT_COMPRESSION
-        } else {
-            3 // ZLIB_SLOWEST_COMPRESSION
-        };
-        let flg = level_hint << 6;
-        // CMF = 0x78 (deflate, window size 32K)
-        let cmf = 0x78u8;
-        // Adjust FLG so (CMF*256 + FLG) % 31 == 0
-        let check = ((cmf as u16) * 256 + flg as u16) % 31;
-        let flg = if check == 0 {
-            flg
-        } else {
-            flg + (31 - check) as u8
-        };
-
         if output.len() < 6 {
             return Err(CompressionError::InsufficientSpace);
         }
-        output[0] = cmf;
-        output[1] = flg;
+        output[..2].copy_from_slice(&zlib_header(self.level));
 
         let compressed_size = self.deflate_compress(input, &mut output[2..], stop)?;
         let total = 2 + compressed_size;
@@ -945,6 +1137,28 @@ impl Compressor {
         // Worst case: uncompressed blocks (5 bytes overhead each).
         // Static Huffman blocks roll back to uncompressed if they expand.
         5 * max_blocks + input_len
+    }
+
+    /// One independent segment of a larger raw DEFLATE stream: no history
+    /// from earlier segments, and with `is_last` false no BFINAL block and a
+    /// byte-aligned end (an empty stored block, `00 00 ff ff`). Public
+    /// through [`png::StripCompressor`](crate::png::StripCompressor).
+    pub(crate) fn deflate_compress_segment(
+        &mut self,
+        input: &[u8],
+        is_last: bool,
+        output: &mut [u8],
+        stop: impl enough::Stop,
+    ) -> Result<usize, CompressionError> {
+        self.deflate_compress_chunk(input, 0, is_last, output, &stop)
+    }
+
+    /// Upper bound on [`deflate_compress_segment`](Self::deflate_compress_segment)
+    /// output: [`deflate_compress_bound`](Self::deflate_compress_bound) plus
+    /// the 5-byte flush marker and one byte of bit padding.
+    #[must_use]
+    pub(crate) fn deflate_compress_segment_bound(input_len: usize) -> usize {
+        Self::deflate_compress_bound(input_len) + 6
     }
 
     /// Compute the maximum compressed size for zlib output.
@@ -2629,6 +2843,9 @@ impl Compressor {
         stop: &impl enough::Stop,
     ) -> Result<(), CompressionError> {
         mf.init();
+        if let Some(g) = self.runs_guard.as_deref_mut() {
+            g.reset();
+        }
 
         let in_end = input.len();
         let mut in_next = self.chunk_start;
@@ -2655,7 +2872,34 @@ impl Compressor {
         while in_next < in_end && !os.overflow {
             stop.check()?;
             let in_block_begin = in_next;
-            let in_max_block_end = choose_max_block_end(in_next, in_end, SOFT_MAX_BLOCK_LENGTH);
+            // png() lazy rungs take block ends from the input alone, so every
+            // rung and the runs-only guard see the same blocks; matches then
+            // never cross a block end.
+            let shared_blocks = self.level.png_family;
+            let in_max_block_end = if shared_blocks {
+                // Every sequence holds a match of 3+ bytes, so a block this
+                // long can't fill the sequence store: blocks never end early
+                // on a parse-dependent condition.
+                block_split::input_block_end(
+                    input,
+                    in_next,
+                    in_end,
+                    SOFT_MAX_BLOCK_LENGTH.min(3 * (SEQ_STORE_LENGTH - 1)),
+                )
+            } else {
+                choose_max_block_end(in_next, in_end, SOFT_MAX_BLOCK_LENGTH)
+            };
+            let match_end = if shared_blocks {
+                in_max_block_end
+            } else {
+                in_end
+            };
+            if shared_blocks {
+                // adjust_max_and_nice_len only lowers these; restore them for
+                // each block, since only the stream's end lowers them for good.
+                max_len = DEFLATE_MAX_MATCH_LEN;
+                nice_len = max_len.min(self.nice_match_length);
+            }
             let mut seq_idx = 0;
             let mut next_recalc_min_len = in_next + (in_end - in_next).min(10000);
 
@@ -2680,7 +2924,7 @@ impl Compressor {
                 }
 
                 // Find match at current position
-                adjust_max_and_nice_len(&mut max_len, &mut nice_len, in_end - in_next);
+                adjust_max_and_nice_len(&mut max_len, &mut nice_len, match_end - in_next);
                 let (mut cur_len, mut cur_offset) = mf.longest_match(
                     input,
                     &mut in_base_offset,
@@ -2733,7 +2977,7 @@ impl Compressor {
 
                         // Look ahead: try to find a better match at the next position.
                         // Use half the search depth for the lookahead.
-                        adjust_max_and_nice_len(&mut max_len, &mut nice_len, in_end - in_next);
+                        adjust_max_and_nice_len(&mut max_len, &mut nice_len, match_end - in_next);
                         let (next_len, next_offset) = mf.longest_match(
                             input,
                             &mut in_base_offset,
@@ -2766,7 +3010,11 @@ impl Compressor {
 
                         if lazy2 {
                             // Second lookahead with quarter search depth
-                            adjust_max_and_nice_len(&mut max_len, &mut nice_len, in_end - in_next);
+                            adjust_max_and_nice_len(
+                                &mut max_len,
+                                &mut nice_len,
+                                match_end - in_next,
+                            );
                             let (next_len2, next_offset2) = mf.longest_match(
                                 input,
                                 &mut in_base_offset,
@@ -2850,9 +3098,10 @@ impl Compressor {
                 // Check if block should end
                 if in_next >= in_max_block_end
                     || seq_idx >= SEQ_STORE_LENGTH
-                    || self
-                        .split_stats
-                        .should_end_block(in_block_begin, in_next, in_end)
+                    || (!shared_blocks
+                        && self
+                            .split_stats
+                            .should_end_block(in_block_begin, in_next, in_end))
                 {
                     break;
                 }
@@ -2860,6 +3109,46 @@ impl Compressor {
 
             let block_length = in_next - in_block_begin;
             let is_final = !self.force_nonfinal && in_next >= in_end;
+            if let Some(g) = self.runs_guard.as_deref_mut() {
+                match g.prefer_runs(
+                    input,
+                    in_block_begin,
+                    in_next,
+                    &self.freqs,
+                    &mut self.codes,
+                    &self.static_codes,
+                    stop,
+                )? {
+                    Some(true) => {
+                        let (seqs, freqs, codes) = g.parse();
+                        block::finish_block_with_codes(
+                            os,
+                            &input[in_block_begin..],
+                            block_length,
+                            seqs,
+                            freqs,
+                            codes,
+                            &self.static_codes,
+                            is_final,
+                        );
+                        continue;
+                    }
+                    Some(false) => {
+                        block::finish_block_with_codes(
+                            os,
+                            &input[in_block_begin..],
+                            block_length,
+                            &self.sequences[..=seq_idx],
+                            &mut self.freqs,
+                            &self.codes,
+                            &self.static_codes,
+                            is_final,
+                        );
+                        continue;
+                    }
+                    None => {}
+                }
+            }
             finish_block(
                 os,
                 &input[in_block_begin..],
@@ -2904,6 +3193,14 @@ impl Compressor {
         stop: &impl enough::Stop,
     ) -> Result<(), CompressionError> {
         ns.bt_mf.init();
+        if let Some(g) = self.runs_guard.as_deref_mut() {
+            g.reset();
+        }
+        #[cfg(test)]
+        self.test_block_ends.clear();
+        // png() near-optimal rungs take block ends from the input alone (as
+        // the lazy rungs do), so every rung splits a given input identically.
+        let shared_blocks = self.level.png_family;
 
         let in_end = input.len();
         let mut in_next = self.chunk_start;
@@ -2966,8 +3263,11 @@ impl Compressor {
         loop {
             stop.check()?;
             // Starting a new DEFLATE block
-            let in_max_block_end =
-                choose_max_block_end(in_block_begin, in_end, SOFT_MAX_BLOCK_LENGTH);
+            let in_max_block_end = if shared_blocks {
+                block_split::input_block_end(input, in_block_begin, in_end, SOFT_MAX_BLOCK_LENGTH)
+            } else {
+                choose_max_block_end(in_block_begin, in_end, SOFT_MAX_BLOCK_LENGTH)
+            };
             let mut prev_end_block_check: Option<usize> = None;
             let mut change_detected = false;
             let mut next_observation = in_next;
@@ -3069,6 +3369,10 @@ impl Compressor {
                 // Avoids degenerate behavior on highly redundant data.
                 if best_len >= DEFLATE_MIN_MATCH_LEN && best_len >= nice_len {
                     let mut skip = best_len - 1;
+                    if shared_blocks {
+                        // Stop at the shared block end.
+                        skip = skip.min((in_max_block_end - in_next) as u32);
+                    }
                     while skip > 0 {
                         let remaining = in_end - in_next;
                         if in_next == in_next_slide {
@@ -3125,6 +3429,9 @@ impl Compressor {
                 if cache_idx >= MATCH_CACHE_LENGTH {
                     break;
                 }
+                if shared_blocks {
+                    continue;
+                }
                 // Not ready to check block end?
                 if !self
                     .split_stats
@@ -3175,8 +3482,15 @@ impl Compressor {
                     &self.static_codes,
                     &self.split_stats,
                     max_search_depth,
-                    self.level.effort(),
+                    self.level.near_optimal_effort(),
                     self.level.is_libdeflate_compat(),
+                    self.runs_guard
+                        .as_deref_mut()
+                        .map(|guard| near_optimal::NearOptGuard {
+                            guard,
+                            input,
+                            begin: in_block_begin,
+                        }),
                 );
 
                 // Move remaining cache entries to beginning
@@ -3207,10 +3521,19 @@ impl Compressor {
                     &self.static_codes,
                     &self.split_stats,
                     max_search_depth,
-                    self.level.effort(),
+                    self.level.near_optimal_effort(),
                     self.level.is_libdeflate_compat(),
+                    self.runs_guard
+                        .as_deref_mut()
+                        .map(|guard| near_optimal::NearOptGuard {
+                            guard,
+                            input,
+                            begin: in_block_begin,
+                        }),
                 );
 
+                #[cfg(test)]
+                self.test_block_ends.push(in_next);
                 cache_idx = 0;
                 save_stats(&self.split_stats, ns);
                 init_stats(&mut self.split_stats, ns);
@@ -3233,7 +3556,6 @@ impl Compressor {
     ///
     /// If `is_last_chunk` is false, a sync flush (empty stored block) is appended
     /// to byte-align the output for concatenation with subsequent chunks.
-    #[cfg(feature = "threads")]
     fn deflate_compress_chunk(
         &mut self,
         input: &[u8],
@@ -3242,8 +3564,13 @@ impl Compressor {
         output: &mut [u8],
         stop: &impl enough::Stop,
     ) -> Result<usize, CompressionError> {
-        // Store: no matchfinder, just uncompressed blocks of the data portion.
-        if self.level.strategy() == InternalStrategy::Store {
+        // Store, empty, or below the passthrough threshold: uncompressed
+        // blocks of the data portion (always byte-aligned at the end).
+        let data_len = input.len() - chunk_start;
+        if self.level.strategy() == InternalStrategy::Store
+            || data_len == 0
+            || (chunk_start == 0 && data_len <= self.max_passthrough_size)
+        {
             return deflate_compress_none_chunk(&input[chunk_start..], output, is_last_chunk);
         }
 
@@ -3261,7 +3588,22 @@ impl Compressor {
             InternalStrategy::Lazy => self.compress_lazy_generic(&mut os, input, false, stop),
             InternalStrategy::Lazy2 => self.compress_lazy_generic(&mut os, input, true, stop),
             InternalStrategy::NearOptimal => self.compress_near_optimal(&mut os, input, stop),
-            InternalStrategy::Store | InternalStrategy::FullOptimal => unreachable!(),
+            InternalStrategy::Png(params) => self.compress_png(&mut os, input, params, stop),
+            InternalStrategy::PngUltra => self.compress_png_ultra(&mut os, input, stop),
+            InternalStrategy::FullOptimal => {
+                // FullOptimal has no dictionary warm-up; only independent
+                // segments (`chunk_start == 0`) reach here.
+                debug_assert_eq!(chunk_start, 0);
+                let iterations = self.full_optimal.as_ref().unwrap().iterations();
+                full_optimal::compress_full_optimal(
+                    &mut os,
+                    &input[chunk_start..],
+                    iterations,
+                    is_last_chunk,
+                    stop,
+                )
+            }
+            InternalStrategy::Store => unreachable!(),
         };
         if let Err(e) = result {
             self.chunk_start = 0;
@@ -3574,7 +3916,6 @@ fn deflate_compress_none(input: &[u8], output: &mut [u8]) -> Result<usize, Compr
 }
 
 /// Level 0 chunk variant: output uncompressed blocks with BFINAL control.
-#[cfg(feature = "threads")]
 fn deflate_compress_none_chunk(
     input: &[u8],
     output: &mut [u8],
@@ -3701,6 +4042,31 @@ fn choose_max_block_end(block_begin: usize, in_end: usize, soft_max_len: usize) 
     } else {
         block_begin + soft_max_len
     }
+}
+
+/// The 2-byte zlib header: deflate, 32 KiB window, a level hint matching
+/// C libdeflate's mapping.
+pub(crate) fn zlib_header(level: CompressionLevel) -> [u8; 2] {
+    let level = level.level();
+    let level_hint: u8 = if level < 2 {
+        0 // ZLIB_FASTEST_COMPRESSION
+    } else if level < 6 {
+        1 // ZLIB_FAST_COMPRESSION
+    } else if level < 8 {
+        2 // ZLIB_DEFAULT_COMPRESSION
+    } else {
+        3 // ZLIB_SLOWEST_COMPRESSION
+    };
+    let cmf = 0x78u8; // deflate, 32 KiB window
+    let flg = level_hint << 6;
+    // FCHECK: (CMF*256 + FLG) % 31 == 0
+    let check = ((cmf as u16) * 256 + flg as u16) % 31;
+    let flg = if check == 0 {
+        flg
+    } else {
+        flg + (31 - check) as u8
+    };
+    [cmf, flg]
 }
 
 #[cfg(test)]

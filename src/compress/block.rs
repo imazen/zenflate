@@ -162,7 +162,11 @@ pub(crate) fn init_static_codes(freqs: &mut DeflateFreqs, codes: &mut DeflateCod
 ///
 /// Uses the ORIGINAL frequencies against the given code lengths.
 /// This measures how many bits the actual data would take to encode.
-fn block_symbol_cost(orig_freqs: &DeflateFreqs, lens_litlen: &[u8], lens_offset: &[u8]) -> u32 {
+pub(crate) fn block_symbol_cost(
+    orig_freqs: &DeflateFreqs,
+    lens_litlen: &[u8],
+    lens_offset: &[u8],
+) -> u32 {
     let mut cost = 0u32;
     // Literal + end-of-block cost
     for (&freq, &len) in orig_freqs.litlen[..DEFLATE_FIRST_LEN_SYM as usize]
@@ -205,6 +209,109 @@ fn tree_header_cost(lens_litlen: &[u8], lens_offset: &[u8], scratch: &mut Huffma
     // Use the best precode encoding for header cost
     let best = compute_precode_items_best(&combined_lens[..total_lens], scratch);
     best.cost
+}
+
+/// Write a dynamic-Huffman block header for `codes`, everything after the
+/// 3 BFINAL/BTYPE bits (HLIT, HDIST, HCLEN, precode lengths, encoded code
+/// lengths), using the default precode, exactly as [`flush_block`] does.
+pub(crate) fn write_dynamic_header_body(os: &mut OutputBitstream<'_>, codes: &DeflateCodes) {
+    let mut num_litlen_syms = DEFLATE_NUM_LITLEN_SYMS as usize;
+    while num_litlen_syms > 257 && codes.lens_litlen[num_litlen_syms - 1] == 0 {
+        num_litlen_syms -= 1;
+    }
+    let mut num_offset_syms = DEFLATE_NUM_OFFSET_SYMS as usize;
+    while num_offset_syms > 1 && codes.lens_offset[num_offset_syms - 1] == 0 {
+        num_offset_syms -= 1;
+    }
+    let total_lens = num_litlen_syms + num_offset_syms;
+    let mut combined_lens = [0u8; (DEFLATE_NUM_LITLEN_SYMS + DEFLATE_NUM_OFFSET_SYMS) as usize];
+    combined_lens[..num_litlen_syms].copy_from_slice(&codes.lens_litlen[..num_litlen_syms]);
+    combined_lens[num_litlen_syms..total_lens]
+        .copy_from_slice(&codes.lens_offset[..num_offset_syms]);
+
+    let mut precode_freqs = [0u32; DEFLATE_NUM_PRECODE_SYMS as usize];
+    let mut precode_items = [0u32; (DEFLATE_NUM_LITLEN_SYMS + DEFLATE_NUM_OFFSET_SYMS) as usize];
+    let num_precode_items = compute_precode_items(
+        &combined_lens[..total_lens],
+        &mut precode_freqs,
+        &mut precode_items,
+    );
+    let mut precode_lens = [0u8; DEFLATE_NUM_PRECODE_SYMS as usize];
+    let mut precode_codewords = [0u32; DEFLATE_NUM_PRECODE_SYMS as usize];
+    make_huffman_code(
+        DEFLATE_NUM_PRECODE_SYMS as usize,
+        DEFLATE_MAX_PRE_CODEWORD_LEN,
+        &precode_freqs,
+        &mut precode_lens,
+        &mut precode_codewords,
+    );
+    let mut num_explicit_lens = DEFLATE_NUM_PRECODE_SYMS as usize;
+    while num_explicit_lens > 4
+        && precode_lens[DEFLATE_PRECODE_LENS_PERMUTATION[num_explicit_lens - 1] as usize] == 0
+    {
+        num_explicit_lens -= 1;
+    }
+
+    os.add_bits(num_litlen_syms as u32 - 257, 5);
+    os.add_bits(num_offset_syms as u32 - 1, 5);
+    os.add_bits(num_explicit_lens as u32 - 4, 4);
+    os.flush_bits();
+    for &perm in &DEFLATE_PRECODE_LENS_PERMUTATION[..num_explicit_lens] {
+        os.add_bits(precode_lens[perm as usize] as u32, 3);
+        os.flush_bits();
+    }
+    for &item in &precode_items[..num_precode_items] {
+        let sym = (item & 0x1F) as usize;
+        os.add_bits(precode_codewords[sym], precode_lens[sym] as u32);
+        os.add_bits(item >> 5, EXTRA_PRECODE_BITS[sym] as u32);
+        os.flush_bits();
+    }
+}
+
+/// Exact dynamic-block header size (bits, excluding the 3 BFINAL/BTYPE
+/// bits) as [`flush_block`] writes it with the default precode.
+pub(crate) fn dynamic_header_bits(codes: &DeflateCodes) -> u32 {
+    let mut num_litlen_syms = DEFLATE_NUM_LITLEN_SYMS as usize;
+    while num_litlen_syms > 257 && codes.lens_litlen[num_litlen_syms - 1] == 0 {
+        num_litlen_syms -= 1;
+    }
+    let mut num_offset_syms = DEFLATE_NUM_OFFSET_SYMS as usize;
+    while num_offset_syms > 1 && codes.lens_offset[num_offset_syms - 1] == 0 {
+        num_offset_syms -= 1;
+    }
+    let total_lens = num_litlen_syms + num_offset_syms;
+    let mut combined_lens = [0u8; (DEFLATE_NUM_LITLEN_SYMS + DEFLATE_NUM_OFFSET_SYMS) as usize];
+    combined_lens[..num_litlen_syms].copy_from_slice(&codes.lens_litlen[..num_litlen_syms]);
+    combined_lens[num_litlen_syms..total_lens]
+        .copy_from_slice(&codes.lens_offset[..num_offset_syms]);
+
+    let mut precode_freqs = [0u32; DEFLATE_NUM_PRECODE_SYMS as usize];
+    let mut precode_items = [0u32; (DEFLATE_NUM_LITLEN_SYMS + DEFLATE_NUM_OFFSET_SYMS) as usize];
+    compute_precode_items(
+        &combined_lens[..total_lens],
+        &mut precode_freqs,
+        &mut precode_items,
+    );
+    let mut precode_lens = [0u8; DEFLATE_NUM_PRECODE_SYMS as usize];
+    let mut precode_codewords = [0u32; DEFLATE_NUM_PRECODE_SYMS as usize];
+    make_huffman_code(
+        DEFLATE_NUM_PRECODE_SYMS as usize,
+        DEFLATE_MAX_PRE_CODEWORD_LEN,
+        &precode_freqs,
+        &mut precode_lens,
+        &mut precode_codewords,
+    );
+    let mut num_explicit_lens = DEFLATE_NUM_PRECODE_SYMS as usize;
+    while num_explicit_lens > 4
+        && precode_lens[DEFLATE_PRECODE_LENS_PERMUTATION[num_explicit_lens - 1] as usize] == 0
+    {
+        num_explicit_lens -= 1;
+    }
+    let mut bits = 5 + 5 + 4 + 3 * num_explicit_lens as u32;
+    for (sym, (&freq, &len)) in precode_freqs.iter().zip(precode_lens.iter()).enumerate() {
+        bits += freq * (EXTRA_PRECODE_BITS[sym] as u32 + len as u32);
+    }
+    bits
 }
 
 /// Build litlen and offset Huffman codes using multi-strategy optimization.
@@ -1283,6 +1390,33 @@ pub(crate) fn choose_match(
     next
 }
 
+/// [`finish_block`] for a block whose `codes` were already built from
+/// `freqs` plus one end-of-block symbol (as `png_mode`'s `block_bits` does),
+/// so they aren't built twice. Writes the same bytes as `finish_block`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn finish_block_with_codes(
+    os: &mut OutputBitstream<'_>,
+    block_begin: &[u8],
+    block_length: usize,
+    sequences: &[Sequence],
+    freqs: &mut DeflateFreqs,
+    codes: &DeflateCodes,
+    static_codes: &DeflateCodes,
+    is_final_block: bool,
+) {
+    freqs.litlen[DEFLATE_END_OF_BLOCK as usize] += 1;
+    flush_block(
+        os,
+        block_begin,
+        block_length,
+        BlockOutput::Sequences(sequences),
+        freqs,
+        codes,
+        static_codes,
+        is_final_block,
+    );
+}
+
 /// Build codes and flush a finished block (adds end-of-block symbol first).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn finish_block(
@@ -1312,6 +1446,106 @@ pub(crate) fn finish_block(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A dynamic header whose code lengths need all 19 precode symbols (the
+    /// longest precode length list: the case that overflowed the 63-bit bit
+    /// buffer and silently corrupted streams, fixed in 284b260), written at
+    /// several bit offsets, must decode. The block holds only end-of-block.
+    #[test]
+    fn dynamic_header_with_every_precode_symbol_decodes() {
+        let mut litlen = [0u32; DEFLATE_NUM_LITLEN_SYMS as usize];
+        // Geometric frequencies: code lengths 1..=14 (the compressor's cap).
+        for (i, f) in litlen[..14].iter_mut().enumerate() {
+            *f = 1 << (20 - i);
+        }
+        // Six equal small counts: a run of equal lengths (precode 16).
+        litlen[14..20].fill(1);
+        // Zero-length gaps of 1 (precode 0), 6 (17) and 32+ (18).
+        litlen[21] = 1;
+        litlen[28] = 1;
+        litlen[DEFLATE_END_OF_BLOCK as usize] = 1;
+        let mut offset = [0u32; DEFLATE_NUM_OFFSET_SYMS as usize];
+        // Geometric again, up to length 15 (precode 15).
+        for (i, f) in offset[..16].iter_mut().enumerate() {
+            *f = 1 << (20 - i);
+        }
+        let mut codes = DeflateCodes::default();
+        make_huffman_code(
+            DEFLATE_NUM_LITLEN_SYMS as usize,
+            MAX_LITLEN_CODEWORD_LEN,
+            &litlen,
+            &mut codes.lens_litlen,
+            &mut codes.codewords_litlen,
+        );
+        make_huffman_code(
+            DEFLATE_NUM_OFFSET_SYMS as usize,
+            DEFLATE_MAX_OFFSET_CODEWORD_LEN,
+            &offset,
+            &mut codes.lens_offset,
+            &mut codes.codewords_offset,
+        );
+
+        // Every precode symbol is used (the header writes all 19 lengths).
+        let mut nl = DEFLATE_NUM_LITLEN_SYMS as usize;
+        while nl > 257 && codes.lens_litlen[nl - 1] == 0 {
+            nl -= 1;
+        }
+        let mut no = DEFLATE_NUM_OFFSET_SYMS as usize;
+        while no > 1 && codes.lens_offset[no - 1] == 0 {
+            no -= 1;
+        }
+        let mut combined = alloc::vec::Vec::new();
+        combined.extend_from_slice(&codes.lens_litlen[..nl]);
+        combined.extend_from_slice(&codes.lens_offset[..no]);
+        let mut precode_freqs = [0u32; DEFLATE_NUM_PRECODE_SYMS as usize];
+        let mut items = alloc::vec![0u32; combined.len()];
+        compute_precode_items(&combined, &mut precode_freqs, &mut items);
+        let missing: alloc::vec::Vec<usize> = (0..DEFLATE_NUM_PRECODE_SYMS as usize)
+            .filter(|&s| precode_freqs[s] == 0)
+            .collect();
+        assert!(missing.is_empty(), "precode symbols not used: {missing:?}");
+
+        // 0-3 empty static blocks first: the header starts at bit offset 0, 2, 4, 6.
+        for empty_blocks in 0..4 {
+            let mut buf = alloc::vec![0u8; 1024];
+            let mut os = OutputBitstream::new(&mut buf);
+            for _ in 0..empty_blocks {
+                os.add_bits(0, 1); // not final
+                os.add_bits(1, 2); // static Huffman
+                os.add_bits(0, 7); // end-of-block (static code 0000000)
+                os.flush_bits();
+            }
+            os.add_bits(1, 1); // final
+            os.add_bits(2, 2); // dynamic Huffman
+            os.flush_bits();
+            write_dynamic_header_body(&mut os, &codes);
+            let eob = DEFLATE_END_OF_BLOCK as usize;
+            os.add_bits(codes.codewords_litlen[eob], codes.lens_litlen[eob] as u32);
+            os.flush_bits();
+            assert!(!os.overflow);
+            let mut n = os.pos;
+            if os.bitcount > 0 {
+                os.buf[n] = os.bitbuf as u8;
+                n += 1;
+            }
+            let stream = &buf[..n];
+            let mut out = [0u8; 16];
+            let r = crate::Decompressor::new()
+                .deflate_decompress(stream, &mut out, enough::Unstoppable)
+                .unwrap_or_else(|e| panic!("{empty_blocks} empty blocks first: {e:?}"));
+            assert_eq!(r.output_written, 0);
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                let mut out = [0u8; 16];
+                let m = libdeflater::Decompressor::new()
+                    .deflate_decompress(stream, &mut out)
+                    .unwrap_or_else(|e| {
+                        panic!("libdeflate, {empty_blocks} empty blocks first: {e:?}")
+                    });
+                assert_eq!(m, 0);
+            }
+        }
+    }
 
     #[test]
     fn test_offset_slot() {

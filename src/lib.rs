@@ -94,6 +94,8 @@ pub mod compress;
 pub mod decompress;
 #[cfg(feature = "compress")]
 pub(crate) mod matchfinder;
+#[cfg(feature = "alloc")]
+pub mod png;
 
 pub use checksum::{Adler32Hasher, Crc32Hasher, adler32, adler32_combine, crc32, crc32_combine};
 #[cfg(feature = "compress")]

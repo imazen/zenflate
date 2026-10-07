@@ -9,6 +9,11 @@ mod api {
     #![allow(dead_code)]
     include!("../fuzz/fuzz_targets/api_check.rs");
 }
+/// The `fuzz_inflate_diff` target's check, replayed here on stable.
+mod inflate_diff {
+    #![allow(dead_code)]
+    include!("../fuzz/fuzz_targets/inflate_diff_check.rs");
+}
 use zenutils_fuzz::RegressionSuite;
 
 /// Exact number of replayable seeds committed under `fuzz/regression/`.
@@ -19,11 +24,17 @@ use zenutils_fuzz::RegressionSuite;
 /// empty directory.) Raise this the moment a seed lands.
 ///
 /// `fuzz_api/stop-then-reuse-effort{1,15,24}.bin`: a compressor stopped by its
-/// `Stop` token, then reused (panicked before 1383ac5). Bugs whose
+/// `Stop` token, then reused (panicked before 1383ac5).
+/// `fuzz_api/png3-stop-then-reuse.bin`: the same for the `png()` hash parser.
+/// `fuzz_api/png1-bound-crossover.bin`: a 266-byte input whose `png(1)` block
+/// landed 1-2 bytes past `zlib_compress_bound` (stored fallback compared
+/// bytes, not bits). `fuzz_api/png1-short-buffer-cap{8,12}.bin`: `png(1)`
+/// into an 8- or 12-byte buffer pushed the bit buffer past 64 bits (debug
+/// assertion / shift overflow) before 4a17814. Bugs whose
 /// reproducers exceed the 8 KB seed ceiling are gated by unit tests instead:
 /// #7's 19 MB literal run (`full_optimal.rs`), incremental calls past one
 /// sequence store and parallel full-optimal (`compress/mod.rs`).
-const EXPECTED_SEEDS: usize = 3;
+const EXPECTED_SEEDS: usize = 7;
 
 /// Count the files `RegressionSuite::run` will actually replay, using its own
 /// filters: recurse into subdirectories, skip dotfiles, `*.md` and `*.txt`.
@@ -107,6 +118,7 @@ fn fuzz_regression() {
             let _ = d.zlib_decompress(data, &mut output, Unstoppable);
             let _ = d.gzip_decompress(data, &mut output, Unstoppable);
         })
+        .target("fuzz_inflate_diff", inflate_diff::check)
         .target("fuzz_api", |data| {
             use arbitrary::Arbitrary;
             if let Ok(input) = api::Input::arbitrary_take_rest(arbitrary::Unstructured::new(data)) {

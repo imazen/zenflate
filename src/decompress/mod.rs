@@ -14,6 +14,9 @@ use crate::error::DecompressionError;
 
 pub(crate) const PRECODE_TABLEBITS: u32 = 7;
 const PRECODE_ENOUGH: usize = 128;
+// 12 bits (fdeflate's choice) measured no faster with double literals on
+// zenpng's 106 PNG inputs (median 1.045 vs 1.036 of fdeflate's time) and
+// slower on small images, where the bigger table costs more to build.
 pub(crate) const LITLEN_TABLEBITS: u32 = 11;
 const LITLEN_ENOUGH: usize = 2342;
 pub(crate) const OFFSET_TABLEBITS: u32 = 8;
@@ -24,15 +27,23 @@ pub(crate) const HUFFDEC_LITERAL: u32 = 0x8000_0000;
 pub(crate) const HUFFDEC_EXCEPTIONAL: u32 = 0x0000_8000;
 pub(crate) const HUFFDEC_SUBTABLE_POINTER: u32 = 0x0000_4000;
 pub(crate) const HUFFDEC_END_OF_BLOCK: u32 = 0x0000_2000;
+/// Litlen entry holding two literals: the first in bits 16-23, the second in
+/// bits 8-15, the combined codeword length in bits 0-7. Always set together
+/// with `HUFFDEC_LITERAL`; bits 8-15 then overlap the exceptional flags, so
+/// test `HUFFDEC_LITERAL` before any of them.
+pub(crate) const HUFFDEC_DOUBLE_LITERAL: u32 = 0x4000_0000;
 
 // Bitstream constants (64-bit)
 pub(crate) const CONSUMABLE_NBITS: u32 = 56; // MAX_BITSLEFT(63) - 7
 
 // Fastloop safety margins — how many bytes the fastloop can read/write per iteration.
-// Max bytes that can be written past the nominal match end in one fastloop iteration.
-// Word copies (8 bytes) can overrun by at most 7 bytes; RLE uses fill() (exact length).
+// Max bytes one fastloop iteration can write from its starting position: up to
+// two litlen entries (two bytes each, one possibly scratch for a single
+// literal), then a match whose chunked copy (32-byte chunks) can run up to
+// 31 bytes past its end. Bytes past the decoded output may be scribbled (within this
+// margin) and are overwritten by later output or left beyond `output_written`.
 pub(crate) const FASTLOOP_MAX_BYTES_WRITTEN: usize =
-    2 + crate::constants::DEFLATE_MAX_MATCH_LEN as usize + 7;
+    4 + crate::constants::DEFLATE_MAX_MATCH_LEN as usize + 32;
 // Input: worst-case bytes consumed per iteration + 8-byte read-ahead for branchless refill
 pub(crate) const FASTLOOP_MAX_BYTES_READ: usize = 32;
 
@@ -217,6 +228,8 @@ pub struct Decompressor {
     pub(crate) sorted_syms: [u16; DEFLATE_MAX_NUM_SYMS],
     pub(crate) static_codes_loaded: bool,
     pub(crate) litlen_tablebits: u32,
+    /// The litlen table holds double-literal entries (see `add_double_literals`).
+    pub(crate) litlen_doubles: bool,
     skip_checksum: bool,
     checksum_matched: Option<bool>,
     max_output_size: Option<usize>,
@@ -251,10 +264,82 @@ impl Decompressor {
             sorted_syms: [0; DEFLATE_MAX_NUM_SYMS],
             static_codes_loaded: false,
             litlen_tablebits: 0,
+            litlen_doubles: false,
             skip_checksum: false,
             checksum_matched: None,
             max_output_size: None,
         }
+    }
+
+    /// Clear per-stream decode state so the tables can serve a new stream
+    /// (streaming `reset`). The tables themselves are not cleared: every
+    /// block builds its tables before reading them.
+    #[cfg(feature = "alloc")]
+    pub(crate) fn reset_stream_state(&mut self) {
+        self.static_codes_loaded = false;
+        self.litlen_doubles = false;
+        self.checksum_matched = None;
+    }
+
+    /// Load the fixed Huffman tables (RFC 1951 section 3.2.6). With `std`
+    /// they are built once per process and copied: building them cost about
+    /// 16K instructions per stream that starts with a fixed-Huffman block.
+    pub(crate) fn load_static_tables(&mut self) -> bool {
+        #[cfg(feature = "std")]
+        {
+            struct StaticTables {
+                litlen: [u32; LITLEN_ENOUGH],
+                offset: [u32; OFFSET_ENOUGH],
+                litlen_tablebits: u32,
+            }
+            static CACHE: std::sync::OnceLock<Option<Box<StaticTables>>> =
+                std::sync::OnceLock::new();
+            let cached = CACHE.get_or_init(|| {
+                let mut d = Box::new(Decompressor::new());
+                d.build_static_tables().then(|| {
+                    Box::new(StaticTables {
+                        litlen: d.litlen_decode_table,
+                        offset: d.offset_decode_table,
+                        litlen_tablebits: d.litlen_tablebits,
+                    })
+                })
+            });
+            if let Some(t) = cached {
+                self.litlen_decode_table = t.litlen;
+                self.offset_decode_table = t.offset;
+                self.litlen_tablebits = t.litlen_tablebits;
+                return true;
+            }
+        }
+        self.build_static_tables()
+    }
+
+    fn build_static_tables(&mut self) -> bool {
+        self.lens[..144].fill(8);
+        self.lens[144..256].fill(9);
+        self.lens[256..280].fill(7);
+        self.lens[280..288].fill(8);
+        // Fixed offset code: all 5 bits
+        self.lens[288..320].fill(5);
+        build_decode_table(
+            &mut self.offset_decode_table,
+            &self.lens[288..],
+            32,
+            &OFFSET_DECODE_RESULTS,
+            OFFSET_TABLEBITS,
+            15,
+            &mut self.sorted_syms,
+            None,
+        ) && build_decode_table(
+            &mut self.litlen_decode_table,
+            &self.lens,
+            288,
+            &LITLEN_DECODE_RESULTS,
+            LITLEN_TABLEBITS,
+            15,
+            &mut self.sorted_syms,
+            Some(&mut self.litlen_tablebits),
+        )
     }
 
     /// Set a maximum output size limit for decompression.
@@ -312,6 +397,10 @@ impl Decompressor {
     /// block boundary (typically every 32–65 KB of output). Pass
     /// [`Unstoppable`](enough::Unstoppable) when cancellation is not needed;
     /// the compiler eliminates all checks.
+    ///
+    /// Bytes of `output` past the returned `output_written` may be
+    /// overwritten (the fast decode loop stores in chunks of up to 32 bytes within a
+    /// margin below `output.len()`); don't keep data there.
     pub fn deflate_decompress(
         &mut self,
         input: &[u8],
@@ -330,6 +419,10 @@ impl Decompressor {
     ///
     /// See [`deflate_decompress`](Self::deflate_decompress) for the `stop`
     /// parameter.
+    ///
+    /// Bytes of `output` past the returned `output_written` may be
+    /// overwritten (the fast decode loop stores in chunks of up to 32 bytes within a
+    /// margin below `output.len()`); don't keep data there.
     pub fn zlib_decompress(
         &mut self,
         input: &[u8],
@@ -386,6 +479,10 @@ impl Decompressor {
     ///
     /// See [`deflate_decompress`](Self::deflate_decompress) for the `stop`
     /// parameter.
+    ///
+    /// Bytes of `output` past the returned `output_written` may be
+    /// overwritten (the fast decode loop stores in chunks of up to 32 bytes within a
+    /// margin below `output.len()`); don't keep data there.
     pub fn gzip_decompress(
         &mut self,
         input: &[u8],
@@ -568,22 +665,98 @@ pub(crate) fn table_lookup(table: &[u32], idx: u64) -> u32 {
     table[idx as usize]
 }
 
-/// Store a literal byte to the output buffer.
+/// Store a litlen entry's literal(s) and return how many: one store when the
+/// table has no double entries (no dependency of `pos` on the entry), else
+/// [`store_lits`]. Fastloop only.
 #[inline(always)]
-fn store_lit(output: &mut [u8], pos: usize, byte: u8) {
-    output[pos] = byte;
+pub(crate) fn put_lits(output: &mut [u8], pos: usize, entry: u32, doubles: bool) -> usize {
+    if doubles {
+        store_lits(output, pos, entry)
+    } else {
+        output[pos] = (entry >> 16) as u8;
+        1
+    }
 }
 
-/// Read a single byte from the output buffer (for match copy source).
+/// Store the one or two literals of a litlen entry and return how many.
+///
+/// Always writes two bytes (the second is scratch for a single literal), so
+/// `pos + 1` must be in bounds: fastloop only.
 #[inline(always)]
-fn load_byte(output: &[u8], pos: usize) -> u8 {
-    output[pos]
+pub(crate) fn store_lits(output: &mut [u8], pos: usize, entry: u32) -> usize {
+    output[pos] = (entry >> 16) as u8;
+    output[pos + 1] = (entry >> 8) as u8;
+    1 + ((entry >> 30) & 1) as usize
 }
 
-/// Forward match copy in the fastloop. Handles all overlap cases.
-/// Uses safe indexing everywhere — benchmarking showed that `get_unchecked`
-/// paths actually regress 5-6% on mixed/photo data because LLVM loses
-/// bounds information that enables better optimization.
+/// Build double-literal entries only when at least this much compressed input
+/// is left: the pass touches every main-table entry, which costs more than it
+/// saves on small streams (64x64 PNGs decoded 10% slower one-shot on
+/// Neoverse-N1 with an unconditional pass; 256x256 and up were 3-25% faster).
+///
+/// Unit tests and fuzzing use 0 so double entries are exercised on every
+/// stream; integration tests run the real threshold.
+#[cfg(not(any(test, fuzzing)))]
+pub(crate) const DOUBLE_LITERAL_MIN_INPUT: usize = 16 * 1024;
+#[cfg(any(test, fuzzing))]
+pub(crate) const DOUBLE_LITERAL_MIN_INPUT: usize = 0;
+
+/// Whether a table built with `remaining` compressed bytes left should get
+/// double-literal entries.
+#[inline]
+#[allow(clippy::absurd_extreme_comparisons)] // the threshold is 0 under test/fuzzing
+pub(crate) fn wants_double_literals(remaining: usize) -> bool {
+    remaining >= DOUBLE_LITERAL_MIN_INPUT
+}
+
+/// Turn primary litlen entries whose codeword is followed, within
+/// `table_bits`, by a second literal's whole codeword into double-literal
+/// entries (see [`HUFFDEC_DOUBLE_LITERAL`]).
+///
+/// Filtered PNG rows are mostly literals, so this halves the table lookups
+/// there (the trick image-rs's fdeflate uses). Entries are visited from the
+/// top down: `i >> len1 < i` for every `i > 0`, so the entry read for the
+/// second literal is still its single-literal form.
+pub(crate) fn add_double_literals(table: &mut [u32], table_bits: u32) {
+    let size = 1usize << table_bits;
+    for i in (0..size).rev() {
+        let e1 = table[i];
+        if e1 & HUFFDEC_LITERAL == 0 {
+            continue;
+        }
+        let len1 = e1 & 0xFF;
+        if len1 >= table_bits {
+            continue;
+        }
+        let e2 = table[i >> len1];
+        if e2 & (HUFFDEC_LITERAL | HUFFDEC_DOUBLE_LITERAL) != HUFFDEC_LITERAL {
+            continue;
+        }
+        let len2 = e2 & 0xFF;
+        if len1 + len2 > table_bits {
+            continue;
+        }
+        table[i] = HUFFDEC_LITERAL
+            | HUFFDEC_DOUBLE_LITERAL
+            | (e1 & 0x00FF_0000)
+            | ((e2 >> 8) & 0xFF00)
+            | (len1 + len2);
+    }
+}
+
+/// Fastloop match copy in fixed-size chunks (each compiles to vector loads and
+/// stores, no `memmove` call), as image-rs's fdeflate does with 16-byte
+/// chunks. Requires `out_pos + length + 31 <= output.len()` (the fastloop
+/// margin).
+///
+/// - offset >= 32: 32-byte chunks; they don't overlap their source. (Measured
+///   faster than 16-byte chunks on Core Ultra 7 265K, Ryzen 7950X and
+///   Neoverse-N1, `examples/png_inflate.rs`.)
+/// - offset 16..=31: 16-byte chunks; they don't overlap their source.
+/// - offset 1: a run; 16-byte splats of the byte.
+/// - offset 2..=15: 16-byte copies stepping by `offset`: each chunk's first
+///   `offset` bytes come from output that is already final, and the rest are
+///   overwritten by the next chunk.
 #[inline(always)]
 pub(crate) fn fastloop_match_copy(
     output: &mut [u8],
@@ -592,24 +765,42 @@ pub(crate) fn fastloop_match_copy(
     length: usize,
     offset: usize,
 ) {
-    let end = out_pos + length;
-    if offset >= length {
-        // Non-overlapping: memcpy via copy_within (SIMD-optimized in libc)
-        output.copy_within(src_start..src_start + length, out_pos);
+    if offset >= 32 {
+        let mut i = 0;
+        loop {
+            output.copy_within(src_start + i..src_start + i + 32, out_pos + i);
+            i += 32;
+            if i >= length {
+                break;
+            }
+        }
+    } else if offset >= 16 {
+        let mut i = 0;
+        loop {
+            output.copy_within(src_start + i..src_start + i + 16, out_pos + i);
+            i += 16;
+            if i >= length {
+                break;
+            }
+        }
     } else if offset == 1 {
-        // RLE: fill with repeated byte (memset, SIMD-optimized in libc)
-        let byte = load_byte(output, src_start);
-        output[out_pos..end].fill(byte);
-    } else if offset < 8 {
-        // Small offset (2-7): byte-by-byte to handle overlap correctly.
-        for i in 0..length {
-            output[out_pos + i] = output[src_start + i];
+        let splat = [output[src_start]; 16];
+        let mut i = 0;
+        loop {
+            output[out_pos + i..out_pos + i + 16].copy_from_slice(&splat);
+            i += 16;
+            if i >= length {
+                break;
+            }
         }
     } else {
-        // Overlapping with offset >= 8: copy first `offset` bytes, then forward
-        output.copy_within(src_start..src_start + offset, out_pos);
-        for i in offset..length {
-            output[out_pos + i] = output[src_start + i];
+        let mut i = 0;
+        loop {
+            output.copy_within(src_start + i..src_start + i + 16, out_pos + i);
+            i += offset;
+            if i >= length {
+                break;
+            }
         }
     }
 }
@@ -807,6 +998,33 @@ impl Decompressor {
         output: &mut [u8],
         stop: &impl enough::Stop,
     ) -> Result<(usize, usize), DecompressionError> {
+        // x86-64-v4 (AVX-512) build of this loop for inputs of 16 KiB and up.
+        // Time vs fdeflate on zenpng's 106 PNG streams, Ryzen 9 9950X3D (Zen
+        // 5): 1.007 -> 0.976 (256 px and up: 1.00 -> 0.96), Silesia +
+        // Canterbury 0.901 -> 0.880. Ungated, 64 px images (under 8 KB of
+        // input) were 3.6% slower. The 7950X (Zen 4) gained 1-2%.
+        #[cfg(all(feature = "avx512", target_arch = "x86_64"))]
+        {
+            use archmage::SimdToken;
+            if input.len() >= ONESHOT_V4_MIN_INPUT
+                && let Some(token) = archmage::X64V4Token::summon()
+            {
+                return oneshot_v4::core_v4(token, self, input, output, stop);
+            }
+        }
+        self.deflate_decompress_core_impl(input, output, stop)
+    }
+
+    #[inline(always)]
+    fn deflate_decompress_core_impl(
+        &mut self,
+        input: &[u8],
+        output: &mut [u8],
+        stop: &impl enough::Stop,
+    ) -> Result<(usize, usize), DecompressionError> {
+        // No x86-64-v3 build of this loop (unlike the streaming decoder):
+        // measured 1.8-2.5% slower on Core Ultra 7 265K, while streaming
+        // gained 3.5%. v4 is above.
         let mut in_pos: usize = 0;
         let mut out_pos: usize = 0;
         let mut bitbuf: u64 = 0;
@@ -978,6 +1196,10 @@ impl Decompressor {
                 ) {
                     return Err(bad);
                 }
+                self.litlen_doubles = wants_double_literals(input.len() - in_pos);
+                if self.litlen_doubles {
+                    add_double_literals(&mut self.litlen_decode_table, self.litlen_tablebits);
+                }
             } else if block_type == DEFLATE_BLOCKTYPE_UNCOMPRESSED {
                 // --- Uncompressed block ---
                 bitsleft -= 3;
@@ -1026,47 +1248,12 @@ impl Decompressor {
                 if !self.static_codes_loaded {
                     self.static_codes_loaded = true;
 
-                    // Fixed literal/length code lengths (RFC 1951 section 3.2.6)
-                    for i in 0..144 {
-                        self.lens[i] = 8;
-                    }
-                    for i in 144..256 {
-                        self.lens[i] = 9;
-                    }
-                    for i in 256..280 {
-                        self.lens[i] = 7;
-                    }
-                    for i in 280..288 {
-                        self.lens[i] = 8;
-                    }
-                    // Fixed offset code: all 5 bits
-                    for i in 288..320 {
-                        self.lens[i] = 5;
-                    }
-
-                    if !build_decode_table(
-                        &mut self.offset_decode_table,
-                        &self.lens[288..],
-                        32,
-                        &OFFSET_DECODE_RESULTS,
-                        OFFSET_TABLEBITS,
-                        15,
-                        &mut self.sorted_syms,
-                        None,
-                    ) {
+                    if !self.load_static_tables() {
                         return Err(bad);
                     }
-                    if !build_decode_table(
-                        &mut self.litlen_decode_table,
-                        &self.lens,
-                        288,
-                        &LITLEN_DECODE_RESULTS,
-                        LITLEN_TABLEBITS,
-                        15,
-                        &mut self.sorted_syms,
-                        Some(&mut self.litlen_tablebits),
-                    ) {
-                        return Err(bad);
+                    self.litlen_doubles = wants_double_literals(input.len() - in_pos);
+                    if self.litlen_doubles {
+                        add_double_literals(&mut self.litlen_decode_table, self.litlen_tablebits);
                     }
                 }
             } else {
@@ -1075,6 +1262,7 @@ impl Decompressor {
 
             // --- Fastloop + generic decode loop (literals and matches) ---
             let litlen_tablemask = bitmask(self.litlen_tablebits);
+            let doubles = self.litlen_doubles;
             let in_fastloop_end = input.len().saturating_sub(FASTLOOP_MAX_BYTES_READ);
             let out_fastloop_end = out_limit.saturating_sub(FASTLOOP_MAX_BYTES_WRITTEN);
 
@@ -1094,32 +1282,29 @@ impl Decompressor {
                     bitbuf >>= (entry & 0xFF) as u64;
                     bitsleft -= entry & 0xFF;
 
-                    // --- Fast literal path: decode up to 3 literals ---
+                    // --- Fast literal path: up to 3 entries of 1-2 literals ---
                     if entry & HUFFDEC_LITERAL != 0 {
-                        // 1st literal (the primary item)
-                        let lit = (entry >> 16) as u8;
+                        // 1st entry (the primary item)
+                        let lits = entry;
                         entry = table_lookup(&self.litlen_decode_table, bitbuf & litlen_tablemask);
                         saved_bitbuf = bitbuf;
                         bitbuf >>= (entry & 0xFF) as u64;
                         bitsleft -= entry & 0xFF;
-                        store_lit(output, out_pos, lit);
-                        out_pos += 1;
+                        out_pos += put_lits(output, out_pos, lits, doubles);
 
                         if entry & HUFFDEC_LITERAL != 0 {
-                            // 2nd literal (extra)
-                            let lit = (entry >> 16) as u8;
+                            // 2nd entry
+                            let lits = entry;
                             entry =
                                 table_lookup(&self.litlen_decode_table, bitbuf & litlen_tablemask);
                             saved_bitbuf = bitbuf;
                             bitbuf >>= (entry & 0xFF) as u64;
                             bitsleft -= entry & 0xFF;
-                            store_lit(output, out_pos, lit);
-                            out_pos += 1;
+                            out_pos += put_lits(output, out_pos, lits, doubles);
 
                             if entry & HUFFDEC_LITERAL != 0 {
-                                // 3rd literal (replaces primary for next iter)
-                                store_lit(output, out_pos, (entry >> 16) as u8);
-                                out_pos += 1;
+                                // 3rd entry (replaces primary for next iter)
+                                out_pos += put_lits(output, out_pos, entry, doubles);
                                 entry = table_lookup(
                                     &self.litlen_decode_table,
                                     bitbuf & litlen_tablemask,
@@ -1150,8 +1335,8 @@ impl Decompressor {
                         bitsleft -= entry & 0xFF;
 
                         if entry & HUFFDEC_LITERAL != 0 {
-                            // Literal from subtable
-                            store_lit(output, out_pos, (entry >> 16) as u8);
+                            // Literal from subtable (never a double)
+                            output[out_pos] = (entry >> 16) as u8;
                             out_pos += 1;
                             entry =
                                 table_lookup(&self.litlen_decode_table, bitbuf & litlen_tablemask);
@@ -1251,8 +1436,11 @@ impl Decompressor {
                     bitbuf >>= (entry & 0xFF) as u64;
                     bitsleft -= entry & 0xFF;
 
-                    // Resolve subtable if needed
-                    if entry & HUFFDEC_SUBTABLE_POINTER != 0 {
+                    // Resolve subtable if needed (a double literal's second
+                    // byte overlaps the flag bits, so rule out literals first)
+                    if entry & (HUFFDEC_LITERAL | HUFFDEC_SUBTABLE_POINTER)
+                        == HUFFDEC_SUBTABLE_POINTER
+                    {
                         entry = table_lookup(
                             &self.litlen_decode_table,
                             (entry >> 16) as u64 + extract_varbits(bitbuf, (entry >> 8) & 0x3F),
@@ -1264,13 +1452,20 @@ impl Decompressor {
 
                     let value = entry >> 16;
 
-                    // Literal?
+                    // Literal (one, or two for a double entry)?
                     if entry & HUFFDEC_LITERAL != 0 {
                         if out_pos >= out_limit {
                             return Err(no_space);
                         }
                         output[out_pos] = value as u8;
                         out_pos += 1;
+                        if entry & HUFFDEC_DOUBLE_LITERAL != 0 {
+                            if out_pos >= out_limit {
+                                return Err(no_space);
+                            }
+                            output[out_pos] = (entry >> 8) as u8;
+                            out_pos += 1;
+                        }
                         continue;
                     }
 
@@ -1362,6 +1557,21 @@ impl Decompressor {
 #[cfg(all(test, not(miri), not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
+
+    /// The process-wide fixed-Huffman tables (std) equal freshly built ones,
+    /// and a second load (served from the cache) does too.
+    #[test]
+    fn static_tables_cache_matches_build() {
+        let mut built = Decompressor::new();
+        assert!(built.build_static_tables());
+        for _ in 0..2 {
+            let mut loaded = Decompressor::new();
+            assert!(loaded.load_static_tables());
+            assert_eq!(loaded.litlen_decode_table, built.litlen_decode_table);
+            assert_eq!(loaded.offset_decode_table, built.offset_decode_table);
+            assert_eq!(loaded.litlen_tablebits, built.litlen_tablebits);
+        }
+    }
 
     #[test]
     fn test_decompress_empty_static() {
@@ -2082,6 +2292,65 @@ mod tests {
     // =====================================================================
     // input_consumed correctness tests (libdeflate #420, miniz_oxide #158)
     // =====================================================================
+
+    /// One-shot decode under every SIMD tier the CPU has, which covers the
+    /// x86-64-v4 build on AVX-512 machines and the default build without it.
+    /// Inputs straddle `ONESHOT_V4_MIN_INPUT`; output buffers are exact and
+    /// have slack (the fastloop ends differently in each).
+    #[test]
+    #[cfg(feature = "simd")]
+    fn oneshot_all_dispatch_tiers() {
+        use archmage::testing::{CompileTimePolicy, for_each_token_permutation};
+
+        let mut x = 0x1234_5678u32;
+        let mut make = |len: usize| -> Vec<u8> {
+            (0..len)
+                .map(|i| {
+                    x ^= x << 13;
+                    x ^= x >> 17;
+                    x ^= x << 5;
+                    match (i / 4096) % 3 {
+                        0 => (i % 251) as u8,
+                        1 => (i / 64) as u8,
+                        _ => x as u8,
+                    }
+                })
+                .collect()
+        };
+        let cases: Vec<(Vec<u8>, Vec<u8>)> = [1_000usize, 20_000, 40_000, 300_000]
+            .into_iter()
+            .map(|len| {
+                let data = make(len);
+                let mut c =
+                    libdeflater::Compressor::new(libdeflater::CompressionLvl::new(6).unwrap());
+                let mut z = vec![0u8; c.zlib_compress_bound(data.len())];
+                let n = c.zlib_compress(&data, &mut z).unwrap();
+                z.truncate(n);
+                (data, z)
+            })
+            .collect();
+        // Both sides of the v4 threshold are exercised.
+        assert!(cases.iter().any(|(_, z)| z.len() < 16 * 1024));
+        assert!(cases.iter().any(|(_, z)| z.len() >= 16 * 1024));
+
+        let report = for_each_token_permutation(CompileTimePolicy::Warn, |perm| {
+            for (data, z) in &cases {
+                for slack in [0usize, 1000] {
+                    let mut out = vec![0u8; data.len() + slack];
+                    let r = Decompressor::new()
+                        .zlib_decompress(z, &mut out, enough::Unstoppable)
+                        .unwrap();
+                    assert_eq!(r.output_written, data.len(), "tier: {perm}");
+                    assert!(
+                        out[..data.len()] == data[..],
+                        "len {}, slack {slack}, tier: {perm}",
+                        data.len()
+                    );
+                }
+            }
+        });
+        eprintln!("one-shot permutation test: {report}");
+    }
 }
 
 /// Tests that round-trip through the crate's own `Compressor` (the tests
@@ -2705,5 +2974,28 @@ mod compress_roundtrip_tests {
             .deflate_decompress(&compressed[..csize], &mut output, enough::Unstoppable)
             .unwrap();
         assert_eq!(result.output_written, 100);
+    }
+}
+
+/// Compressed input below which the one-shot decoder skips its x86-64-v4
+/// build (see `deflate_decompress_core`).
+#[cfg(all(feature = "avx512", target_arch = "x86_64"))]
+const ONESHOT_V4_MIN_INPUT: usize = 16 * 1024;
+
+/// x86-64-v4 build of the one-shot decode loop.
+#[cfg(all(feature = "avx512", target_arch = "x86_64"))]
+mod oneshot_v4 {
+    use super::*;
+    use archmage::prelude::*;
+
+    #[arcane]
+    pub(super) fn core_v4(
+        _token: X64V4Token,
+        d: &mut Decompressor,
+        input: &[u8],
+        output: &mut [u8],
+        stop: &impl enough::Stop,
+    ) -> Result<(usize, usize), DecompressionError> {
+        d.deflate_decompress_core_impl(input, output, stop)
     }
 }

@@ -118,3 +118,70 @@ impl BlockSplitStats {
         false
     }
 }
+
+/// End of the block starting at `begin`, chosen from the input bytes alone
+/// (each byte is one observation: a repeat of the previous byte counts as a
+/// short match, any other byte as that literal), using the same distribution
+/// test as the parse-driven splitter. Parse-independent, so every parser that
+/// uses it splits the input identically. Never past `begin + max_len` (or
+/// `end`); never leaves a tail shorter than [`MIN_BLOCK_LENGTH`].
+/// Literal observation category of each byte value (top 2 bits and low bit).
+const LITERAL_CATEGORY: [u8; 256] = {
+    let mut t = [0u8; 256];
+    let mut b = 0;
+    while b < 256 {
+        t[b] = (((b >> 5) & 0x6) | (b & 1)) as u8;
+        b += 1;
+    }
+    t
+};
+
+pub(crate) fn input_block_end(input: &[u8], begin: usize, end: usize, max_len: usize) -> usize {
+    let max_end = if end - begin <= max_len + MIN_BLOCK_LENGTH {
+        end
+    } else {
+        begin + max_len
+    };
+    // Observe the input the way a runs-only parse would see it: a run of 5+
+    // equal bytes is a literal plus one match observation, any other byte a
+    // literal. That tokenization depends only on the input, so every parser
+    // splits alike. Counts accumulate locally and go into `stats` every 512
+    // observations, when the end-of-block test runs.
+    let data = &input[begin..max_end];
+    let mut stats = BlockSplitStats::new();
+    let mut hist = [0u32; NUM_OBSERVATION_TYPES];
+    let mut n = 0u32;
+    let mut i = 0;
+    while i < data.len() {
+        let b = data[i];
+        hist[LITERAL_CATEGORY[b as usize] as usize] += 1;
+        n += 1;
+        let run = match data.get(i + 1..i + 5) {
+            Some(&[b1, b2, b3, b4]) => b1 == b && b2 == b && b3 == b && b4 == b,
+            _ => false,
+        };
+        if run {
+            let mut r = 5;
+            while r < 258 && i + r < data.len() && data[i + r] == b {
+                r += 1;
+            }
+            hist[NUM_LITERAL_OBSERVATION_TYPES + (r > 9) as usize] += 1; // match length r - 1 >= 9
+            n += 1;
+            i += r;
+        } else {
+            i += 1;
+        }
+        if n >= NUM_OBSERVATIONS_PER_BLOCK_CHECK {
+            for (o, h) in stats.new_observations.iter_mut().zip(&mut hist) {
+                *o += *h;
+                *h = 0;
+            }
+            stats.num_new_observations += n;
+            n = 0;
+            if stats.should_end_block(begin, begin + i, end) {
+                return begin + i;
+            }
+        }
+    }
+    max_end
+}

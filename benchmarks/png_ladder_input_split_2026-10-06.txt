@@ -1,0 +1,24 @@
+# png(9..19) sizes and neighbour-rung inversions with input-derived block boundaries for png(10..=18), 2026-10-06
+# Host: i265 (sizes only; machine-independent), zenflate png-mode daf2380. 86 PNGs (zenpng vs_png inputs minus 2560 px), each IDAT inflated to its stored filtered bytes.
+# Command: png_ladder_pareto ~/tmp/nolarge --rounds 1 --arms zen_png9..zen_png19 --tsv split_b3.tsv
+# Timing vs parse-driven splitting (Neoverse-N1, arm-big core 3, 2 runs): png(10) +14%, png(12) +9%, png(14) +5%, png(16..=18) +4%.
+
+png9 29547825  png10 29147033  png11 28876318  png12 28552739  png13 28440837  png14 28374472  png15 28292902  png16 28226652  png17 28188170  png18 28154462  png19 27043591  (bytes, total)
+
+zen_png10 vs adaptive total +0.126%
+zen_png14 vs adaptive total +0.108%
+zen_png18 vs adaptive total +0.116%
+png10 > png9: 26/86 max 2.434% 6007_rgb8_64
+png11 > png10: 5/86 max 0.639% 5207_rgb16_1024
+png12 > png11: 2/86 max 0.101% 8007_rgb8_64
+png13 > png12: 1/86 max 0.606% 5207_rgb16_1024
+png14 > png13: 2/86 max 0.055% 2007_rgb8_64
+png15 > png14: 11/86 max 0.019% 8007_rgb8_1024
+png16 > png15: 6/86 max 0.067% 6007_rgb8_64
+png17 > png16: 9/86 max 0.052% 9007_rgb8_64
+png18 > png17: 9/86 max 0.029% 5007_rgb8_64
+png19 > png18: 6/86 max 1.120% 8107_gray8_1024
+png12 > png10: 2/86 max 0.507% 8007_rgb8_64
+png14 > png12: 1/86 max 0.019% 6807_rgb8_64
+png16 > png14: 7/86 max 0.043% 8107_rgb8_64
+png18 > png16: 6/86 max 0.039% 5207_rgb8_1024

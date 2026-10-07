@@ -1,0 +1,85 @@
+# png_ladder_pareto on identical PNG filtered bytes, 2026-10-06
+# Host: arm-big (Hetzner CAX31, Neoverse-N1), taskset -c 3, nice 19; zenflate 4c00fbce8b2c (png-mode + decode work).
+# Command: png_ladder_pareto ~/tmp/zfab-in-nolarge --rounds 3 --tsv ladder_arm.tsv
+# Inputs: zenpng scripts/vs_png_inputs.sh output minus the 2560 px files (86 PNGs: 64/256/1024 px,
+#   RGB8 + RGBA8/gray8/pal8/RGB16/Adam7 at 1024); each PNG's IDAT inflated to its stored filtered bytes.
+# Sizes are machine-independent; times are medians of 3 with a reused compressor where the API allows.
+# Late arms overlapped a 3-core fuzz run on cores 5-7 of the same box (all arms of an image are interleaved).
+# Per-image TSV (290 KB): lilith.lan:/mnt/v/output/zenflate/png-ladder-pareto-2026-10-06/ladder_arm_neoverse-n1.tsv sha256 beb445efe9157f2abea39a63c8cada151f1a5496a7a700395e73fa0e59569bd8
+
+86 images, 111.4 MB filtered
+arm                     bytes     ratio   ms total      MB/s  front
+zen_png1             36207520    3.0777      102.6      1086  *
+fdeflate_ultra       39306166    2.8351      161.8       689  
+zen_png2             33168424    3.3597      243.6       457  *
+zen_png3             31186670    3.5732      542.2       206  *
+zen_e2               31536589    3.5335      553.9       201  
+zen_e4               31536589    3.5335      554.5       201  
+zen_e3               31536589    3.5335      555.3       201  
+zen_e1               31536589    3.5335      555.9       200  
+zlibrs_1             43021962    2.5902      560.4       199  
+libdeflate_1         30862262    3.6107      573.4       194  *
+zen_e8               31179467    3.5740      658.0       169  
+zen_e5               31189009    3.5729      658.9       169  
+zen_e6               31185108    3.5733      659.2       169  
+zen_e9               31177922    3.5742      659.9       169  
+zen_e7               31182635    3.5736      660.0       169  
+miniz_1              34839642    3.1985      683.5       163  
+zen_png4             30520272    3.6512      685.2       163  *
+zen_png5             30311470    3.6763      794.1       140  *
+zen_png6             30085945    3.7039      915.9       122  *
+zlibrs_2             31111070    3.5818      925.2       120  
+libdeflate_2         30135388    3.6978      950.1       117  
+zen_png7             29900094    3.7269      989.2       113  *
+libdeflate_3         29820701    3.7368     1071.4       104  *
+zen_png8             29718967    3.7496     1092.4       102  *
+zlibrs_3             30110462    3.7009     1118.1       100  
+miniz_2              31231477    3.5680     1131.0        99  
+libdeflate_4         29645669    3.7589     1161.9        96  *
+zen_e10              29916531    3.7249     1198.1        93  
+zen_png9             29547825    3.7713     1212.8        92  *
+zen_e11              29672403    3.7555     1352.8        82  
+libdeflate_5         29323623    3.8002     1363.1        82  *
+zlibrs_4             29497077    3.7778     1381.8        81  
+zen_png10            29404460    3.7897     1424.5        78  
+zen_e12              29422716    3.7874     1572.1        71  
+zlibrs_5             29243461    3.8106     1608.0        69  *
+zen_png11            29244672    3.8104     1707.3        65  
+libdeflate_6         29031035    3.8385     1757.0        63  *
+zen_png12            29189610    3.8176     1851.4        60  
+zen_e13              29173670    3.8197     1871.5        60  
+miniz_3              29826459    3.7361     1886.9        59  
+miniz_4              29989549    3.7158     2135.9        52  
+zen_e14              28999439    3.8427     2168.2        51  *
+zlibrs_6             28845127    3.8632     2319.2        48  *
+zen_e15              28841818    3.8637     2480.5        45  *
+libdeflate_7         28691566    3.8839     2691.4        41  *
+zen_e16              28761771    3.8744     2736.6        41  
+miniz_5              29579813    3.7673     2775.4        40  
+zen_e17              28691523    3.8839     3002.8        37  *
+zlibrs_7             28600338    3.8963     3684.8        30  *
+libdeflate_8         28460545    3.9154     5279.9        21  *
+miniz_6              28953307    3.8488     5439.9        20  
+zen_e18              28488118    3.9116     5563.0        20  
+zen_e20              28426615    3.9201     6609.2        17  *
+libdeflate_9         28371321    3.9277     7612.6        15  *
+miniz_7              28725594    3.8793     7826.1        14  
+zlibrs_8             28328581    3.9337     8198.3        14  *
+zen_e22              28371321    3.9277     8289.9        13  
+miniz_8              28574580    3.8998    11397.4        10  
+zlibrs_9             28046333    3.9733    11820.0         9  *
+miniz_9              28496171    3.9105    14195.6         8  
+libdeflate_10        27045984    4.1202    15512.0         7  *
+zen_e24              26996928    4.1277    22992.5         5  *
+libdeflate_11        26924564    4.1388    28183.7         4  *
+zen_e26              26910349    4.1410    38586.7         3  *
+libdeflate_12        26889565    4.1442    46061.6         2  *
+zen_e30              26877351    4.1461    67023.1         2  *
+
+# Per-image inversions (larger output at the higher rung), from the TSV:
+#   e18 > e17: 23/86 (max 0.98%, 5207_rgb16_1024)   e20 > e17: 18/86 (max 0.71%)
+#   e22 > e17: 10/86 (max 0.62%)                     e22 > e20: 4/86 (max 0.09%)
+#   e13 > png12: 41/86 (max 8.55%, 5207_rgb16_1024)  e10 > png9: 54/86 (max 13.15%)
+#   e14 > e13: 7/86 (max 0.27%)   png4 > png3: 21/86 (max 3.36%)   png3 > png2: 0/86
+#   png2 > png1: 4/86 (max 0.87%)  e24 > e22: 0/86
+# new(1..=4) produce identical sizes, as do new(5..=9); all are dominated by png() levels here.
