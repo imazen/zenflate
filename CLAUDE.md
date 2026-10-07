@@ -326,6 +326,9 @@ two-thread decode pipeline is bounded by inflate, so this is zenpng's lever.
   length >= 64 non-overlapping, and period-doubling for small offsets - both
   slower overall and neither fixed `nci` one-shot on Neoverse-N1 (+7% vs
   before the chunked copy, cause unknown; its streaming decode got faster).
+  Resolved by the 32-byte chunks below: arm-big, current harness on both
+  builds, 3 interleaved runs, 9 rounds: one-shot 22.71 ms (091bb93, pre-chunk)
+  vs 22.75 ms (tip), streaming 22.24 vs 20.04 ms.
 - **32-byte chunks for offset >= 32** (2026-10-07), margin +32. Time vs 16-byte
   chunks, ratio to fdeflate, mean of 2 runs: i265 PNG one-shot 0.973 -> 0.962,
   streaming 0.998 -> 0.978, Silesia/Canterbury streaming 0.895 -> 0.866
