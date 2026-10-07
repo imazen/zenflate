@@ -394,6 +394,9 @@ impl<S> StreamDecompressor<S> {
     }
 }
 
+/// Staged input below which the decode loop refills from the source.
+const REFILL_BELOW: usize = 4096;
+
 impl<S: InputSource> StreamDecompressor<S> {
     fn new(source: S, capacity: usize, wrapper: WrapperFormat) -> Self {
         assert!(capacity > 0, "capacity must be at least 1");
@@ -1271,8 +1274,13 @@ impl<S: InputSource> StreamDecompressor<S> {
         // initial 512-byte staging buffer fill), leaving all subsequent
         // decompression to the slower generic loop.
         'refill: loop {
-            // Refill staging buffer from source
-            self.fill_input().map_err(StreamError::Source)?;
+            // Refill the staging buffer only when it runs low: fill_input
+            // compacts (moves the unread tail to the front), and this loop is
+            // re-entered every time the output buffer fills, so refilling
+            // unconditionally moved up to 32 KiB of staged input per entry.
+            if self.input_len - self.input_pos < REFILL_BELOW {
+                self.fill_input().map_err(StreamError::Source)?;
+            }
             if self.doubles_pending && wants_double_literals(self.input_len - self.input_pos) {
                 // Same decodes, fewer lookups: safe to switch mid-block.
                 add_double_literals(
