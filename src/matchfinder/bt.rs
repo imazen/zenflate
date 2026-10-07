@@ -41,10 +41,20 @@ pub(crate) const BT_MATCHFINDER_REQUIRED_NBYTES: u32 = 5;
 /// Window mask for child table indexing.
 const WINDOW_MASK: usize = MATCHFINDER_WINDOW_SIZE as usize - 1;
 
-// Always use Vec. The `unchecked` feature controls access patterns, not storage.
-type BtHash3Tab = Vec<i16>;
-type BtHash4Tab = Vec<i16>;
-type BtChildTab = Vec<i16>;
+// Fixed-size boxed arrays: with masked indices the lookups need no bounds
+// checks. The `unchecked` feature controls access patterns, not storage.
+type BtHash3Tab = Box<[i16; BT_HASH3_SIZE * BT_MATCHFINDER_HASH3_WAYS]>;
+type BtHash4Tab = Box<[i16; BT_HASH4_SIZE]>;
+type BtChildTab = Box<[i16; 2 * MATCHFINDER_WINDOW_SIZE as usize]>;
+
+/// A boxed array of `N` entries, all `MATCHFINDER_INITVAL`, built on the heap.
+fn boxed_table<const N: usize>() -> Box<[i16; N]> {
+    let v: Box<[i16]> = alloc::vec![MATCHFINDER_INITVAL; N].into_boxed_slice();
+    match v.try_into() {
+        Ok(b) => b,
+        Err(_) => unreachable!("length is N"),
+    }
+}
 
 /// A match found by the bt_matchfinder.
 #[derive(Clone, Copy, Default)]
@@ -75,25 +85,25 @@ pub(crate) struct BtMatchfinder {
 impl BtMatchfinder {
     pub fn new() -> Self {
         Self {
-            hash3_tab: alloc::vec![MATCHFINDER_INITVAL; BT_HASH3_SIZE * BT_MATCHFINDER_HASH3_WAYS],
-            hash4_tab: alloc::vec![MATCHFINDER_INITVAL; BT_HASH4_SIZE],
-            child_tab: alloc::vec![MATCHFINDER_INITVAL; 2 * MATCHFINDER_WINDOW_SIZE as usize],
+            hash3_tab: boxed_table(),
+            hash4_tab: boxed_table(),
+            child_tab: boxed_table(),
         }
     }
 
     /// Initialize (reset) the matchfinder for a new input buffer.
     /// Only hash tables are reset; child_tab entries are written before read.
     pub fn init(&mut self) {
-        matchfinder_init(&mut self.hash3_tab);
-        matchfinder_init(&mut self.hash4_tab);
+        matchfinder_init(&mut self.hash3_tab[..]);
+        matchfinder_init(&mut self.hash4_tab[..]);
     }
 
     /// Slide the window by MATCHFINDER_WINDOW_SIZE.
     /// Rebases all tables including child_tab.
     pub fn slide_window(&mut self) {
-        matchfinder_rebase(&mut self.hash3_tab);
-        matchfinder_rebase(&mut self.hash4_tab);
-        matchfinder_rebase(&mut self.child_tab);
+        matchfinder_rebase(&mut self.hash3_tab[..]);
+        matchfinder_rebase(&mut self.hash4_tab[..]);
+        matchfinder_rebase(&mut self.child_tab[..]);
     }
 
     #[inline(always)]
@@ -196,12 +206,16 @@ impl BtMatchfinder {
 
         // Precompute next position's hashes
         let next_hashseq = load_u32_le(input, in_next + 1);
-        let hash3 = next_hashes[0] as usize;
-        let hash4 = next_hashes[1] as usize;
+        // Masked so the table lookups need no bounds checks.
+        let hash3 = next_hashes[0] as usize & (BT_HASH3_SIZE - 1);
+        let hash4 = next_hashes[1] as usize & (BT_HASH4_SIZE - 1);
         next_hashes[0] = lz_hash(next_hashseq & 0xFFFFFF, BT_MATCHFINDER_HASH3_ORDER);
         next_hashes[1] = lz_hash(next_hashseq, BT_MATCHFINDER_HASH4_ORDER);
-        prefetch(&self.hash3_tab[next_hashes[0] as usize * BT_MATCHFINDER_HASH3_WAYS]);
-        prefetch(&self.hash4_tab[next_hashes[1] as usize]);
+        prefetch(
+            &self.hash3_tab
+                [(next_hashes[0] as usize & (BT_HASH3_SIZE - 1)) * BT_MATCHFINDER_HASH3_WAYS],
+        );
+        prefetch(&self.hash4_tab[next_hashes[1] as usize & (BT_HASH4_SIZE - 1)]);
 
         // Hash3: 2-way check for length 3 matches
         let h3 = hash3 * BT_MATCHFINDER_HASH3_WAYS;
@@ -323,13 +337,17 @@ impl BtMatchfinder {
             }
         }
 
+        // Candidates lie before in_next, so each has max_len bytes after it;
+        // one bounds check per candidate instead of one per byte compared.
+        #[cfg(not(feature = "unchecked"))]
+        let cur = &input[in_next..in_next + max_len as usize];
         #[cfg(not(feature = "unchecked"))]
         loop {
             let match_pos = (in_base_offset as isize + cur_node as isize) as usize;
+            let cand = &input[match_pos..match_pos + max_len as usize];
 
-            if get_byte(input, match_pos + len as usize) == get_byte(input, in_next + len as usize)
-            {
-                len = lz_extend(&input[in_next..], &input[match_pos..], len + 1, max_len);
+            if get_byte(cand, len as usize) == get_byte(cur, len as usize) {
+                len = lz_extend(cur, cand, len + 1, max_len);
                 if !RECORD_MATCHES || len > best_len {
                     if RECORD_MATCHES {
                         best_len = len;
@@ -349,7 +367,7 @@ impl BtMatchfinder {
                 }
             }
 
-            if get_byte(input, match_pos + len as usize) < get_byte(input, in_next + len as usize) {
+            if get_byte(cand, len as usize) < get_byte(cur, len as usize) {
                 self.child_tab[pending_lt_idx] = cur_node as i16;
                 pending_lt_idx = Self::right_child_idx(cur_node);
                 cur_node = self.child_tab[pending_lt_idx] as i32;
