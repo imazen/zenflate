@@ -1,0 +1,39 @@
+# hc matchfinder: masked hash indices + one bounds check per candidate, 2026-10-07
+# arm-big Neoverse-N1 core 3, 86 PNG streams, png_ladder_pareto --rounds 3, 2 interleaved runs; main = 1817ce8d
+# Output byte-identical (sizes equal; libdeflate(n) parity tests pass).
+== main 1
+libdeflate_5         29323623    3.8002     1323.1        84  *
+zen_e12              29422716    3.7874     1679.6        66  
+libdeflate_6         29031035    3.8385     1716.6        65  *
+zen_png10            29147033    3.8232     2025.5        55  
+zen_e15              28841818    3.8637     2593.4        43  *
+zen_png12            28552739    3.9028     3387.0        33  *
+zen_png16            28226652    3.9479     6420.0        17  *
+== hc 1
+libdeflate_5         29323623    3.8002     1328.6        84  *
+zen_e12              29422716    3.7874     1515.9        74  
+zen_ld5              29323623    3.8002     1559.1        71  
+libdeflate_6         29031035    3.8385     1722.4        65  *
+zen_png10            29147033    3.8232     1860.4        60  
+zen_ld6              29031035    3.8385     1967.1        57  
+zen_e15              28841818    3.8637     2432.6        46  *
+zen_png12            28552739    3.9028     3230.0        35  *
+zen_png16            28226652    3.9479     6246.6        18  *
+== main 2
+libdeflate_5         29323623    3.8002     1331.5        84  *
+zen_e12              29422716    3.7874     1659.7        67  
+libdeflate_6         29031035    3.8385     1719.8        65  *
+zen_png10            29147033    3.8232     2024.9        55  
+zen_e15              28841818    3.8637     2569.6        43  *
+zen_png12            28552739    3.9028     3371.6        33  *
+zen_png16            28226652    3.9479     6417.6        17  *
+== hc 2
+libdeflate_5         29323623    3.8002     1333.1        84  *
+zen_e12              29422716    3.7874     1514.9        74  
+zen_ld5              29323623    3.8002     1564.0        71  
+libdeflate_6         29031035    3.8385     1720.7        65  *
+zen_png10            29147033    3.8232     1869.5        60  
+zen_ld6              29031035    3.8385     1977.3        56  
+zen_e15              28841818    3.8637     2429.5        46  *
+zen_png12            28552739    3.9028     3232.1        34  *
+zen_png16            28226652    3.9479     6244.6        18  *

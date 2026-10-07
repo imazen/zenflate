@@ -71,6 +71,14 @@ fn arms() -> Vec<Arm> {
             kind: Kind::Zen(CompressionLevel::new(e)),
         });
     }
+    // zenflate's byte-identical port of libdeflate: separates port overhead
+    // from png()'s additions when compared with libdeflate_N.
+    for l in 1..=12u32 {
+        v.push(Arm {
+            name: format!("zen_ld{l}"),
+            kind: Kind::Zen(CompressionLevel::libdeflate(l)),
+        });
+    }
     for l in 1..=9 {
         v.push(Arm {
             name: format!("miniz_{l}"),

@@ -96,8 +96,9 @@ impl HcMatchfinder {
         let in_base = *in_base_offset;
         let cutoff = cur_pos as i32 - MATCHFINDER_WINDOW_SIZE as i32;
 
-        let hash3 = next_hashes[0] as usize;
-        let hash4 = next_hashes[1] as usize;
+        // Masked so the table lookups need no bounds checks.
+        let hash3 = next_hashes[0] as usize & (HC_HASH3_SIZE - 1);
+        let hash4 = next_hashes[1] as usize & (HC_HASH4_SIZE - 1);
 
         let cur_node3 = self.hash3_tab[hash3] as i32;
         let mut cur_node4 = self.hash4_tab[hash4] as i32;
@@ -106,7 +107,7 @@ impl HcMatchfinder {
         self.hash3_tab[hash3] = cur_pos as i16;
         // Update hash4: prepend to chain
         self.hash4_tab[hash4] = cur_pos as i16;
-        self.next_tab[cur_pos as usize] = cur_node4 as i16;
+        self.next_tab[cur_pos as usize & WINDOW_MASK] = cur_node4 as i16;
 
         // Precompute next hashes
         if in_next + 5 <= input.len() {
@@ -186,18 +187,21 @@ impl HcMatchfinder {
             }
         }
 
-        // Search chain for matches longer than best_len
+        // Search chain for matches longer than best_len. Candidates lie
+        // before in_next, so each has max_len bytes of input after it.
+        let cur = &input[in_next..in_next + max_len as usize];
+        let s_head = load_u32_le(cur, 0);
         loop {
             let match_pos = (in_base as isize + cur_node4 as isize) as usize;
+            let cand = &input[match_pos..match_pos + max_len as usize];
 
             // Quick rejection: check last 4 bytes and first 4 bytes
             let tail_off = (best_len - 3) as usize;
-            let m_tail = load_u32_le(input, match_pos + tail_off);
-            let s_tail = load_u32_le(input, in_next + tail_off);
+            let m_tail = load_u32_le(cand, tail_off);
+            let s_tail = load_u32_le(cur, tail_off);
 
             if m_tail == s_tail {
-                let m_head = load_u32_le(input, match_pos);
-                let s_head = load_u32_le(input, in_next);
+                let m_head = load_u32_le(cand, 0);
                 if m_head == s_head {
                     // Full extension
                     let len = lz_extend(&input[in_next..], &input[match_pos..], 4, max_len);
@@ -242,8 +246,8 @@ impl HcMatchfinder {
         }
 
         let mut cur_pos = (in_next - *in_base_offset) as u32;
-        let mut hash3 = next_hashes[0] as usize;
-        let mut hash4 = next_hashes[1] as usize;
+        let mut hash3 = next_hashes[0] as usize & (HC_HASH3_SIZE - 1);
+        let mut hash4 = next_hashes[1] as usize & (HC_HASH4_SIZE - 1);
         let mut pos = in_next;
         let mut remaining = count;
 
@@ -256,7 +260,7 @@ impl HcMatchfinder {
 
             // Insert current position: update hash3, prepend to hash4 chain
             self.hash3_tab[hash3] = cur_pos as i16;
-            self.next_tab[cur_pos as usize] = self.hash4_tab[hash4];
+            self.next_tab[cur_pos as usize & WINDOW_MASK] = self.hash4_tab[hash4];
             self.hash4_tab[hash4] = cur_pos as i16;
 
             pos += 1;
@@ -264,8 +268,9 @@ impl HcMatchfinder {
             remaining -= 1;
 
             let next_seq = load_u32_le(input, pos);
-            hash3 = lz_hash(next_seq & 0xFFFFFF, HC_MATCHFINDER_HASH3_ORDER) as usize;
-            hash4 = lz_hash(next_seq, HC_MATCHFINDER_HASH4_ORDER) as usize;
+            hash3 = lz_hash(next_seq & 0xFFFFFF, HC_MATCHFINDER_HASH3_ORDER) as usize
+                & (HC_HASH3_SIZE - 1);
+            hash4 = lz_hash(next_seq, HC_MATCHFINDER_HASH4_ORDER) as usize & (HC_HASH4_SIZE - 1);
 
             if remaining == 0 {
                 break;
