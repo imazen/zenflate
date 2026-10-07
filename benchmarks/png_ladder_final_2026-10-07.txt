@@ -1,0 +1,38 @@
+# Full PNG ladder vs other libraries after the matchfinder/DP work, 2026-10-07
+# arm-big Neoverse-N1, taskset -c 3, 86 PNG streams (zfab-in-nolarge), png_ladder_pareto --rounds 3, zenflate main e7a3038b
+# TSV: lilith.lan /mnt/v/output/zenflate/png-ladder-ramp-2026-10-07/final2-arm.tsv
+86 images, 111.4 MB filtered
+arm                     bytes     ratio   ms total      MB/s  front
+zen_png1             36207520    3.0777       98.7      1129  *
+fdeflate_ultra       39306166    2.8351      157.7       707  
+zen_png2             33168424    3.3597      238.9       466  *
+zen_png3             31186670    3.5732      517.4       215  *
+zlibrs_1             43021962    2.5902      539.6       207  
+libdeflate_1         30862262    3.6107      564.3       197  *
+zen_png4             30520272    3.6512      652.7       171  *
+miniz_1              34839642    3.1985      664.1       168  
+zen_png6             30089461    3.7035      837.5       133  *
+zen_png9             29548690    3.7712     1139.4        98  *
+libdeflate_6         29031035    3.8385     1722.2        65  *
+zen_png10            29147033    3.8232     1864.1        60  
+zlibrs_6             28845127    3.8632     2288.6        49  *
+zen_png12            28552739    3.9028     3221.7        35  *
+zen_png14            28374472    3.9273     4294.5        26  *
+miniz_6              28953307    3.8488     5385.5        21  
+zen_png16            28226652    3.9479     6235.1        18  *
+libdeflate_9         28371321    3.9277     7540.9        15  
+zen_png18            28154462    3.9580     8205.6        14  *
+zlibrs_9             28046333    3.9733    11679.5        10  *
+zen_png19            27267549    4.0867    13429.4         8  *
+miniz_9              28496171    3.9105    14068.9         8  
+zen_png20            27175828    4.1005    14323.8         8  *
+zen_png21            27125383    4.1082    15443.6         7  *
+zen_png22            27098706    4.1122    16030.2         7  *
+zen_png23            27080392    4.1150    16671.5         7  *
+zen_png26            26947557    4.1353    30959.2         4  *
+zen_png28            26895392    4.1433    44412.7         3  *
+libdeflate_12        26889565    4.1442    46341.4         2  *
+zen_png30            26883852    4.1451    53832.4         2  *
+
+Per-image inversions (png(n) larger than the smallest of png(18..n-1)):
+png19 4/86 (0.813% 9007_rgb16_1024), png20 7 (0.378%), png21 10, png22 11, png23 15, png26 1 (0.378% 6807_gray8_1024), png28 21 (0.309%), png30 21 (0.309%)

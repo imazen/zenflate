@@ -497,8 +497,11 @@ callgrind on one 64 px streaming decode (`png_inflate --profile zenS`):
   early (rare).
 - The runs-only guard on near-optimal blocks (`NearOptGuard`, compares with
   `encoded_bits`) helps 14/86 images at png(19), up to 1.9%; ~0.5% time.
-- Open: png(10) is now dominated by libdeflate 6 on Neoverse (2011 ms / 3.823
-  vs 1734 ms / 3.839); png(30) is 0.09% larger than libdeflate 12 (faster).
+- Open: png(10) is dominated by libdeflate 6 (Neoverse 1864 ms / 3.823 vs
+  1722 ms / 3.839 after the matchfinder work; x86 817 vs 717 ms). With
+  in-segment splits for png(27..=30) and the bt/DP work, png(30) is smaller
+  than libdeflate 12 (4.1451 vs 4.1442, 16% slower) and png(28) faster
+  (`benchmarks/png_ladder_final_2026-10-07.txt`).
   Greedy png(7) > png(6) by 0.73% on 6807_rgb8_2560 (filter None); a
   distance-aware candidate score (8*len - log2 dist) didn't change it.
 

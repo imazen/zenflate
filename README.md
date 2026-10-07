@@ -256,24 +256,27 @@ one core, each library compressing the same bytes:
 
 | zenflate | Ratio | MB/s | Nearby levels of other libraries |
 |----------|-------|------|----------------------------------|
-| `png(1)` | 3.078 | 1118 | fdeflate ultra-fast: 2.835 @ 704 |
-| `png(2)` | 3.360 | 463 | |
-| `png(3)` | 3.573 | 211 | libdeflate 1: 3.611 @ 197, zlib-rs 1: 2.590 @ 202 |
-| `png(4)` | 3.651 | 167 | miniz_oxide 1: 3.199 @ 166 |
-| `png(9)` | 3.771 | 94 | |
-| `png(10)` | 3.823 | 55 | libdeflate 6: 3.839 @ 64 |
-| `png(12)` | 3.903 | 33 | zlib-rs 6: 3.863 @ 48 |
-| `png(16)` | 3.948 | 17 | miniz_oxide 6: 3.849 @ 21, libdeflate 9: 3.928 @ 15 |
-| `png(18)` | 3.958 | 13 | zlib-rs 9: 3.973 @ 10, miniz_oxide 9: 3.911 @ 8 |
-| `png(19)` | 4.087 | 7 | |
-| `png(23)` | 4.115 | 6 | |
-| `png(26)` | 4.135 | 3 | |
-| `png(30)` | 4.141 | 2 | libdeflate 12: 4.144 @ 2 |
+| `png(1)` | 3.078 | 1129 | fdeflate ultra-fast: 2.835 @ 707 |
+| `png(2)` | 3.360 | 466 | |
+| `png(3)` | 3.573 | 215 | libdeflate 1: 3.611 @ 197, zlib-rs 1: 2.590 @ 207 |
+| `png(4)` | 3.651 | 171 | miniz_oxide 1: 3.199 @ 168 |
+| `png(9)` | 3.771 | 98 | |
+| `png(10)` | 3.823 | 60 | libdeflate 6: 3.839 @ 65 |
+| `png(12)` | 3.903 | 35 | zlib-rs 6: 3.863 @ 49 |
+| `png(16)` | 3.948 | 18 | miniz_oxide 6: 3.849 @ 21, libdeflate 9: 3.928 @ 15 |
+| `png(18)` | 3.958 | 14 | zlib-rs 9: 3.973 @ 10, miniz_oxide 9: 3.911 @ 8 |
+| `png(19)` | 4.087 | 8 | |
+| `png(23)` | 4.115 | 7 | |
+| `png(26)` | 4.135 | 4 | |
+| `png(28)` | 4.143 | 3 | |
+| `png(30)` | 4.145 | 2 | libdeflate 12: 4.144 @ 2 |
 
 Higher levels can still produce a slightly larger file than a lower one on
-some images: on this set by at most 0.81% from `png(19)` up, and libdeflate 6
-beats `png(10)` on both size and speed. Per-image data:
-[`benchmarks/png_ladder_ramp_2026-10-07.txt`](https://github.com/imazen/zenflate/blob/main/benchmarks/png_ladder_ramp_2026-10-07.txt);
+some images: on this set by at most 0.81% from `png(19)` through `png(26)`.
+libdeflate 6 beats `png(10)` on both size and speed; `png(30)` is smaller than
+libdeflate 12 and `png(28)` faster. Per-image data:
+[`benchmarks/png_ladder_ramp_2026-10-07.txt`](https://github.com/imazen/zenflate/blob/main/benchmarks/png_ladder_ramp_2026-10-07.txt),
+[`benchmarks/png_ladder_final_2026-10-07.txt`](https://github.com/imazen/zenflate/blob/main/benchmarks/png_ladder_final_2026-10-07.txt);
 held-out validation of `png(1..=9)`:
 [`benchmarks/png_mode_2026-10-06.md`](https://github.com/imazen/zenflate/blob/main/benchmarks/png_mode_2026-10-06.md).
 
