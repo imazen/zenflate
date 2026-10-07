@@ -72,7 +72,7 @@ cachegrind level data:
         cargo bench --features unchecked -- "compress/{{data}}/zenflate/L{{level}}" --profile-time 1
 
 # Check everything (tests + clippy + fmt)
-check: fmt clippy test test-unchecked
+check: fmt clippy test test-unchecked check-features
 
 # Build benchmarks without running (CI verification)
 bench-check:
