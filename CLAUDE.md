@@ -326,6 +326,13 @@ two-thread decode pipeline is bounded by inflate, so this is zenpng's lever.
   length >= 64 non-overlapping, and period-doubling for small offsets - both
   slower overall and neither fixed `nci` one-shot on Neoverse-N1 (+7% vs
   before the chunked copy, cause unknown; its streaming decode got faster).
+- **One-shot decode may overwrite `output` past `output_written`** (up to ~16
+  bytes, only when the stream ends inside the fastloop, i.e. the buffer has
+  more than ~278 bytes of slack; exactly sized buffers are unaffected). Kept on
+  purpose (user, 2026-10-07: "speed"): exact tail copies would bring back a
+  variable-length copy on most PNG matches (< 16 bytes), the cost the chunked
+  copy removed. Documented on deflate/zlib/gzip_decompress; fdeflate's read()
+  documents the same. Don't "fix" it without re-asking.
 - **x86-64-v3 build of the streaming loop** (archmage `#[arcane]` X64V3Token):
   streaming 1.105 -> 1.066 of fdeflate on the 265K. The same for the one-shot
   core was 1.8-2.5% slower, and so were full-width 11-bit tables with a
