@@ -130,6 +130,7 @@ impl InputSource for Chunks<'_> {
     }
 }
 
+#[inline(never)] // separate symbol for callgrind --toggle-collect
 fn zen_oneshot(_p: &Png, joined: &[u8], out: &mut [u8]) -> usize {
     let mut d = Decompressor::new();
     d.zlib_decompress(joined, out, Unstoppable)
@@ -137,6 +138,7 @@ fn zen_oneshot(_p: &Png, joined: &[u8], out: &mut [u8]) -> usize {
         .output_written
 }
 
+#[inline(never)] // separate symbol for callgrind --toggle-collect
 fn zen_stream(p: &Png) -> usize {
     let whole = p.stride * p.rows;
     let capacity = (2 * p.stride).max((256 * 1024).min(whole));
@@ -165,6 +167,7 @@ fn zen_stream(p: &Png) -> usize {
     total
 }
 
+#[inline(never)] // separate symbol for callgrind --toggle-collect
 fn fdeflate_oneshot(joined: &[u8], out: &mut [u8]) -> usize {
     let mut d = fdeflate::Decompressor::new();
     d.ignore_adler32();
@@ -172,6 +175,7 @@ fn fdeflate_oneshot(joined: &[u8], out: &mut [u8]) -> usize {
     n
 }
 
+#[inline(never)] // separate symbol for callgrind --toggle-collect
 fn libdeflate_oneshot(joined: &[u8], out: &mut [u8]) -> usize {
     let mut d = libdeflater::Decompressor::new();
     d.zlib_decompress(joined, out).unwrap()
@@ -233,7 +237,8 @@ fn main() {
         let mut out = vec![0u8; max];
         let start = Instant::now();
         let mut n = 0u64;
-        while start.elapsed().as_secs_f64() < secs {
+        // At least one pass, so `--secs 0` gives exactly one (callgrind).
+        while n == 0 || start.elapsed().as_secs_f64() < secs {
             for (p, j) in &pngs {
                 let o = &mut out[..p.raw_len];
                 std::hint::black_box(match arm.as_str() {

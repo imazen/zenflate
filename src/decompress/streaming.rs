@@ -218,9 +218,9 @@ pub struct StreamDecompressor<S> {
     inner: Decompressor,
 
     // Output buffer: starts at `capacity` bytes with output from offset 0, and
-    // grows to [lookback (32KB) | peekable (capacity)] the first time output
-    // outgrows it, so a stream that fits in `capacity` never allocates or
-    // zero-fills the 32 KiB window. Back-references are bounded by
+    // doubles toward [lookback (32KB) | peekable (capacity)] each time output
+    // outgrows it, so a stream that fits in `capacity` never zero-fills the
+    // 32 KiB window. Back-references are bounded by
     // `lookback_valid`, never by buffer position.
     buffer: Vec<u8>,
     capacity: usize,
@@ -641,10 +641,15 @@ impl<S: InputSource> StreamDecompressor<S> {
     /// Compact the output buffer. Keeps the last 32KB as lookback.
     /// Must be called only after updating checksum up to write_pos.
     fn compact_output(&mut self) {
-        if self.buffer.len() < LOOKBACK_SIZE + self.capacity {
-            // Output outgrew `capacity` for the first time: add room for the
-            // lookback window instead of compacting.
-            self.buffer.resize(LOOKBACK_SIZE + self.capacity, 0);
+        let full = LOOKBACK_SIZE + self.capacity;
+        if self.buffer.len() < full {
+            // Output outgrew the buffer before it reached its full size: grow
+            // instead of compacting. Doubling (not jumping straight to the
+            // full window) keeps a stream that just fills `capacity` from
+            // zeroing 32 KiB for the end-of-stream call that follows (half of
+            // a 64x64 PNG's streaming decode instructions).
+            self.buffer
+                .resize((self.buffer.len() * 2).clamp(64, full), 0);
             return;
         }
         if self.read_pos <= LOOKBACK_SIZE {
@@ -2136,6 +2141,42 @@ mod tests {
         let mut dec = StreamDecompressor::gzip(source, 4096);
         let output = stream_decompress_all(&mut dec).unwrap();
         assert_eq!(output, data);
+    }
+
+    /// The streaming decode loop has an x86-64-v3 build chosen at runtime;
+    /// disable tokens in every combination so the plain build is exercised
+    /// too, at capacities that hit the fastloop, the slow path and pending
+    /// literals/matches.
+    #[test]
+    #[cfg(feature = "simd")]
+    fn stream_all_dispatch_tiers() {
+        use archmage::testing::{CompileTimePolicy, for_each_token_permutation};
+
+        let mut data = Vec::new();
+        let mut x = 0x1234_5678u32;
+        for i in 0..300_000usize {
+            x ^= x << 13;
+            x ^= x >> 17;
+            x ^= x << 5;
+            data.push(match (i / 4096) % 3 {
+                0 => (i % 251) as u8,
+                1 => (i / 64) as u8,
+                _ => x as u8,
+            });
+        }
+        let mut c = libdeflater::Compressor::new(libdeflater::CompressionLvl::new(6).unwrap());
+        let mut z = vec![0u8; c.zlib_compress_bound(data.len())];
+        let n = c.zlib_compress(&data, &mut z).unwrap();
+        let z = &z[..n];
+
+        let report = for_each_token_permutation(CompileTimePolicy::Warn, |perm| {
+            for capacity in [1, 7, 300, 4096, 1 << 18] {
+                let mut d = StreamDecompressor::zlib(z, capacity);
+                let out = stream_decompress_all(&mut d).unwrap();
+                assert!(out == data, "capacity {capacity}, tier: {perm}");
+            }
+        });
+        eprintln!("streaming permutation test: {report}");
     }
 
     #[test]

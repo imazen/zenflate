@@ -326,6 +326,10 @@ impl Decompressor {
     /// block boundary (typically every 32–65 KB of output). Pass
     /// [`Unstoppable`](enough::Unstoppable) when cancellation is not needed;
     /// the compiler eliminates all checks.
+    ///
+    /// Bytes of `output` past the returned `output_written` may be
+    /// overwritten (the fast decode loop stores in 16-byte chunks within a
+    /// margin below `output.len()`); don't keep data there.
     pub fn deflate_decompress(
         &mut self,
         input: &[u8],
@@ -344,6 +348,10 @@ impl Decompressor {
     ///
     /// See [`deflate_decompress`](Self::deflate_decompress) for the `stop`
     /// parameter.
+    ///
+    /// Bytes of `output` past the returned `output_written` may be
+    /// overwritten (the fast decode loop stores in 16-byte chunks within a
+    /// margin below `output.len()`); don't keep data there.
     pub fn zlib_decompress(
         &mut self,
         input: &[u8],
@@ -400,6 +408,10 @@ impl Decompressor {
     ///
     /// See [`deflate_decompress`](Self::deflate_decompress) for the `stop`
     /// parameter.
+    ///
+    /// Bytes of `output` past the returned `output_written` may be
+    /// overwritten (the fast decode loop stores in 16-byte chunks within a
+    /// margin below `output.len()`); don't keep data there.
     pub fn gzip_decompress(
         &mut self,
         input: &[u8],
