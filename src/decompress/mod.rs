@@ -927,8 +927,33 @@ impl Decompressor {
         output: &mut [u8],
         stop: &impl enough::Stop,
     ) -> Result<(usize, usize), DecompressionError> {
-        // No x86-64-v3 build here (unlike the streaming decoder): measured
-        // 1.8-2.5% slower on Core Ultra 7 265K, while streaming gained 3.5%.
+        // x86-64-v4 (AVX-512) build of this loop for inputs of 16 KiB and up.
+        // Time vs fdeflate on zenpng's 106 PNG streams, Ryzen 9 9950X3D (Zen
+        // 5): 1.007 -> 0.976 (256 px and up: 1.00 -> 0.96), Silesia +
+        // Canterbury 0.901 -> 0.880. Ungated, 64 px images (under 8 KB of
+        // input) were 3.6% slower. The 7950X (Zen 4) gained 1-2%.
+        #[cfg(all(feature = "avx512", target_arch = "x86_64"))]
+        {
+            use archmage::SimdToken;
+            if input.len() >= ONESHOT_V4_MIN_INPUT
+                && let Some(token) = archmage::X64V4Token::summon()
+            {
+                return oneshot_v4::core_v4(token, self, input, output, stop);
+            }
+        }
+        self.deflate_decompress_core_impl(input, output, stop)
+    }
+
+    #[inline(always)]
+    fn deflate_decompress_core_impl(
+        &mut self,
+        input: &[u8],
+        output: &mut [u8],
+        stop: &impl enough::Stop,
+    ) -> Result<(usize, usize), DecompressionError> {
+        // No x86-64-v3 build of this loop (unlike the streaming decoder):
+        // measured 1.8-2.5% slower on Core Ultra 7 265K, while streaming
+        // gained 3.5%. v4 is above.
         let mut in_pos: usize = 0;
         let mut out_pos: usize = 0;
         let mut bitbuf: u64 = 0;
@@ -2220,6 +2245,65 @@ mod tests {
     // =====================================================================
     // input_consumed correctness tests (libdeflate #420, miniz_oxide #158)
     // =====================================================================
+
+    /// One-shot decode under every SIMD tier the CPU has, which covers the
+    /// x86-64-v4 build on AVX-512 machines and the default build without it.
+    /// Inputs straddle `ONESHOT_V4_MIN_INPUT`; output buffers are exact and
+    /// have slack (the fastloop ends differently in each).
+    #[test]
+    #[cfg(feature = "simd")]
+    fn oneshot_all_dispatch_tiers() {
+        use archmage::testing::{CompileTimePolicy, for_each_token_permutation};
+
+        let mut x = 0x1234_5678u32;
+        let mut make = |len: usize| -> Vec<u8> {
+            (0..len)
+                .map(|i| {
+                    x ^= x << 13;
+                    x ^= x >> 17;
+                    x ^= x << 5;
+                    match (i / 4096) % 3 {
+                        0 => (i % 251) as u8,
+                        1 => (i / 64) as u8,
+                        _ => x as u8,
+                    }
+                })
+                .collect()
+        };
+        let cases: Vec<(Vec<u8>, Vec<u8>)> = [1_000usize, 20_000, 40_000, 300_000]
+            .into_iter()
+            .map(|len| {
+                let data = make(len);
+                let mut c =
+                    libdeflater::Compressor::new(libdeflater::CompressionLvl::new(6).unwrap());
+                let mut z = vec![0u8; c.zlib_compress_bound(data.len())];
+                let n = c.zlib_compress(&data, &mut z).unwrap();
+                z.truncate(n);
+                (data, z)
+            })
+            .collect();
+        // Both sides of the v4 threshold are exercised.
+        assert!(cases.iter().any(|(_, z)| z.len() < 16 * 1024));
+        assert!(cases.iter().any(|(_, z)| z.len() >= 16 * 1024));
+
+        let report = for_each_token_permutation(CompileTimePolicy::Warn, |perm| {
+            for (data, z) in &cases {
+                for slack in [0usize, 1000] {
+                    let mut out = vec![0u8; data.len() + slack];
+                    let r = Decompressor::new()
+                        .zlib_decompress(z, &mut out, enough::Unstoppable)
+                        .unwrap();
+                    assert_eq!(r.output_written, data.len(), "tier: {perm}");
+                    assert!(
+                        out[..data.len()] == data[..],
+                        "len {}, slack {slack}, tier: {perm}",
+                        data.len()
+                    );
+                }
+            }
+        });
+        eprintln!("one-shot permutation test: {report}");
+    }
 }
 
 /// Tests that round-trip through the crate's own `Compressor` (the tests
@@ -2843,5 +2927,28 @@ mod compress_roundtrip_tests {
             .deflate_decompress(&compressed[..csize], &mut output, enough::Unstoppable)
             .unwrap();
         assert_eq!(result.output_written, 100);
+    }
+}
+
+/// Compressed input below which the one-shot decoder skips its x86-64-v4
+/// build (see `deflate_decompress_core`).
+#[cfg(all(feature = "avx512", target_arch = "x86_64"))]
+const ONESHOT_V4_MIN_INPUT: usize = 16 * 1024;
+
+/// x86-64-v4 build of the one-shot decode loop.
+#[cfg(all(feature = "avx512", target_arch = "x86_64"))]
+mod oneshot_v4 {
+    use super::*;
+    use archmage::prelude::*;
+
+    #[arcane]
+    pub(super) fn core_v4(
+        _token: X64V4Token,
+        d: &mut Decompressor,
+        input: &[u8],
+        output: &mut [u8],
+        stop: &impl enough::Stop,
+    ) -> Result<(usize, usize), DecompressionError> {
+        d.deflate_decompress_core_impl(input, output, stop)
     }
 }
