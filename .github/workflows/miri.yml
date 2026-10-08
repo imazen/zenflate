@@ -54,7 +54,10 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Miri tests (unchecked feature)
-        # The skips below are all "too slow to interpret", except the last.
+        # Native C-oracle calls in the dynamic-header and conformance tests
+        # are cfg(not(miri)); their Rust assertions remain in this run.
+        # The C branches still run in the ordinary safe/unchecked CI matrix.
+        # The skips below are for interpretation cost or filesystem isolation.
         #
         # `fuzz_regression` is skipped because it cannot run under Miri at
         # all, not because it is slow: it enumerates `fuzz/regression/` from
@@ -78,11 +81,11 @@ jobs:
         # prevents the whole soundness run from ever reporting. It still runs
         # at full strength under plain `cargo test` in ci.yml.
         #
-        # No coverage is lost. `cargo test` and `cargo test --features
+        # Native coverage remains. `cargo test` and `cargo test --features
         # unchecked` both run this test on all six platforms in ci.yml, and
-        # the suite replays zero seeds today (`EXPECTED_SEEDS = 0` in
-        # tests/fuzz_regression.rs — #7 needs a ~19 MB input, far past the
-        # 8 KB per-seed ceiling). If seed bytes ever need Miri's eyes, feed
+        # the suite replays seven committed seeds (`EXPECTED_SEEDS = 7` in
+        # tests/fuzz_regression.rs). Issue #7 still needs a ~19 MB input, past
+        # the 8 KB per-seed ceiling. If seed bytes need Miri's eyes, feed
         # them from `include_bytes!` rather than reading the directory —
         # that is testable under isolation, and this skip would not cover it.
         run: |

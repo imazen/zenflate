@@ -1534,7 +1534,8 @@ mod tests {
                 .deflate_decompress(stream, &mut out, enough::Unstoppable)
                 .unwrap_or_else(|e| panic!("{empty_blocks} empty blocks first: {e:?}"));
             assert_eq!(r.output_written, 0);
-            #[cfg(not(target_arch = "wasm32"))]
+            // Keep the Rust decoder assertion above under Miri; C runs natively.
+            #[cfg(all(not(miri), not(target_arch = "wasm32")))]
             {
                 let mut out = [0u8; 16];
                 let m = libdeflater::Decompressor::new()
