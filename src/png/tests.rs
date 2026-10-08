@@ -430,3 +430,88 @@ fn cross_segment_back_reference_is_rejected() {
     // seg1 alone must fail.
     assert!(decode_segment(&seg1).is_err());
 }
+
+/// Primed strips: every level, including png() and full-optimal, decodes
+/// back as one zlib stream; output doesn't depend on order or compressor
+/// reuse; history beyond 32 KiB doesn't change anything; and on data with
+/// repeats across strip ends, primed strips are smaller than independent
+/// ones.
+#[test]
+fn strips_with_history() {
+    let data = test_data(300_000);
+    let mut all_levels = levels();
+    for e in [1u32, 4, 9, 10, 14, 19, 26] {
+        all_levels.push((format!("png({e})"), CompressionLevel::png(e)));
+    }
+    for (name, level) in all_levels {
+        for parts in [1usize, 3, 7] {
+            let per = data.len().div_ceil(parts);
+            let starts: Vec<usize> = (0..data.len()).step_by(per).collect();
+            let n = starts.len();
+            let compress = |k: usize, comp: &mut StripCompressor, window: usize| {
+                let s = starts[k];
+                let e = (s + per).min(data.len());
+                let from = s.saturating_sub(window);
+                let mut out = vec![0u8; StripCompressor::bound(e - s)];
+                let len = comp
+                    .compress_with_history(
+                        &data[from..e],
+                        s - from,
+                        k + 1 == n,
+                        &mut out,
+                        Unstoppable,
+                    )
+                    .unwrap();
+                out.truncate(len);
+                out
+            };
+            // Forward with one compressor; backward with fresh ones; and
+            // with the whole preceding image as history.
+            let mut one = StripCompressor::new(level);
+            let fwd: Vec<Vec<u8>> = (0..n).map(|k| compress(k, &mut one, 32 * 1024)).collect();
+            let back: Vec<Vec<u8>> = (0..n)
+                .rev()
+                .map(|k| compress(k, &mut StripCompressor::new(level), 32 * 1024))
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect();
+            let long: Vec<Vec<u8>> = (0..n).map(|k| compress(k, &mut one, usize::MAX)).collect();
+            assert_eq!(fwd, back, "{name}, {parts} parts: order/reuse");
+            assert_eq!(fwd, long, "{name}, {parts} parts: history beyond 32 KiB");
+
+            let mut z = one.zlib_header().to_vec();
+            for s in &fwd {
+                z.extend_from_slice(s);
+            }
+            z.extend_from_slice(&adler32(1, &data).to_be_bytes());
+            let mut back_out = vec![0u8; data.len()];
+            let r = Decompressor::new()
+                .zlib_decompress(&z, &mut back_out, Unstoppable)
+                .unwrap_or_else(|e| panic!("{name}, {parts} parts: {e:?}"));
+            assert_eq!(r.output_written, data.len());
+            assert!(back_out == data, "{name}, {parts} parts: content");
+        }
+    }
+
+    // Repeats that straddle strip ends: history makes strips smaller.
+    let block: Vec<u8> = test_data(20_000);
+    let rep: Vec<u8> = block.iter().cycle().take(200_000).copied().collect();
+    let level = CompressionLevel::png(10);
+    let independent: usize = compress_strips(&rep, 5, level).iter().map(Vec::len).sum();
+    let per = rep.len().div_ceil(5);
+    let mut comp = StripCompressor::new(level);
+    let primed: usize = (0..5)
+        .map(|k| {
+            let s = k * per;
+            let e = (s + per).min(rep.len());
+            let mut out = vec![0u8; StripCompressor::bound(e - s)];
+            comp.compress_with_history(&rep[..e], s, k == 4, &mut out, Unstoppable)
+                .unwrap()
+        })
+        .sum();
+    assert!(
+        primed < independent,
+        "primed {primed} vs independent {independent}"
+    );
+}

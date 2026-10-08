@@ -1153,6 +1153,26 @@ impl Compressor {
         self.deflate_compress_chunk(input, 0, is_last, output, &stop)
     }
 
+    /// Like [`deflate_compress_segment`](Self::deflate_compress_segment) for
+    /// `input[data_start..]`, with `input[..data_start]` as the window that
+    /// matches may reach back into (the last 32 KiB are used). Full-optimal
+    /// levels have no dictionary warm-up and compress the segment alone.
+    pub(crate) fn deflate_compress_segment_after(
+        &mut self,
+        input: &[u8],
+        data_start: usize,
+        is_last: bool,
+        output: &mut [u8],
+        stop: impl enough::Stop,
+    ) -> Result<usize, CompressionError> {
+        const WINDOW: usize = 32 * 1024;
+        let from = data_start.saturating_sub(WINDOW);
+        if self.level.strategy() == InternalStrategy::FullOptimal {
+            return self.deflate_compress_chunk(&input[data_start..], 0, is_last, output, &stop);
+        }
+        self.deflate_compress_chunk(&input[from..], data_start - from, is_last, output, &stop)
+    }
+
     /// Upper bound on [`deflate_compress_segment`](Self::deflate_compress_segment)
     /// output: [`deflate_compress_bound`](Self::deflate_compress_bound) plus
     /// the 5-byte flush marker and one byte of bit padding.
@@ -3477,7 +3497,10 @@ impl Compressor {
             if let (true, Some(in_block_end)) = (change_detected, prev_end_block_check) {
                 // Rewind to just before the differing chunk.
                 let block_length = (in_block_end - in_block_begin) as u32;
-                let is_first = in_block_begin == 0;
+                // The first block of this call (after any dictionary warm-up) starts
+                // from default costs, so the output does not depend on what this
+                // compressor compressed before.
+                let is_first = in_block_begin == self.chunk_start;
                 let num_bytes_to_rewind = in_next - in_block_end;
 
                 // Rewind the match cache
@@ -3528,7 +3551,10 @@ impl Compressor {
             } else {
                 // End block at current position (no rewind)
                 let block_length = (in_next - in_block_begin) as u32;
-                let is_first = in_block_begin == 0;
+                // The first block of this call (after any dictionary warm-up) starts
+                // from default costs, so the output does not depend on what this
+                // compressor compressed before.
+                let is_first = in_block_begin == self.chunk_start;
                 let is_final = !self.force_nonfinal && in_next == in_end;
 
                 merge_stats(&mut self.split_stats, ns);
