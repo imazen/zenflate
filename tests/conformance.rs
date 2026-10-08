@@ -1,5 +1,6 @@
-//! Cross-API conformance: every compression level through every compression
-//! entry point, on inputs sized around zenflate's internal boundaries.
+//! Cross-API conformance: new/png efforts 0–31 and all libdeflate compatibility
+//! levels through each compression entry point, around internal boundaries.
+//! Effort 31 represents full-optimal parsing; efforts 32–200 are not enumerated.
 //!
 //! Oracles:
 //! - three independent decoders (zenflate, libdeflate, miniz_oxide) agree with
@@ -240,7 +241,7 @@ fn levels() -> Vec<(String, Family, CompressionLevel)> {
             CompressionLevel::libdeflate(l),
         )
     }));
-    v.extend((0..=17).map(|e| {
+    v.extend((0..=31).map(|e| {
         (
             format!("png({e})"),
             Family::Png(e),
@@ -337,8 +338,8 @@ fn incremental_supported(family: Family) -> bool {
     match family {
         Family::Libdeflate(l) => (1..=9).contains(&l),
         Family::New(e) => (10..=22).contains(&e),
-        // png(13..=22) use the same parsers as new(13..=22).
-        Family::Png(e) => (13..=22).contains(&e),
+        // The PNG ladder uses the incremental lazy parser at efforts 10–18.
+        Family::Png(e) => (10..=18).contains(&e),
     }
 }
 
