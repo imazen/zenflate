@@ -43,7 +43,7 @@ clippy:
 # The snapshot runner lives in the standalone apidoc/ package, so it is never
 # built or run by plain `cargo test` or any CI job.
 fmt:
-    cargo fmt --all -- --check
+    cargo fmt -p zenflate -- --check
     cargo test --manifest-path apidoc/Cargo.toml
 
 # Regenerate the public-API surface snapshots only
@@ -56,20 +56,22 @@ api-doc-check:
 
 # Format fix
 fmt-fix:
-    cargo fmt --all
+    cargo fmt -p zenflate
 
 # Profile compression with callgrind (level and data type)
 callgrind level data:
     cargo build --release --features unchecked --example compress_file 2>/dev/null || \
     cargo bench --no-run --features unchecked
     @echo "Running callgrind for L{{level}} {{data}}..."
-    valgrind --tool=callgrind --callgrind-out-file=/tmp/callgrind-L{{level}}-{{data}}.out \
+    mkdir -p "$HOME/tmp"
+    valgrind --tool=callgrind --callgrind-out-file="$HOME/tmp/callgrind-L{{level}}-{{data}}.out" \
         cargo bench --features unchecked -- "compress/{{data}}/zenflate/L{{level}}" --profile-time 1
 
 # Profile compression with cachegrind
 cachegrind level data:
     @echo "Running cachegrind for L{{level}} {{data}}..."
-    valgrind --tool=cachegrind --cachegrind-out-file=/tmp/cachegrind-L{{level}}-{{data}}.out \
+    mkdir -p "$HOME/tmp"
+    valgrind --tool=cachegrind --cachegrind-out-file="$HOME/tmp/cachegrind-L{{level}}-{{data}}.out" \
         cargo bench --features unchecked -- "compress/{{data}}/zenflate/L{{level}}" --profile-time 1
 
 # Check everything (tests + clippy + fmt)
@@ -122,6 +124,27 @@ fuzz-decompress seconds="60":
 fuzz-roundtrip seconds="60":
     cargo +nightly fuzz run fuzz_roundtrip -- -max_total_time={{seconds}} -max_len=65536
 
+# Differential inflate, round-trip, or API fuzzing with caller-owned corpus storage.
+fuzz-review target corpus artifacts seconds="300":
+    cargo +nightly fuzz run {{target}} {{corpus}} -- -max_total_time={{seconds}} -max_len=65536 -rss_limit_mb=2048 -artifact_prefix={{artifacts}}/
+
+# Check checksum result lifetimes when a decoder is reused.
+test-checksum-reuse:
+    cargo test --test checksum_reuse
+
 # Build fuzz targets without running
 fuzz-check:
     cargo +nightly fuzz build
+
+# Exact match-copy semantics across chunk boundaries and the full DEFLATE window.
+test-match-copy:
+    cargo test --lib chunked_copy_matches_bytewise_back_references
+
+# Documentation links must work with and without allocation support.
+check-docs:
+    RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
+    RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --no-default-features
+
+# Interpret the dynamic-header regression while retaining its Rust assertions
+miri-header:
+    cargo +nightly miri test --features unchecked --lib dynamic_header_with_every_precode_symbol_decodes
