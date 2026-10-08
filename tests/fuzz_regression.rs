@@ -78,18 +78,11 @@ fn assert_corpus_present() {
         dir.display()
     );
 
-    // README.md is the only tracked file in the corpus directory, and therefore
-    // the only reason git materialises the directory at all — git does not track
-    // empty directories. Check it explicitly: with the corpus legitimately empty,
-    // deleting the README is the one mutation that empties `fuzz/regression/`
-    // without tripping either the `is_dir` check above (the directory survives in
-    // a dirty worktree) or the count check below (0 == 0 still holds).
+    // Keep the tracked corpus instructions alongside the seven regression seeds.
     let readme = dir.join("README.md");
     assert!(
         readme.is_file(),
-        "{} is missing — it is the only tracked file in the regression corpus, \
-         so without it git stops materialising {} entirely and every seed added \
-         beside it goes with the directory",
+        "{} is missing — the regression corpus at {} must keep its seed instructions",
         readme.display(),
         dir.display()
     );

@@ -25,9 +25,21 @@ pub enum DecompressionError {
     /// Decompressed output exceeded the configured maximum size limit.
     ///
     /// Returned when [`Decompressor::with_max_output_size`](crate::Decompressor::with_max_output_size) or
-    /// [`StreamDecompressor::with_max_output_size`](crate::StreamDecompressor::with_max_output_size) is set and the
+    /// [`StreamDecompressor::with_max_output_size`][stream-limit] is set and the
     /// decompressed data exceeds that limit. This defends against
     /// decompression bombs (small inputs that expand to enormous output).
+    #[cfg_attr(
+        feature = "alloc",
+        doc = "
+
+[stream-limit]: crate::StreamDecompressor::with_max_output_size"
+    )]
+    #[cfg_attr(
+        not(feature = "alloc"),
+        doc = "
+
+[stream-limit]: https://docs.rs/zenflate/latest/zenflate/struct.StreamDecompressor.html#method.with_max_output_size"
+    )]
     OutputLimitExceeded,
     /// The stream processed too many blocks without producing output,
     /// indicating a potential denial-of-service via crafted empty blocks.

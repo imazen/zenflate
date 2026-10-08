@@ -262,14 +262,18 @@ fn decode_all(what: &str, deflate: &[u8], expected: &[u8]) {
         .unwrap_or_else(|e| panic!("{what}: zenflate decode: {e:?}"));
     assert_eq!(r.output_written, expected.len(), "{what}: zenflate length");
     assert!(out == expected, "{what}: zenflate content");
-    let mut out = vec![0u8; expected.len()];
-    let n = libdeflater::Decompressor::new()
-        .deflate_decompress(deflate, &mut out)
-        .unwrap_or_else(|e| panic!("{what}: libdeflate decode: {e:?}"));
-    assert!(
-        n == expected.len() && out == expected,
-        "{what}: libdeflate content"
-    );
+    // Miri cannot interpret C FFI; keep the Rust readers above/below live.
+    #[cfg(not(miri))]
+    {
+        let mut out = vec![0u8; expected.len()];
+        let n = libdeflater::Decompressor::new()
+            .deflate_decompress(deflate, &mut out)
+            .unwrap_or_else(|e| panic!("{what}: libdeflate decode: {e:?}"));
+        assert!(
+            n == expected.len() && out == expected,
+            "{what}: libdeflate content"
+        );
+    }
     let mz = miniz_oxide::inflate::decompress_to_vec(deflate)
         .unwrap_or_else(|e| panic!("{what}: miniz decode: {e:?}"));
     assert!(mz == expected, "{what}: miniz content");
@@ -313,14 +317,18 @@ fn check_whole(name: &str, level: CompressionLevel, data: &[u8]) -> Vec<u8> {
         r.output_written == data.len() && back == data,
         "{name}: gzip content"
     );
-    let mut back = vec![0u8; data.len()];
-    let m = libdeflater::Decompressor::new()
-        .gzip_decompress(&out[..n], &mut back)
-        .unwrap_or_else(|e| panic!("{name}: libdeflate gzip decode: {e:?}"));
-    assert!(
-        m == data.len() && back == data,
-        "{name}: libdeflate gzip content"
-    );
+    // Miri cannot interpret C FFI; keep the Rust readers above/below live.
+    #[cfg(not(miri))]
+    {
+        let mut back = vec![0u8; data.len()];
+        let m = libdeflater::Decompressor::new()
+            .gzip_decompress(&out[..n], &mut back)
+            .unwrap_or_else(|e| panic!("{name}: libdeflate gzip decode: {e:?}"));
+        assert!(
+            m == data.len() && back == data,
+            "{name}: libdeflate gzip content"
+        );
+    }
     deflate
 }
 

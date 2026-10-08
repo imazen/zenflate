@@ -344,9 +344,11 @@ impl<S> StreamDecompressor<S> {
 
     /// Whether the wrapper checksum matched after decompression.
     ///
-    /// - `None` — footer not yet processed (raw DEFLATE or stream not finished)
+    /// - `None` — footer not yet processed (raw DEFLATE or stream not finished),
+    ///   or the policy is [`ChecksumPolicy::Ignore`]
     /// - `Some(true)` — checksum matched
-    /// - `Some(false)` — checksum mismatch (only possible when `skip_checksum` is set)
+    /// - `Some(false)` — checksum mismatch (also recorded before a
+    ///   [`ChecksumPolicy::Verify`] error)
     #[must_use]
     pub fn checksum_matched(&self) -> Option<bool> {
         self.checksum_matched
@@ -560,7 +562,8 @@ impl<S: InputSource> StreamDecompressor<S> {
         self.read_pos += n;
     }
 
-    /// Returns `true` when the stream is fully decompressed and checksums verified.
+    /// Returns `true` when decompression and trailer processing have finished
+    /// under the selected [`ChecksumPolicy`].
     #[inline]
     #[must_use]
     pub fn is_done(&self) -> bool {

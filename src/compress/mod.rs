@@ -245,8 +245,9 @@ impl CompressionLevel {
     ///
     /// # Monotonicity
     ///
-    /// Within the ladder the search only gets wider, and efforts 3-30 compare
-    /// every block against its runs-only parse. Four switches change the
+    /// Efforts 3-30 compare selected blocks against a runs-only parse; the
+    /// guard pauses for three blocks after a clear loss. This is not a size
+    /// guarantee relative to runs-only compression. Four switches change the
     /// algorithm, and [`monotonicity_fallback`](Self::monotonicity_fallback)
     /// covers each one: ultra-fast to exact Huffman (`png(2)` → `png(1)`),
     /// minimum match 8 to 5 (`png(4..=9)` → `png(3)`), hashed chains to lazy

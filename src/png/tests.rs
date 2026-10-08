@@ -502,12 +502,16 @@ fn strips_with_history() {
                 .unwrap_or_else(|e| panic!("{name}, {parts} parts: {e:?}"));
             assert_eq!(r.output_written, data.len());
             assert!(back_out == data, "{name}, {parts} parts: content");
-            let mut reference = vec![0u8; data.len()];
-            let written = libdeflater::Decompressor::new()
-                .zlib_decompress(&z, &mut reference)
-                .unwrap();
-            assert_eq!(written, data.len(), "{name}, {parts}: C length");
-            assert_eq!(reference, data, "{name}, {parts}: C content");
+            // Keep the Rust reader live where native C FFI is unavailable.
+            #[cfg(all(not(miri), not(target_arch = "wasm32")))]
+            {
+                let mut reference = vec![0u8; data.len()];
+                let written = libdeflater::Decompressor::new()
+                    .zlib_decompress(&z, &mut reference)
+                    .unwrap();
+                assert_eq!(written, data.len(), "{name}, {parts}: C length");
+                assert_eq!(reference, data, "{name}, {parts}: C content");
+            }
         }
     }
 

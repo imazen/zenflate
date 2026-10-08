@@ -6,7 +6,7 @@
 # impls omitted; re-export duplicates annotated `[also: path]`.
 # DO NOT EDIT BY HAND — commit regenerated changes with the code.
 #
-# files: zenflate.txt 230 lines (supported surface) | zenflate.features.txt 0 added (features: alloc,avx512,compress,simd,std,threads,unchecked) | zenflate.internal.txt 10 lines (10 hidden + 0 excluded-feature)
+# files: zenflate.txt 231 lines (supported surface) | zenflate.features.txt 0 added (features: alloc,avx512,compress,simd,std,threads,unchecked) | zenflate.internal.txt 10 lines (10 hidden + 0 excluded-feature)
 
 ## summary
 #
@@ -14,7 +14,7 @@
 #   pub types (struct/enum/trait/alias)        32
 #   pub consts/statics                          2
 #   free functions                              8
-#   inherent methods                          143
+#   inherent methods                          144
 #   struct fields                               4
 #   enum variants                              28
 #   re-exports                                  3
@@ -28,9 +28,9 @@
 #   compress                         55
 #   decompress                       60
 #   error                            14
-#   png                              15
+#   png                              16
 
-## items (208 lines)
+## items (209 lines)
 
 pub mod zenflate
 pub use Stop
@@ -127,6 +127,7 @@ pub mod png
 pub struct png::StripCompressor
 pub fn png::StripCompressor::bound(usize) -> usize
 pub fn png::StripCompressor::compress(&mut self, &[u8], bool, &mut [u8], impl enough::Stop) -> core::result::Result<usize, error::CompressionError>
+pub fn png::StripCompressor::compress_with_history(&mut self, &[u8], usize, bool, &mut [u8], impl enough::Stop) -> core::result::Result<usize, error::CompressionError>
 pub fn png::StripCompressor::new(compress::CompressionLevel) -> Self
 pub fn png::StripCompressor::zlib_header(&self) -> [u8; 2]
 pub struct png::StripDecoder<S>

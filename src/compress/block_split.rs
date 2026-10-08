@@ -135,8 +135,8 @@ const LITERAL_CATEGORY: [u8; 256] = {
 /// is observed as a runs-only parse would see it: a run of 5+ equal bytes is
 /// a literal plus one match observation, any other byte a literal.
 /// Parse-independent, so every parser that uses it splits the input
-/// identically. Never past `begin + max_len` (or `end`); never leaves a tail
-/// shorter than [`MIN_BLOCK_LENGTH`].
+/// identically. Extends the cap by up to [`MIN_BLOCK_LENGTH`] to absorb a
+/// short final tail; never goes past `end`.
 pub(crate) fn input_block_end(input: &[u8], begin: usize, end: usize, max_len: usize) -> usize {
     let max_end = if end - begin <= max_len + MIN_BLOCK_LENGTH {
         end

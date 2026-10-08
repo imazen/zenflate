@@ -198,6 +198,28 @@ pub struct DecompressOutcome {
     pub output_written: usize,
 }
 
+/// What the zlib and gzip decoders do with the stream's checksum (zlib's
+/// Adler-32, gzip's CRC-32). Set with
+/// [`Decompressor::with_checksum`]. Streaming decoders accept the same policy.
+/// Raw DEFLATE has no checksum, so the policy doesn't apply to it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum ChecksumPolicy {
+    /// Compute the checksum and compare it with the stream's; a mismatch is
+    /// [`DecompressionError::ChecksumMismatch`]. The default.
+    #[default]
+    Verify,
+    /// Compute and compare, but report a mismatch through
+    /// `checksum_matched()` (`Some(false)`) instead of failing. The output
+    /// is still returned.
+    Report,
+    /// Neither compute nor compare: skips the checksum pass over the output.
+    /// `checksum_matched()` returns `None`. The trailer is still read, and
+    /// gzip's length field is still checked: a wrong length is
+    /// [`DecompressionError::ChecksumMismatch`].
+    Ignore,
+}
+
 /// DEFLATE/zlib/gzip decompressor.
 ///
 /// Reusable across multiple decompression calls. Caches static Huffman
@@ -219,29 +241,6 @@ pub struct DecompressOutcome {
 /// let result = d.deflate_decompress(&compressed[..csize], &mut output, Unstoppable).unwrap();
 /// assert_eq!(&output[..result.output_written], &data[..]);
 /// ```
-/// What the zlib and gzip decoders do with the stream's checksum (zlib's
-/// Adler-32, gzip's CRC-32). Set with
-/// [`Decompressor::with_checksum`] or
-/// [`StreamDecompressor::with_checksum`](crate::StreamDecompressor::with_checksum).
-/// Raw DEFLATE has no checksum, so the policy doesn't apply to it.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
-#[non_exhaustive]
-pub enum ChecksumPolicy {
-    /// Compute the checksum and compare it with the stream's; a mismatch is
-    /// [`DecompressionError::ChecksumMismatch`]. The default.
-    #[default]
-    Verify,
-    /// Compute and compare, but report a mismatch through
-    /// `checksum_matched()` (`Some(false)`) instead of failing. The output
-    /// is still returned.
-    Report,
-    /// Neither compute nor compare: skips the checksum pass over the output.
-    /// `checksum_matched()` returns `None`. The trailer is still read, and
-    /// gzip's length field is still checked: a wrong length is
-    /// [`DecompressionError::ChecksumMismatch`].
-    Ignore,
-}
-
 pub struct Decompressor {
     pub(crate) precode_lens: [u8; DEFLATE_NUM_PRECODE_SYMS],
     pub(crate) precode_decode_table: [u32; PRECODE_ENOUGH],
@@ -413,7 +412,8 @@ impl Decompressor {
     /// - `None` — footer not yet processed (raw DEFLATE or not yet
     ///   decompressed), or the policy is [`ChecksumPolicy::Ignore`]
     /// - `Some(true)` — checksum matched
-    /// - `Some(false)` — checksum mismatch (only with [`ChecksumPolicy::Report`])
+    /// - `Some(false)` — checksum mismatch (also recorded before a
+    ///   [`ChecksumPolicy::Verify`] error)
     #[must_use]
     pub fn checksum_matched(&self) -> Option<bool> {
         self.checksum_matched
@@ -439,6 +439,7 @@ impl Decompressor {
         output: &mut [u8],
         stop: impl enough::Stop,
     ) -> Result<DecompressOutcome, DecompressionError> {
+        self.checksum_matched = None;
         let (input_consumed, output_written) =
             self.deflate_decompress_core(input, output, &stop)?;
         Ok(DecompressOutcome {
@@ -461,6 +462,7 @@ impl Decompressor {
         output: &mut [u8],
         stop: impl enough::Stop,
     ) -> Result<DecompressOutcome, DecompressionError> {
+        self.checksum_matched = None;
         let hdr_err = DecompressionError::InvalidHeader;
 
         if input.len() < ZLIB_MIN_OVERHEAD {
@@ -524,6 +526,7 @@ impl Decompressor {
         output: &mut [u8],
         stop: impl enough::Stop,
     ) -> Result<DecompressOutcome, DecompressionError> {
+        self.checksum_matched = None;
         let hdr_err = DecompressionError::InvalidHeader;
 
         if input.len() < GZIP_MIN_OVERHEAD {
@@ -840,6 +843,10 @@ pub(crate) fn fastloop_match_copy(
         }
     }
 }
+
+#[cfg(test)]
+#[path = "match_copy_tests.rs"]
+mod match_copy_tests;
 
 // ---------------------------------------------------------------------------
 // build_decode_table
