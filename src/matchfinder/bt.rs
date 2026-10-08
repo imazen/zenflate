@@ -12,9 +12,9 @@
 //! but requires nearly twice as much memory.
 
 #[cfg(not(feature = "std"))]
-#[cfg(not(feature = "unchecked"))]
 use alloc::boxed::Box;
 
+#[cfg(not(feature = "unchecked"))]
 use super::lz_extend;
 use super::{
     MATCHFINDER_INITVAL, MATCHFINDER_WINDOW_SIZE, lz_hash, matchfinder_init, matchfinder_rebase,

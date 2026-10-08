@@ -25,6 +25,7 @@ jobs:
       matrix:
         target:
           - fuzz_decompress
+          - fuzz_inflate_diff
           - fuzz_roundtrip
           - fuzz_api
     steps:
@@ -54,8 +55,15 @@ jobs:
       - name: Seed corpus
         run: |
           mkdir -p fuzz/corpus/${{ matrix.target }}
-          cp fuzz/regression/* fuzz/corpus/${{ matrix.target }}/ 2>/dev/null || true
-          cp fuzz/seed_corpus/${{ matrix.target }}/* fuzz/corpus/${{ matrix.target }}/ 2>/dev/null || true
+          find fuzz/regression -type f ! -name '*.md' ! -name '*.txt' \
+            -exec cp '{}' fuzz/corpus/${{ matrix.target }}/ \;
+          if [ -d fuzz/seed_corpus/${{ matrix.target }} ]; then
+            cp -R fuzz/seed_corpus/${{ matrix.target }}/. fuzz/corpus/${{ matrix.target }}/
+          fi
+          if [ '${{ matrix.target }}' = fuzz_inflate_diff ]; then
+            # Two source/capacity selectors, then an empty fixed-Huffman stream.
+            printf '\000\000\003\000' > fuzz/corpus/fuzz_inflate_diff/empty-fixed
+          fi
 
       - name: Fuzz ${{ matrix.target }}
         run: |
@@ -95,8 +103,7 @@ jobs:
       # has existed the whole time, so the "no test harness" fallback was never
       # the real case. Do not reintroduce a fallback: if the suite cannot run, go red.
       #
-      # zenflate's seed corpus is currently empty on purpose — see MIN_SEEDS in
-      # tests/fuzz_regression.rs. The step still runs so the harness must compile
-      # and the entry points must stay callable.
+      # tests/fuzz_regression.rs pins the committed seed count and checks that
+      # the corpus exists before replaying it through the target entry points.
       - name: Regression seeds
         run: cargo test --test fuzz_regression

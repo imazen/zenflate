@@ -6,31 +6,31 @@
 # impls omitted; re-export duplicates annotated `[also: path]`.
 # DO NOT EDIT BY HAND — commit regenerated changes with the code.
 #
-# files: zenflate.txt 218 lines (supported surface) | zenflate.features.txt 0 added (features: alloc,avx512,compress,simd,std,threads,unchecked) | zenflate.internal.txt 8 lines (8 hidden + 0 excluded-feature)
+# files: zenflate.txt 230 lines (supported surface) | zenflate.features.txt 0 added (features: alloc,avx512,compress,simd,std,threads,unchecked) | zenflate.internal.txt 10 lines (10 hidden + 0 excluded-feature)
 
 ## summary
 #
 #   pub modules                                 7
-#   pub types (struct/enum/trait/alias)        30
+#   pub types (struct/enum/trait/alias)        32
 #   pub consts/statics                          2
 #   free functions                              8
-#   inherent methods                          139
+#   inherent methods                          143
 #   struct fields                               4
-#   enum variants                              22
+#   enum variants                              28
 #   re-exports                                  3
-#   trait roster entries (type × trait)        57
-#   auto-trait-complete types                  10
+#   trait roster entries (type × trait)        64
+#   auto-trait-complete types                  11
 #   auto-trait exceptions                       4
 #
 # per-module pub lines:
-#   (root)                           73
+#   (root)                           77
 #   checksum                          6
 #   compress                         55
-#   decompress                       52
+#   decompress                       60
 #   error                            14
 #   png                              15
 
-## items (197 lines)
+## items (208 lines)
 
 pub mod zenflate
 pub use Stop
@@ -92,17 +92,22 @@ pub fn decompress::streaming::StreamDecompressor<S>::zlib(S, usize) -> Self
 pub fn decompress::streaming::StreamDecompressor<S>::checksum_matched(&self) -> core::option::Option<bool>
 pub fn decompress::streaming::StreamDecompressor<S>::into_inner(self) -> S
 pub fn decompress::streaming::StreamDecompressor<S>::source_ref(&self) -> &S
+pub fn decompress::streaming::StreamDecompressor<S>::with_checksum(self, decompress::ChecksumPolicy) -> Self
 pub fn decompress::streaming::StreamDecompressor<S>::with_max_output_size(self, core::option::Option<usize>) -> Self
 pub fn decompress::streaming::StreamDecompressor<S>::with_skip_checksum(self, bool) -> Self
 pub type decompress::streaming::InputSource::Error
 pub fn decompress::streaming::InputSource::consume(&mut self, usize)
 pub fn decompress::streaming::InputSource::fill_buf(&mut self) -> core::result::Result<&[u8], Self::Error>
+pub decompress::ChecksumPolicy::Ignore
+pub decompress::ChecksumPolicy::Report
+pub decompress::ChecksumPolicy::Verify
 pub decompress::DecompressOutcome::input_consumed: usize
 pub decompress::DecompressOutcome::output_written: usize
 pub fn decompress::Decompressor::checksum_matched(&self) -> core::option::Option<bool>
 pub fn decompress::Decompressor::deflate_decompress(&mut self, &[u8], &mut [u8], impl enough::Stop) -> core::result::Result<decompress::DecompressOutcome, error::DecompressionError>
 pub fn decompress::Decompressor::gzip_decompress(&mut self, &[u8], &mut [u8], impl enough::Stop) -> core::result::Result<decompress::DecompressOutcome, error::DecompressionError>
 pub fn decompress::Decompressor::new() -> Self
+pub fn decompress::Decompressor::with_checksum(self, decompress::ChecksumPolicy) -> Self
 pub fn decompress::Decompressor::with_max_output_size(self, core::option::Option<usize>) -> Self
 pub fn decompress::Decompressor::with_skip_checksum(self, bool) -> Self
 pub fn decompress::Decompressor::zlib_decompress(&mut self, &[u8], &mut [u8], impl enough::Stop) -> core::result::Result<decompress::DecompressOutcome, error::DecompressionError>
@@ -134,6 +139,10 @@ pub fn png::StripDecoder<S>::is_done(&self) -> bool
 pub fn png::StripDecoder<S>::new(S, bool, usize) -> Self
 pub fn png::StripDecoder<S>::peek(&self) -> &[u8]
 pub fn png::StripDecoder<S>::trailer(&self) -> core::option::Option<u32>
+#[non_exhaustive] pub enum ChecksumPolicy [also: decompress]
+pub ChecksumPolicy::Ignore
+pub ChecksumPolicy::Report
+pub ChecksumPolicy::Verify
 #[non_exhaustive] pub enum CompressionError [also: error]
 pub CompressionError::InsufficientSpace
 pub CompressionError::Stopped(enough::reason::StopReason)
@@ -203,6 +212,7 @@ pub fn decompress::Decompressor::checksum_matched(&self) -> core::option::Option
 pub fn decompress::Decompressor::deflate_decompress(&mut self, &[u8], &mut [u8], impl enough::Stop) -> core::result::Result<decompress::DecompressOutcome, error::DecompressionError>
 pub fn decompress::Decompressor::gzip_decompress(&mut self, &[u8], &mut [u8], impl enough::Stop) -> core::result::Result<decompress::DecompressOutcome, error::DecompressionError>
 pub fn decompress::Decompressor::new() -> Self
+pub fn decompress::Decompressor::with_checksum(self, decompress::ChecksumPolicy) -> Self
 pub fn decompress::Decompressor::with_max_output_size(self, core::option::Option<usize>) -> Self
 pub fn decompress::Decompressor::with_skip_checksum(self, bool) -> Self
 pub fn decompress::Decompressor::zlib_decompress(&mut self, &[u8], &mut [u8], impl enough::Stop) -> core::result::Result<decompress::DecompressOutcome, error::DecompressionError>
@@ -218,6 +228,7 @@ pub fn decompress::streaming::StreamDecompressor<S>::zlib(S, usize) -> Self
 pub fn decompress::streaming::StreamDecompressor<S>::checksum_matched(&self) -> core::option::Option<bool>
 pub fn decompress::streaming::StreamDecompressor<S>::into_inner(self) -> S
 pub fn decompress::streaming::StreamDecompressor<S>::source_ref(&self) -> &S
+pub fn decompress::streaming::StreamDecompressor<S>::with_checksum(self, decompress::ChecksumPolicy) -> Self
 pub fn decompress::streaming::StreamDecompressor<S>::with_max_output_size(self, core::option::Option<usize>) -> Self
 pub fn decompress::streaming::StreamDecompressor<S>::with_skip_checksum(self, bool) -> Self
 pub const DEFAULT_CAPACITY: usize [also: decompress::streaming]
@@ -230,7 +241,7 @@ pub fn adler32_combine(u32, u32, usize) -> u32 [also: checksum]
 pub fn crc32(u32, &[u8]) -> u32 [also: checksum]
 pub fn crc32_combine(u32, u32, usize) -> u32 [also: checksum]
 
-## trait impls (16 types)
+## trait impls (17 types)
 
 &[u8]: decompress::streaming::InputSource
 Adler32Hasher: Clone, Debug, Default, Hasher
@@ -238,6 +249,7 @@ Crc32Hasher: Clone, Debug, Default, Hasher
 compress::CompressionLevel: Clone, Copy, Debug, Default, Eq, Hash, PartialEq
 compress::Compressor: Clone, Debug, Default
 compress::CompressorSnapshot: Clone, Debug
+decompress::ChecksumPolicy: Clone, Copy, Debug, Default, Eq, Hash, PartialEq
 decompress::DecompressOutcome: Clone, Copy, Debug, Eq, Hash, PartialEq
 decompress::Decompressor: Debug, Default
 decompress::streaming::BufReadSource<R>: Debug, decompress::streaming::InputSource
@@ -251,7 +263,7 @@ png::StripDecoder<S>: Debug
 
 ## auto traits
 
-10 types implement all of: Freeze, RefUnwindSafe, Send, Sync, Unpin, UnwindSafe
+11 types implement all of: Freeze, RefUnwindSafe, Send, Sync, Unpin, UnwindSafe
 decompress::streaming::BufReadSource<R>: !Freeze !RefUnwindSafe !Send !Sync !Unpin !UnwindSafe
 decompress::streaming::StreamDecompressor<S>: !Freeze !RefUnwindSafe !Send !Sync !Unpin !UnwindSafe
 error::StreamError<E>: !Freeze !RefUnwindSafe !Send !Sync !Unpin !UnwindSafe

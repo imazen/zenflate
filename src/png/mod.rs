@@ -151,10 +151,9 @@ impl StripCompressor {
 
     /// Compress the strip `input[strip_start..]`, letting matches reach back
     /// into `input[..strip_start]`: the image bytes just before the strip
-    /// (only the last 32 KiB are used). Strips compressed this way are
-    /// smaller than independent ones (on filtered PNG rows split into
-    /// 512 KiB strips: up to about 1% of the stream recovered, within
-    /// 0.33% of compressing the image as one stream), but they decode only
+    /// (only the last 32 KiB are used). History can recover matches across
+    /// strip boundaries; encoded size still depends on the input and strip
+    /// layout. These strips decode only
     /// after the strips before them, so [`StripDecoder`] cannot decode them
     /// on their own: don't use this for files that carry an `iDOT` table.
     ///
@@ -220,7 +219,7 @@ impl<S: InputSource> StripDecoder<S> {
     /// Panics if `capacity` is 0.
     pub fn new(source: S, first_strip: bool, capacity: usize) -> Self {
         let inner = if first_strip {
-            StreamDecompressor::zlib(source, capacity).with_skip_checksum(true)
+            StreamDecompressor::zlib(source, capacity).with_checksum(crate::ChecksumPolicy::Report)
         } else {
             StreamDecompressor::zlib_continuation(source, capacity)
         };

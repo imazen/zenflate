@@ -104,7 +104,7 @@ pub use compress::{CompressionLevel, Compressor, CompressorSnapshot};
 pub use decompress::streaming::BufReadSource;
 #[cfg(feature = "alloc")]
 pub use decompress::streaming::{DEFAULT_CAPACITY, InputSource, StreamDecompressor};
-pub use decompress::{DecompressOutcome, Decompressor};
+pub use decompress::{ChecksumPolicy, DecompressOutcome, Decompressor};
 pub use enough::{Stop, StopReason, Unstoppable};
 #[cfg(feature = "alloc")]
 pub use error::StreamError;
