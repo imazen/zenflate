@@ -1,6 +1,6 @@
 # zenflate [![CI](https://img.shields.io/github/actions/workflow/status/imazen/zenflate/ci.yml?style=flat-square&label=CI)](https://github.com/imazen/zenflate/actions/workflows/ci.yml) [![crates.io](https://img.shields.io/crates/v/zenflate?style=flat-square)](https://crates.io/crates/zenflate) [![lib.rs](https://img.shields.io/crates/v/zenflate?style=flat-square&label=lib.rs&color=blue)](https://lib.rs/crates/zenflate) [![docs.rs](https://img.shields.io/docsrs/zenflate?style=flat-square)](https://docs.rs/zenflate) [![MSRV](https://img.shields.io/badge/MSRV-1.89-blue?style=flat-square)](https://doc.rust-lang.org/cargo/reference/manifest.html#the-rust-version-field) [![license](https://img.shields.io/badge/license-AGPL--3.0%20%2F%20Commercial-blue?style=flat-square)](#license)
 
-Pure Rust DEFLATE / zlib / gzip. Compression spans effort levels 0–200 across seven strategies (and can emit byte-identical output to C libdeflate on demand), with whole-buffer and streaming decompression plus SIMD Adler-32 / CRC-32. `#![forbid(unsafe_code)]` by default (with an opt-in `unchecked` fast path) and `no_std`-friendly: compression and streaming decompression require `alloc`, while whole-buffer decompression is fully stack-allocated.
+Pure Rust DEFLATE / zlib / gzip. Compression spans effort levels 0–200 across seven strategies (and can emit byte-identical output to C libdeflate on demand), with whole-buffer and streaming decompression plus SIMD Adler-32 / CRC-32. `#![forbid(unsafe_code)]` by default (with an opt-in `unchecked` fast path) and `no_std`-friendly: compression and streaming decompression require `alloc`, while whole-buffer decompression works without `alloc`. With `std`, the fixed-Huffman table cache allocates once per process.
 
 ## Quick start
 
@@ -203,19 +203,6 @@ Reuse `Compressor` and `Decompressor` across calls to avoid re-initialization.
 
 #### Recommended effort levels
 
-Benchmarked on real images (10 screenshots, 10 photos) from the
-[codec-corpus](https://crates.io/crates/codec-corpus). Ratio = compressed / raw
-size (lower is better). Speed = compression throughput.
-
-| Effort | Preset | Strategy | Screenshots | Photos | Note |
-|--------|--------|----------|-------------|--------|------|
-| 1 | `fastest()` | Turbo | 6.2%, 2360 MiB/s | 73.4%, 225 MiB/s | Max throughput |
-| 9 | — | FastHt | 5.9%, 2175 MiB/s | 73.0%, 164 MiB/s | Best cheap compression |
-| 10 | `fast()` | Greedy | 5.3%, 630 MiB/s | 70.7%, 118 MiB/s | Hash chains — big ratio jump |
-| 15 | `balanced()` | Lazy | 5.1%, 466 MiB/s | 69.7%, 90 MiB/s | Good default |
-| 22 | `high()` | Lazy2 | 4.9%, 197 MiB/s | 69.8%, 72 MiB/s | Best before near-optimal |
-| 30 | `best()` | NearOptimal | 4.4%, 11 MiB/s | 67.4%, 19 MiB/s | Maximum compression |
-
 For most uses, `balanced()` (effort 15) is a good default. Use `fast()` (effort 10)
 when speed matters more than the last few percent of compression.
 
@@ -235,12 +222,14 @@ scanlines with long byte runs and literal-heavy residuals.
 | `png(23..=30)` | `new(23..=30)`'s near-optimal settings |
 | `png(31..)` | Same as `new(31..)` (full optimal parsing) |
 
-From `png(3)` through `png(30)` every block is also parsed runs-only and the
-smaller parse is written, so no level loses to runs-only on flat-colour art.
-From `png(10)` through `png(26)` block boundaries come from the input alone, so
-every level splits a given image the same way and a higher level only searches
-harder inside the same blocks; `png(27..=30)` keep those boundaries and may also
-split inside them (about 0.1% smaller, less strictly nested). `monotonicity_fallback()` names the lower level
+From `png(3)` through `png(30)` a runs-only guard compares the selected blocks
+against a runs-only parse and writes the cheaper Huffman encoding. After a
+clear loss, the guard skips the next three blocks. This improves flat-colour
+art but does not guarantee output no larger than `png(2)`.
+From `png(10)` through `png(26)` target block boundaries come from the input
+alone; near-optimal parsing can still end a block early if its match cache
+fills. `png(27..=30)` can also split inside those input-derived segments
+(about 0.1% smaller on the measured set, less strictly nested). `monotonicity_fallback()` names the lower level
 to compare against at each change of algorithm.
 
 ```rust
@@ -321,7 +310,7 @@ let size = compressor
 ```
 
 Splits input into chunks with 32KB dictionary overlap, compresses in parallel,
-concatenates into a valid gzip stream. Near-linear scaling (3.3x with 4 threads).
+concatenates into a valid gzip stream. Scaling depends on input size and content.
 
 ### Cancellation
 
@@ -371,7 +360,7 @@ For a minimal, fast-to-compile decoder, disable default features:
 zenflate = { version = "0.4.0", default-features = false, features = ["std"] }
 ```
 
-That decode-only configuration builds in well under a second with a single
+That decode-only configuration has a single direct
 dependency (`enough`) — no proc macros, no SIMD — and still decodes all three
 formats with checksum verification (scalar Adler-32/CRC-32).
 
@@ -404,38 +393,34 @@ are not equivalent across libraries — compare at matched ratio (see the benchm
 file). Via `CompressionLevel::libdeflate(n)`, zenflate emits **byte-identical**
 output to C libdeflate at every level.
 
-**Decompression** (1 MB, compressed at zenflate L6, *higher is better*):
+**Decompression** (1,000,000 bytes, compressed at zenflate L6, *lower is better*):
 
 | Data | zenflate | libdeflate (C) | flate2 (zlib-rs) | miniz_oxide |
 |------|----------|----------------|------------------|-------------|
-| Sequential | 21.3 GiB/s | 27.7 GiB/s | 25.8 GiB/s | 11.0 GiB/s |
-| Mixed | 763 MiB/s | 806 MiB/s | 649 MiB/s | 552 MiB/s |
-| Photo | 662 MiB/s | 694 MiB/s | 578 MiB/s | 476 MiB/s |
+| Sequential | 45.9 µs | 35.2 µs | 37.9 µs | 89.0 µs |
+| Mixed | 1.31 ms | 1.24 ms | 1.54 ms | 1.81 ms |
+| Photo | 1.51 ms | 1.44 ms | 1.73 ms | 2.10 ms |
 
-On realistic data zenflate is the **fastest Rust decoder** (13–15% ahead of
-zlib-rs/flate2, ~20% ahead of zune-inflate) and within ~5% of C libdeflate.
+These are the times from the committed ecosystem record linked above. On its
+synthetic mixed/photo inputs zenflate was the fastest Rust decoder measured.
+The same record's Silesia results vary by file and do not support a universal lead.
 
 **PNG streams** (106 IDAT streams, 64–2560 px, median time per image relative to
-fdeflate, current main after 0.4.0, Core Ultra 7 265K one core): one-shot
+fdeflate, measured 2026-10-07 after 0.4.0, Core Ultra 7 265K one core): one-shot
 0.96×, streaming 0.98×; Ryzen 9 9950X3D (Zen 5) one-shot 0.98× with the
 AVX-512 build; Neoverse-N1 one-shot 0.83×, streaming 0.87×
 ([`benchmarks/chunk32_copy_2026-10-07.txt`](https://github.com/imazen/zenflate/blob/main/benchmarks/chunk32_copy_2026-10-07.txt),
 [`benchmarks/oneshot_v4_2026-10-07.txt`](https://github.com/imazen/zenflate/blob/main/benchmarks/oneshot_v4_2026-10-07.txt)).
 
-**Checksums** (1 MiB sequential, `avx512` default-on):
+**Checksums** (1 MiB, median of five interleaved rounds on the same Zen 4 host,
+2026-07-13):
 
-| Algorithm | zenflate | libdeflate (C) | vs C | Implementation |
-|-----------|----------|----------------|------|----------------|
-| Adler-32 | 110 GiB/s | 118 GiB/s | 0.93× | AVX-512 VNNI (x86), NEON (aarch64), WASM simd128 |
-| CRC-32 | 77 GiB/s | 75 GiB/s | 1.02× | PCLMULQDQ (x86), PMULL (aarch64) |
+| Algorithm | Without `avx512` | With `avx512` |
+|-----------|-----------------|---------------|
+| Adler-32 | 77.4 GiB/s | 112.8 GiB/s |
+| CRC-32 | 18.4 GiB/s | 78.2 GiB/s |
 
-**Parallel gzip** (4 MiB mixed, `gzip_compress_parallel`):
-
-| Level | 1 thread | 4 threads | Speedup |
-|-------|----------|-----------|---------|
-| effort 1 | 21 ms | 6.2 ms | 3.4× |
-| effort 15 | 38 ms | 11 ms | 3.5× |
-| effort 30 | 178 ms | 52 ms | 3.4× |
+Source: [AVX-512 checksum A/B](https://github.com/imazen/zenflate/blob/main/benchmarks/avx512_checksum_ab_2026-07-13.md).
 
 <!-- crates.io:skip-end -->
 ## How it works

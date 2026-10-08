@@ -1,6 +1,6 @@
 //! PNG-tuned compression for [`CompressionLevel::png`](super::CompressionLevel::png)
 //! efforts 2-9 (effort 1 is the ultra-fast encoder in `png_ultra`), and the
-//! runs-only guard ([`RunsGuard`]) that efforts 10-18 add to the lazy parser.
+//! runs-only guard ([`RunsGuard`]) used by efforts 10-30.
 //!
 //! PNG encoders hand DEFLATE filtered scanlines: per-row residuals that are
 //! mostly small literals, long runs of a repeated byte (flat regions after
@@ -90,8 +90,9 @@ pub(crate) struct PngParams {
 const SKIP_STEP_MAX: usize = 256;
 
 /// Parser settings for [`CompressionLevel::png`](super::CompressionLevel::png)
-/// efforts 2-9 (effort 1 is the ultra-fast encoder in `png_ultra`; 10 and up
-/// use the lazy parsers with [`RunsGuard`]); `None` outside that range.
+/// efforts 2-9 (effort 1 is the ultra-fast encoder in `png_ultra`; 10-18
+/// use lazy parsing, 19-30 near-optimal, and 31+ full-optimal);
+/// `None` outside that range.
 ///
 /// Chosen on 146-150 held-out imazen-26 cluster representatives at three
 /// sizes for per-image monotonicity, not only aggregate position: the knobs
@@ -334,7 +335,6 @@ fn extend_forward(data: &[u8], ai: usize, bi: usize, max: usize) -> usize {
     len
 }
 
-/// Per-call parser settings derived from [`PngParams`].
 /// png(2)'s settings: the runs-only parse every guard compares against.
 /// The guards must use exactly these, so a guarded block is never larger
 /// than png(2)'s. Using the level's own skip shift and minimum match (as
@@ -348,6 +348,7 @@ const RUNS_ONLY_CFG: ParseCfg = ParseCfg {
     nice: DEFLATE_MAX_MATCH_LEN as usize,
 };
 
+/// Per-call parser settings derived from [`PngParams`].
 struct ParseCfg {
     skip_shift: u32,
     mm: usize,

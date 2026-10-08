@@ -2,7 +2,7 @@
 
 # zenflate
 
-Pure Rust DEFLATE / zlib / gzip. Compression spans effort levels 0–200 across seven strategies (and can emit byte-identical output to C libdeflate on demand), with whole-buffer and streaming decompression plus SIMD Adler-32 / CRC-32. `#![forbid(unsafe_code)]` by default (with an opt-in `unchecked` fast path) and `no_std`-friendly: compression and streaming decompression require `alloc`, while whole-buffer decompression is fully stack-allocated.
+Pure Rust DEFLATE / zlib / gzip. Compression spans effort levels 0–200 across seven strategies (and can emit byte-identical output to C libdeflate on demand), with whole-buffer and streaming decompression plus SIMD Adler-32 / CRC-32. `#![forbid(unsafe_code)]` by default (with an opt-in `unchecked` fast path) and `no_std`-friendly: compression and streaming decompression require `alloc`, while whole-buffer decompression works without `alloc`. With `std`, the fixed-Huffman table cache allocates once per process.
 
 ## Quick start
 
@@ -205,19 +205,6 @@ Reuse `Compressor` and `Decompressor` across calls to avoid re-initialization.
 
 #### Recommended effort levels
 
-Benchmarked on real images (10 screenshots, 10 photos) from the
-[codec-corpus](https://crates.io/crates/codec-corpus). Ratio = compressed / raw
-size (lower is better). Speed = compression throughput.
-
-| Effort | Preset | Strategy | Screenshots | Photos | Note |
-|--------|--------|----------|-------------|--------|------|
-| 1 | `fastest()` | Turbo | 6.2%, 2360 MiB/s | 73.4%, 225 MiB/s | Max throughput |
-| 9 | — | FastHt | 5.9%, 2175 MiB/s | 73.0%, 164 MiB/s | Best cheap compression |
-| 10 | `fast()` | Greedy | 5.3%, 630 MiB/s | 70.7%, 118 MiB/s | Hash chains — big ratio jump |
-| 15 | `balanced()` | Lazy | 5.1%, 466 MiB/s | 69.7%, 90 MiB/s | Good default |
-| 22 | `high()` | Lazy2 | 4.9%, 197 MiB/s | 69.8%, 72 MiB/s | Best before near-optimal |
-| 30 | `best()` | NearOptimal | 4.4%, 11 MiB/s | 67.4%, 19 MiB/s | Maximum compression |
-
 For most uses, `balanced()` (effort 15) is a good default. Use `fast()` (effort 10)
 when speed matters more than the last few percent of compression.
 
@@ -237,12 +224,14 @@ scanlines with long byte runs and literal-heavy residuals.
 | `png(23..=30)` | `new(23..=30)`'s near-optimal settings |
 | `png(31..)` | Same as `new(31..)` (full optimal parsing) |
 
-From `png(3)` through `png(30)` every block is also parsed runs-only and the
-smaller parse is written, so no level loses to runs-only on flat-colour art.
-From `png(10)` through `png(26)` block boundaries come from the input alone, so
-every level splits a given image the same way and a higher level only searches
-harder inside the same blocks; `png(27..=30)` keep those boundaries and may also
-split inside them (about 0.1% smaller, less strictly nested). `monotonicity_fallback()` names the lower level
+From `png(3)` through `png(30)` a runs-only guard compares the selected blocks
+against a runs-only parse and writes the cheaper Huffman encoding. After a
+clear loss, the guard skips the next three blocks. This improves flat-colour
+art but does not guarantee output no larger than `png(2)`.
+From `png(10)` through `png(26)` target block boundaries come from the input
+alone; near-optimal parsing can still end a block early if its match cache
+fills. `png(27..=30)` can also split inside those input-derived segments
+(about 0.1% smaller on the measured set, less strictly nested). `monotonicity_fallback()` names the lower level
 to compare against at each change of algorithm.
 
 ```rust
@@ -323,7 +312,7 @@ let size = compressor
 ```
 
 Splits input into chunks with 32KB dictionary overlap, compresses in parallel,
-concatenates into a valid gzip stream. Near-linear scaling (3.3x with 4 threads).
+concatenates into a valid gzip stream. Scaling depends on input size and content.
 
 ### Cancellation
 
@@ -373,7 +362,7 @@ For a minimal, fast-to-compile decoder, disable default features:
 zenflate = { version = "0.4.0", default-features = false, features = ["std"] }
 ```
 
-That decode-only configuration builds in well under a second with a single
+That decode-only configuration has a single direct
 dependency (`enough`) — no proc macros, no SIMD — and still decodes all three
 formats with checksum verification (scalar Adler-32/CRC-32).
 

@@ -23,6 +23,10 @@ Pure Rust DEFLATE/zlib/gzip compression and decompression.
 - `src/decompress/mod.rs` — gzip/zlib wrappers integrated into Decompressor
 
 ## Implementation Status
+
+Historical progress record: test counts and timings in phase summaries describe
+the prior sessions, not current measurements. Performance claims require the
+dated committed runs linked below; unarchived figures are not verified baselines.
 - [x] Phase 1: Foundation + Checksums (Adler-32, CRC-32 scalar, 23 parity tests)
 - [x] Phase 2: Decompression (generic loop, all 3 formats, 10 parity tests at all levels)
 - [x] Phase 3: Compression Core (bitstream writer, Huffman construction, block flushing, 55 tests)
@@ -39,7 +43,7 @@ Pure Rust DEFLATE/zlib/gzip compression and decompression.
     31-200 = Zopfli-style FullOptimal (iterations = effort − 16)
   - CompressionLevel::libdeflate(level) for byte-identical C parity (0-12)
   - Turbo (effort 1-4): dynamic Huffman + single-entry hash, limited skip updates
-  - FastHt (effort 5-7): dynamic Huffman + 2-entry hash, limited skip updates
+  - FastHt (effort 5-9): dynamic Huffman + 2-entry hash, limited skip updates
   - Named presets: none(), fastest(), fast(), balanced(), high(), best()
   - 195 tests + 10 doctests pass
 - [x] Phase 10 (0.4.0): Feature split — `compress` (compression + matchfinders,
@@ -102,45 +106,46 @@ no `-C target-cpu=native`** — the full tables live in:
 
 ≈C at L6, ~2× every Rust crate at L6+, ~2× C at L12 (different near-optimal
 algorithm). Byte-identical to C at every level via `CompressionLevel::libdeflate(n)`.
-3 MB near-incompressible synthetic photo (`examples/ratio_bench.rs`, safe): zenflate
-e1 172 / e15 88 / e30 10 MiB/s vs libdeflate L1 178 / L9 114 / L12 43 — this is the
-worst case for effort near-optimal (real corpora invert it; see ecosystem file).
-`unchecked` adds +0–12% at L1, +0–6% at L6+ (compression only).
+The earlier 3 MB synthetic-photo rates and `unchecked` percentage range have
+no committed supporting capture linked here; remeasure before using them.
 
-### Decompression (higher = faster; `unchecked` does NOT help — safe is equal/faster)
+### Decompression (lower = faster)
 
-1 MB compressed at zenflate L6:
+1,000,000 bytes compressed at zenflate L6, from the committed 2026-07-13
+ecosystem record. These are recorded latencies; the earlier throughput table
+used inconsistent MB/MiB labels.
 
 | Data | zenflate | libdeflate (C) | flate2 (zlib-rs) | miniz_oxide |
 |---|---|---|---|---|
-| Sequential | 21.3 GiB/s | 27.7 GiB/s | 25.8 GiB/s | 11.0 GiB/s |
-| Mixed | 763 MiB/s | 806 MiB/s | 649 MiB/s | 552 MiB/s |
-| Photo | 662 MiB/s | 694 MiB/s | 578 MiB/s | 476 MiB/s |
+| Sequential | 45.9 µs | 35.2 µs | 37.9 µs | 89.0 µs |
+| Mixed | 1.31 ms | 1.24 ms | 1.54 ms | 1.81 ms |
+| Photo | 1.51 ms | 1.44 ms | 1.73 ms | 2.10 ms |
 
-Fastest Rust decoder on realistic data (13–15% ahead of zlib-rs/flate2, ~20% ahead
-of zune-inflate), within ~5% of C. aarch64 lead is *wider* (see ecosystem file).
-Streaming decode overhead ≈1.1–1.6× whole-buffer depending on chunk size.
+Fastest Rust decoder on the synthetic mixed/photo workloads in that dated run;
+the same ecosystem record includes Silesia cases where other Rust decoders are faster.
+See its separate aarch64 results rather than extending the synthetic ranking.
 
-### Checksums (1 MiB sequential, `avx512` default-on)
+### Checksums (1 MiB, measured 2026-07-13)
 
-| Algorithm | zenflate | libdeflate (C) | vs C |
-|---|---|---|---|
-| Adler-32 | 110 GiB/s | 118 GiB/s | 0.93× |
-| CRC-32 | 77 GiB/s | 75 GiB/s | 1.02× |
+Median of five interleaved rounds in
+`benchmarks/avx512_checksum_ab_2026-07-13.md`, same Zen 4 host:
 
-Standalone 512-bit (v4x) vs 256-bit (v3): CRC-32 4.3×, Adler-32 1.1–1.6× — full
-A/B in the avx512 file. Impl: AVX-512 VNNI / PCLMULQDQ (x86), NEON / PMULL
-(aarch64), simd128 (WASM).
+| Algorithm | Without `avx512` | With `avx512` |
+|---|---|---|
+| Adler-32 | 77.4 GiB/s | 112.8 GiB/s |
+| CRC-32 | 18.4 GiB/s | 78.2 GiB/s |
 
-### Parallel gzip (4 MiB mixed, `gzip_compress_parallel`)
-
-| effort | 1 thread | 4 threads | speedup |
-|---|---|---|---|
-| e1 | 21 ms | 6.2 ms | 3.4× |
-| e15 | 38 ms | 11 ms | 3.5× |
-| e30 | 178 ms | 52 ms | 3.4× |
+The previous C-checksum comparison and parallel-gzip timing table had no
+committed supporting capture. They are not retained as measured baselines.
 
 ## Investigation Notes
+
+Evidence status (reviewed 2026-10-08): numbers in the historical callgrind,
+WASM audit, cold-build prototype, early double-literal, and streaming A–F
+notes below are prior-session reports without committed supporting captures.
+They are not verified performance baselines. The explicitly linked committed
+benchmark runs retain their original dates; source-level reasoning was reviewed
+separately from those timing claims.
 
 ### L1 +48% instruction overhead (callgrind)
 - NOT panic-related (zero panic calls in assembly)
@@ -417,8 +422,9 @@ callgrind on one 64 px streaming decode (`png_inflate --profile zenS`):
   re-entry; now only below 4 KiB staged (-1M Ir on a 1024 px RGB decode).
   The remaining cost is one copy of each input byte into staging; decoding
   from the source's slices in place would mean restructuring the bit reader.
-- (E) `with_ignore_checksum` (PR #11): skip-checksum still computed the
-  Adler-32 so `checksum_matched()` could report it; ignoring saves 1-4.5% Ir.
+- (E) `ChecksumPolicy::Ignore` (merged PR #12): Report computes the Adler-32
+  for `checksum_matched()`, while Ignore avoids that computation. The earlier
+  1–4.5% instruction-count claim has no committed supporting capture.
 - (F) Fixed-Huffman tables are built once per process (std, `OnceLock`) and
   copied: 1x1 PNG one-shot 1.3 -> 0.4 us (fdeflate 0.5).
 - (C) The `if doubles` test in the fastloop literal path runs per literal
@@ -449,9 +455,9 @@ callgrind on one 64 px streaming decode (`png_inflate --profile zenS`):
   (png(15) Lazy2 depth 200 lost to png(14) lazy depth 200 on 29/86 images), and
   deep lazy (450) beat every Lazy2 rung: png(10..=18) are all lazy.
 - Below ~10 MB/s near-optimal parsing beats any lazy depth (libdeflate 10 4.120
-  @ 7 MB/s vs lazy depth 3000 3.976 @ 7): png(19..=22) use new(23)'s parser
-  (`CompressionLevel::near_optimal_effort` keeps their output identical to
-  new(23) while `effort()` reports 19-22).
+  @ 7 MB/s vs lazy depth 3000 3.976 @ 7): png(19..=22) now use a two-pass depth/nice ramp (16/48, 24/48,
+  24/64, 35/64). `CompressionLevel::near_optimal_effort` selects writer
+  policy; it does not make those rungs byte-identical to new(23).
 - Block-split butterfly: lazy depth 295 -> 299 made 8007_rgb8_256 7.5% larger:
   a 5-byte shift of the first boundary (18674 vs 18679) cascades into different
   splits for the rest of the stream (libdeflate's statistics-based
@@ -521,4 +527,12 @@ compressor) and the cross-API matrix (`just conformance-full` in release).
 
 ## Known Bugs
 
-(none currently)
+Review regressions (2026-10-08):
+- The unchecked matchfinder import regression was fixed in `eb17f1de`;
+  no_std+compress+unchecked is now in `just check-features`.
+- One-shot `checksum_matched()` retained a previous call's result on raw decode
+  and early wrapper errors. Entry-point resets and `tests/checksum_reuse.rs`
+  now cover reuse, malformed headers, and short output (`66e37b11`).
+- Miri hit an unsupported C oracle call in the dynamic-header test. C checks
+  are native-only; the Rust assertions remain interpreted. Conformance
+  helpers use the same separation (`9e5da1da`). Native CI retains both C oracles.
