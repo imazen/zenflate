@@ -19,6 +19,7 @@ check-features:
     cargo check --no-default-features --features alloc
     cargo check --no-default-features --features std
     cargo check --no-default-features --features compress
+    cargo check --no-default-features --features compress,unchecked
     cargo check --no-default-features --features compress,simd
     cargo check --no-default-features --features simd,avx512,std
     cargo check --no-default-features --features std,unchecked
