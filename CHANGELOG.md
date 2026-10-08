@@ -22,6 +22,8 @@
 
 ### Fixed
 
+- Expand cross-API conformance from png(0..=17) through png(31), and correct the incremental-support matrix to png(10..=18), preserving existing cases and assertions (`c82d7631`). Both new/png ladders cover 32 of 201 efforts; effort 31 represents full-optimal parsing. All 13 libdeflate compatibility levels remain covered.
+
 - Reused one-shot decoders clear `checksum_matched()` before raw decode and early wrapper errors; previously those calls exposed the preceding stream's result (`66e37b11`).
 - Keep C-oracle checks native while retaining Rust assertions under Miri in the dynamic-header test and conformance helpers (`9e5da1da`). The formerly failing dynamic-header test passes under Miri; native coverage is unchanged.
 
