@@ -1195,9 +1195,11 @@ impl Compressor {
     /// **Constraints:**
     /// - `data` must be a superset of the data from the previous call (same prefix,
     ///   with new bytes appended).
-    /// - Total data must fit in the matchfinder window (32 KB for L1-L9).
-    ///   For data exceeding the window, the matchfinder silently handles sliding.
-    /// - Levels 0 and 10-12 are not supported; returns `InsufficientSpace` error.
+    /// - Inputs may exceed the 32 KiB match window; the matchfinder slides
+    ///   while the caller retains the full accumulated input.
+    /// - Supported levels are `new(10..=22)`, `libdeflate(1..=9)`, and
+    ///   `png(10..=18)`. Other strategies return `InsufficientSpace` when
+    ///   asked to encode input or finish a stream.
     ///
     /// Returns the number of bytes written to `output`.
     pub fn deflate_compress_incremental(

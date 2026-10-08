@@ -4,8 +4,8 @@
 test:
     cargo test
 
-# Full cross-API conformance matrix: every level through every compression
-# entry point on inputs up to 1 MiB (the default `cargo test` runs a subset)
+# Full cross-API matrix: new/png 0–31 and all libdeflate compatibility levels
+# on inputs up to 1 MiB (the default `cargo test` uses smaller inputs)
 conformance-full:
     ZENFLATE_CONFORMANCE=full cargo test --release --test conformance
 
@@ -148,3 +148,7 @@ check-docs:
 # Interpret the dynamic-header regression while retaining its Rust assertions
 miri-header:
     cargo +nightly miri test --features unchecked --lib dynamic_header_with_every_precode_symbol_decodes
+
+# PNG ladder through whole-buffer, incremental, segmented and reuse checks.
+test-conformance-png:
+    cargo test --release --test conformance png_levels
