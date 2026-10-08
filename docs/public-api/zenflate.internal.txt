@@ -9,24 +9,26 @@
 
 ## summary
 #
-#   inherent methods                            4
-#   trait roster entries (type × trait)         4
+#   inherent methods                            5
+#   trait roster entries (type × trait)         5
 #
 # per-module pub lines:
 #   compress                          1
-#   decompress                        1
+#   decompress                        2
 #   error                             2
 
-## items (4 lines)
+## items (5 lines)
 
 pub fn compress::CompressionLevel::assert_fields_are_eq(&self)
+pub fn decompress::ChecksumPolicy::assert_fields_are_eq(&self)
 pub fn decompress::DecompressOutcome::assert_fields_are_eq(&self)
 pub fn error::CompressionError::assert_fields_are_eq(&self)
 pub fn error::DecompressionError::assert_fields_are_eq(&self)
 
-## trait impls (4 types)
+## trait impls (5 types)
 
 compress::CompressionLevel: TrivialClone
+decompress::ChecksumPolicy: TrivialClone
 decompress::DecompressOutcome: TrivialClone
 error::CompressionError: TrivialClone
 error::DecompressionError: TrivialClone
