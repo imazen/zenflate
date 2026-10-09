@@ -19,7 +19,7 @@
 
 - Inflate uses double-literal tables, chunked match copies and runtime-dispatched x86 loops. One-shot decoding may overwrite bytes beyond `output_written` within the supplied output slice; callers needing to preserve a tail must exclude it from that slice (85241b5, 3945e3e, 55f8045, 66ead6f).
 - Streaming decode reuses tables on reset and grows input staging as needed; std builds cache fixed-Huffman tables (bb058c6, 0c9c89c).
-- Dependency floors updated to `archmage` 0.9.29 and `enough` 0.4.4 (c02c2f4).
+- Dependency floors updated to `archmage` 0.9.30 and `enough` 0.4.4; archmage 0.9.30 fixes a dispatch-disable race relevant to tier tests (c02c2f4; release preparation).
 
 ### Fixed
 

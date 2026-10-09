@@ -52,7 +52,7 @@ unchecked = []
 threads = ["std", "compress"]
 
 [dependencies]
-archmage = { version = "0.9.29", default-features = false, features = ["macros"], optional = true }
+archmage = { version = "0.9.30", default-features = false, features = ["macros"], optional = true }
 enough = { version = "0.4.4", default-features = false }
 
 
@@ -74,7 +74,7 @@ zenbench = { version = "0.1.10", features = ["criterion-compat"] }
 # (NEON on aarch64) so the "scalar" arm is real rather than a second
 # measurement of the SIMD path. Feature unification keeps this to test/bench
 # builds, so consumers are unaffected.
-archmage = { version = "0.9.29", features = ["testable_dispatch"] }
+archmage = { version = "0.9.30", features = ["testable_dispatch"] }
 libdeflater = "1.26.1"
 flate2 = { version = "1.1.10", default-features = false, features = ["zlib-rs"] }
 zlib-rs = "0.6.8"
