@@ -536,3 +536,26 @@ Review regressions (2026-10-08):
 - Miri hit an unsupported C oracle call in the dynamic-header test. C checks
   are native-only; the Rust assertions remain interpreted. Conformance
   helpers use the same separation (`9e5da1da`). Native CI retains both C oracles.
+
+### Release preparation (2026-10-09)
+
+PR #13 is merged (c1c6774a): `StripCompressor::compress_with_history` accepts
+preceding input as a dictionary. Primed strips require sequential decode;
+independent iDOT strips still use `compress`. Full-optimal efforts ignore history.
+The 0.4.1 READMEs omit historical performance tables pending new benchmarks.
+
+The full Miri run at f7708e5 hit its 180-minute timeout after
+`log2_series_matches_std` (run 37718058684). Native CI passed. The user approved
+focusing Miri on relevant unsafe work while preserving native coverage.
+`just miri-focused` selects byte-access boundaries, raw match extension,
+small compression/reuse cases and the dynamic-header regression. It does not
+replace native large-input, window-slide, full-optimal or C-oracle coverage.
+
+Archmage 0.9.30 adds a dispatch-disable race fix relevant to tier tests and
+macro fixes; zenflate uses token-based intrinsics and does not yet use the
+new tokenless magetypes rite forms or magetypes gather/scatter. Fixed arrays
+already bound matchfinder tables and the safe DP loop (259-entry view).
+
+The focused Miri run passed on 2026-10-10 with archmage 0.9.30: byte boundaries,
+raw match extension, compression/reuse callers and the dynamic-header regression.
+Command: `just miri-focused`. run-heavy: rc=0, 540s, peak-RSS 1.76GiB.

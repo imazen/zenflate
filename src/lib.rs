@@ -164,6 +164,9 @@ pub mod error;
 
 pub(crate) mod fast_bytes;
 
+#[cfg(all(test, feature = "std", feature = "compress"))]
+mod miri_tests;
+
 pub mod checksum;
 #[cfg(feature = "compress")]
 pub mod compress;

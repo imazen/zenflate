@@ -1,31 +1,12 @@
 name: Miri
 
 on:
-  # `main` first, tags second. Until 2026-08-29 this gate ran ONLY on
-  # `v*` tags, which put it after the decision it exists to inform: by the
-  # time a tag exists the release is already cut, so a soundness regression
-  # introduced on `main` stayed invisible for however long it took someone
-  # to release. Running on every push to `main` is what makes it a gate.
-  # The tag trigger stays so a release still re-verifies at the exact
-  # commit it publishes.
-  #
-  # Cost: the full run is ~80 minutes. The concurrency group below is keyed
-  # on `github.ref`, so consecutive pushes to `main` supersede each other
-  # and only the newest commit is ever under test — which is what you want
-  # from a soundness gate.
   push:
     branches: [main]
     tags: ["v*"]
   workflow_dispatch:
 
 concurrency:
-  # `github.head_ref` is set ONLY on pull_request events, and this workflow
-  # has no pull_request trigger at all — so the group always fell through to
-  # `github.run_id` and `cancel-in-progress` was pure dead configuration.
-  # `github.ref` is populated for both triggers here: `refs/tags/vN` on a tag
-  # push (unique per tag, so release runs never cancel one another) and the
-  # dispatched branch ref on workflow_dispatch (so a re-dispatch supersedes
-  # the run it replaces, which is the point of re-dispatching).
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
@@ -36,12 +17,8 @@ jobs:
   miri:
     name: Miri (unsafe soundness)
     runs-on: ubuntu-latest
-    # A Miri hang used to burn runner time until GitHub killed the machine
-    # ("The runner has received a shutdown signal" at 2h29m on 2026-08-29,
-    # having reached test 27 of 92). Bound it: a full pass was ~51 minutes of
-    # interpretation in July, so 180 minutes is generous headroom, and a job
-    # that exceeds it has a new pathological test rather than a slow day.
-    timeout-minutes: 180
+    # Bound the focused interpreter suite; broad codec workloads run natively.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
 
@@ -53,48 +30,12 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
-      - name: Miri tests (unchecked feature)
-        # Native C-oracle calls in the dynamic-header and conformance tests
-        # are cfg(not(miri)); their Rust assertions remain in this run.
-        # The C branches still run in the ordinary safe/unchecked CI matrix.
-        # The skips below are for interpretation cost or filesystem isolation.
-        #
-        # `fuzz_regression` is skipped because it cannot run under Miri at
-        # all, not because it is slow: it enumerates `fuzz/regression/` from
-        # disk, and `zenutils_fuzz::collect_seeds` reaches `Path::exists()`,
-        # which bottoms out in `statx` — an "unsupported operation ... when
-        # isolation is enabled". Miri's isolation is the reason its results
-        # are reproducible, so the fix is not to disable it for the whole
-        # run; filesystem enumeration is simply outside what Miri models.
-        # This is what turned the gate red on 2026-07-14 (run 29316276934):
-        # all 84 lib tests passed, then the harness aborted here.
-        #
-        # `flush_survives_literal_run_over_23_bits` is skipped for the same
-        # reason as the slow ones, but at a different order of magnitude, so it
-        # is called out: it builds a ~19 MB input -- 10.3 MB of 'A' match bytes
-        # plus (1 << 23) + 4096 PRNG literals -- to gate issue #7 (a 2^23+
-        # literal run overflowing litrunlen). That is 8.4 million interpreted
-        # loop iterations before the flush even starts. It landed 2026-08-26 in
-        # 486e04c, AFTER the last Miri run, and on 2026-08-29 it hung this job
-        # for 2h28m (reaching test 27 of 92) until the runner was shut down.
-        # Miri cannot finish it, so including it gates nothing -- it only
-        # prevents the whole soundness run from ever reporting. It still runs
-        # at full strength under plain `cargo test` in ci.yml.
-        #
-        # Native coverage remains. `cargo test` and `cargo test --features
-        # unchecked` both run this test on all six platforms in ci.yml, and
-        # the suite replays seven committed seeds (`EXPECTED_SEEDS = 7` in
-        # tests/fuzz_regression.rs). Issue #7 still needs a ~19 MB input, past
-        # the 8 KB per-seed ceiling. If seed bytes need Miri's eyes, feed
-        # them from `include_bytes!` rather than reading the directory —
-        # that is testable under isolation, and this skip would not cover it.
-        run: |
-          cargo miri test --features unchecked -- \
-            --skip zeros --skip sequential --skip large \
-            --skip all_levels --skip all_formats \
-            --skip window_boundary --skip block_splitting \
-            --skip parallel --skip compression_improves \
-            --skip short_inputs --skip repetitive \
-            --skip actually_compresses \
-            --skip fuzz_regression \
-            --skip flush_survives_literal_run_over_23_bits
+      # Miri targets zenflate's unchecked pointer accesses. Native CI retains
+      # the full safe/unchecked suites, C oracles, large inputs and conformance.
+      # Disable SIMD here: CPU dispatch and intrinsics are checked by native
+      # tier tests; these bounded interpreter tests exercise scalar memory access.
+      - name: Bounded unchecked memory checks
+        run: cargo miri test --no-default-features --features std,compress,unchecked --lib miri_tests:: -- --nocapture
+
+      - name: Dynamic-header regression
+        run: cargo miri test --no-default-features --features std,compress,unchecked --lib dynamic_header_with_every_precode_symbol_decodes

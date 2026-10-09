@@ -156,3 +156,19 @@ miri-header:
 # PNG ladder through whole-buffer, incremental, segmented and reuse checks.
 test-conformance-png:
     cargo test --release --test conformance png_levels
+
+# Bounded unsafe byte access and compression caller checks (also in native tests).
+miri-focused:
+    cargo +nightly miri test --no-default-features --features std,compress,unchecked --lib miri_tests:: -- --nocapture
+    cargo +nightly miri test --no-default-features --features std,compress,unchecked --lib dynamic_header_with_every_precode_symbol_decodes
+
+# Required local publication checks; packaging verifies the distributable crate.
+release-check:
+    cargo test --all-targets
+    cargo test --doc
+    cargo semver-checks --baseline-version 0.4.0
+    cargo package
+
+# Repeatable safe/unchecked comparison on a fixed subset of vs_png inputs.
+compare-unchecked inputs results:
+    bash scripts/compare-unchecked.sh {{inputs}} {{results}}

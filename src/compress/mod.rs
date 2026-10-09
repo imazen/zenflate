@@ -5065,6 +5065,7 @@ mod tests {
     }
 
     /// Generate mixed data that's representative of real workloads.
+    #[cfg(feature = "threads")]
     fn make_mixed_data(len: usize) -> Vec<u8> {
         let mut data = vec![0u8; len];
         // Mix of patterns: sequential, repeated, random-ish
