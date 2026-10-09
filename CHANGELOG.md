@@ -6,128 +6,32 @@
 
 (none)
 
+## [0.4.1] - 2026-10-09
+
 ### Added
 
-- `zenflate::png::StripCompressor::compress_with_history`: compress a strip with the preceding image bytes as its window (last 32 KiB). Output still depends only on the input, so strips compress in parallel; such strips can't be decoded alone, so not for `iDOT` files.
-- `ChecksumPolicy` with `Decompressor::with_checksum` / `StreamDecompressor::with_checksum`: `Verify` (default; a mismatch is an error), `Report` (record the result in `checksum_matched()`, never fail; what `with_skip_checksum(true)` does) and `Ignore` (neither compute nor compare the zlib Adler-32 / gzip CRC-32; gzip's length is still checked). `with_skip_checksum` stays as a shim for `Report`/`Verify`. `Ignore` avoids checksum computation; the earlier instruction-count percentages have no committed benchmark record.
-- `CompressionLevel::png(effort)`: a compression ladder tuned for PNG IDAT streams (3f4fd61). `png(1)` is an ultra-fast encoder (literals + zero runs, one Huffman table per stream, counted from the whole input up to 64 KiB and sampled above; 12.7% smaller than a fixed table on held-out 64x64 images); `png(2)` encodes runs only; `png(3..=9)` add hashed repeats (8+ bytes at 3, 5+ bytes with deepening hash chains at 4-9), a runs-only guard comparing Huffman costs (pausing for three blocks after a clear loss); `png(10..=18)` use lazy matching (libdeflate 5/6/7's settings, then deeper, without `new()`'s good_match/max_lazy shortcuts) with the same runs-only guard and block boundaries derived from the input alone (shared by every rung, so neighbouring efforts from `png(12)` up differ by at most 0.07% per image on the test set, for +0.12% total size and 4-14% more time than parse-driven splitting); `png(19..=22)` are a time ramp of near-optimal parsing (two passes, binary-tree depth/nice 16/48, 24/48, 24/64, 35/64, up to `png(23)`'s 35/75; on Neoverse-N1 1.9-2.3x `png(18)`'s time for 3.2-3.9% smaller output; one pass or depth under 16 lost to `png(18)` by up to 10% on some images); `png(19..=30)` use the same input-derived block ends (segment ends; `png(27..=30)` may also end blocks inside a segment) and runs-only guard as `png(10..=18)` (worst per-image inversion from `png(19)` up 0.81%, was 1.18%; +0.14% total size vs parse-driven splits; `benchmarks/png_ladder_ramp_2026-10-07.txt`), so they differ from `new(19..=30)`; `png(31..)` equals `new(31..)`. On 86 PNG filtered streams (Neoverse-N1) the lazy rungs are never larger per image than libdeflate 5/6/7 and sit on the size/speed front (`png(12)` ratio 3.907 at 36 MB/s vs libdeflate 7 3.884 at 42; `png(16)` 3.952 at 18 vs libdeflate 9 3.928 at 15; `benchmarks/png_ladder_lazy_guard_2026-10-06.txt`). Validated on 146-150 held-out imazen-26 images at three sizes: at native sizes with the adaptive filter, `png(1)` runs at 2780 MiB/s (2.237x; fdeflate ultra-fast 1273 MiB/s at 2.087x) and `png(4)` beats `new(1)` on both size and speed. `monotonicity_fallback()` covers the four algorithm switches (`png(2)` → `png(1)`, `png(4..=9)` → `png(3)`, `png(10..=18)` → `png(9)`, `png(19..)` → `png(18)`). Data: `benchmarks/png_mode_2026-10-06.md`.
-- `zenflate::png::StripCompressor`: independent strips of a PNG zlib stream, for parallel encoding (PNG's `iDOT` layout); any serial decoder reads the result. `png::StripCompressor::new(level)` with `.compress(strip, is_last, out, stop)` compresses one strip with an empty window; non-final strips end byte-aligned with a full-flush marker and no final block, so `.zlib_header()`, the strips in order and the Adler-32 (joined with `adler32_combine`) form one valid zlib stream. The caller buffers and schedules strips (one at a time, on its own pool, with the strip's compressed size available to its filter choice); output does not depend on compressor reuse; every level is supported, including full-optimal. Size +0.06-0.28%; with freshly spawned workers, 1.9-6.5x faster at 4-8 threads on a 12 MB image (`benchmarks/segmented_zlib_2026-10-06.txt`). `StripCompressor::bound` sizes the output.
-- `zenflate::png::StripDecoder`: decodes one strip on its own as a stream (`fill`/`peek`/`advance`, any `InputSource`), in decode-only builds too. A strip ends cleanly only at a byte-aligned block boundary with no leftover bits; a strip ending mid-block (the "ambiguous PNG" construction) or referring back past its start errors, so independent decode equals serial decode. `ended_at_strip_boundary()`, `adler32()` and `trailer()` let the caller verify the whole stream with `adler32_combine`. `StreamDecompressor`'s public API is unchanged.
+- PNG-specific compression effort ladder via `CompressionLevel::png`, with runs-only guards and input-derived block boundaries (3f4fd61).
+- Independent PNG strip compression and streaming decoding via `png::StripCompressor` and `png::StripDecoder`, for caller-scheduled iDOT processing (e961883).
+- `StripCompressor::compress_with_history` uses up to 32 KiB of preceding input; the resulting strips require sequential decoding and are unsuitable for independent iDOT decoding. Efforts above 30 ignore history (13dc0d5).
+- `ChecksumPolicy::{Verify, Report, Ignore}` and `with_checksum` builders; existing `with_skip_checksum` behavior remains available (bb8e411).
 
 ### Changed
-- Dependency floors raised to the tested versions: `archmage` 0.9.29, `enough` 0.4.4 (dev: `zenbench` 0.1.10, `libdeflater` 1.26.1, `flate2` 1.1.10, `zlib-rs` 0.6.8 and others). All compatible; no majors were available (c02c2f4).
 
-- Faster inflate on PNG-like (literal-heavy) streams. Litlen entries can hold two literals; streaming stages input in a growing buffer, defers lookback allocation, and avoids redundant compaction. Matches copy in chunks of up to 32 bytes. Streaming uses an x86-64-v3 build; one-shot uses an x86-64-v4 build on capable CPUs for inputs of at least 16 KiB. The committed 2026-10-07 records cover 106 PNG IDAT streams: `benchmarks/chunk32_copy_2026-10-07.txt` (32-byte vs 16-byte copies) and `benchmarks/oneshot_v4_2026-10-07.txt` (v4 dispatch). Earlier double-literal, staging, and per-consumer measurements were left in scratch storage and are not a committed performance baseline. **Behavior note:** the one-shot `deflate_decompress`/`zlib_decompress`/`gzip_decompress` may now overwrite bytes of `output` past the returned `output_written` (chunked stores of up to 32 bytes within a margin below `output.len()`); before, only `output[..output_written]` was written. Callers that decode into part of a larger buffer should pass a slice that ends where their data may be overwritten.
-- Refreshed `Cargo.lock` within the existing requirements, third-party only (d0a7aef). `zenbench` was pinned back to 0.1.8 — the one zen-family crate the refresh wanted to move — and every other zen-family entry was already at its ceiling. Movers include `cc` 1.2.67 → 1.4.4, `libdeflater`/`libdeflate-sys` 1.25.2 → 1.26.0, `flate2` 1.1.9 → 1.1.10, `zlib-rs` 0.6.6 → 0.6.7, `libflate` 2.3.0 → 2.3.1, `crc32fast` 1.5.0 → 1.5.1, `simd-adler32` 0.3.9 → 0.3.10, and the proc-macro chain `proc-macro2` 1.0.106 → 1.0.107 / `quote` 1.0.46 → 1.0.47 / `syn` 2.0.118 → 2.0.119. **Compressed output is byte-identical**: the library's own graph (`cargo tree -e normal`) is only `archmage` and `enough` plus `safe_unaligned_simd` and the archmage-macros proc-macro chain, and while `safe_unaligned_simd` did not move, the proc-macro chain did — and that is what the SIMD dispatch expands through, so it was verified rather than assumed. An out-of-tree harness compressed 6,048 cases (6 content kinds × 24 sizes straddling the window and block boundaries, from 0 to 300,000 bytes × 14 efforts from 0 to 30 × deflate/zlib/gzip) against both dependency sets: identical per-case hashes and identical 56,097,603-byte blob (`fnv1a64 8ec4518507d570ce`) either way.
-- Requirements for five truncated dev-dependencies are now written as full `x.y.z` (9481ed5): `crc32fast` `"1"` → `"1.5.1"`, `png` `"0.18"` → `"0.18.1"`, `simd-adler32` `"0.3"` → `"0.3.10"`, and in `fuzz/`, `libfuzzer-sys` `"0.4"` → `"0.4.13"` and `arbitrary` `"1"` → `"1.4.2"`. `Cargo.lock` is byte-identical after the edit. No third-party dependency was behind — all fifteen direct requirements were cross-checked against the crates.io API and every one is at its latest published version. `codec-corpus` is left as `"1"`: it is a sibling imazen crate, not a third-party one.
+- Inflate uses double-literal tables, chunked match copies and runtime-dispatched x86 loops. One-shot decoding may overwrite bytes beyond `output_written` within the supplied output slice; callers needing to preserve a tail must exclude it from that slice (85241b5, 3945e3e, 55f8045, 66ead6f).
+- Streaming decode reuses tables on reset and grows input staging as needed; std builds cache fixed-Huffman tables (bb058c6, 0c9c89c).
+- Dependency floors updated to `archmage` 0.9.29 and `enough` 0.4.4 (c02c2f4).
 
 ### Fixed
 
-- Near-optimal levels compressing a chunk after a dictionary (parallel gzip chunks, primed strips) started the chunk's first block from costs left over by the compressor's previous call, so the bytes depended on compressor reuse; the first block of each call now starts from default costs.
-- Expand cross-API conformance from png(0..=17) through png(31), and correct the incremental-support matrix to png(10..=18), preserving existing cases and assertions (`c82d7631`). Both new/png ladders cover 32 of 201 efforts; effort 31 represents full-optimal parsing. All 13 libdeflate compatibility levels remain covered.
-
-- Reused one-shot decoders clear `checksum_matched()` before raw decode and early wrapper errors; previously those calls exposed the preceding stream's result (`66e37b11`).
-- Keep C-oracle checks native while retaining Rust assertions under Miri in the dynamic-header test and conformance helpers (`9e5da1da`). The formerly failing dynamic-header test passes under Miri; native coverage is unchanged.
-
-- Fixed the binary-tree matchfinder imports for `no_std + compress + unchecked` and unchecked Clippy; added that feature combination to `just check-features` (eb17f1de).
-
-- `Compressor::deflate_compress_incremental` silently produced broken streams (78fabb5):
-  - A call whose new input needed more than one sequence store (8,192 sequences for HtGreedy, 50,000 for Greedy/Lazy/Lazy2) compressed one block, dropped the rest and returned `Ok`; 4,000,000 bytes of small-alphabet data became a 16 KB stream that failed to decode. Each call now emits as many blocks as it needs.
-  - Each call padded its last partial byte, so consecutive outputs did not concatenate into a decodable stream. Non-final calls now keep the partial byte for the next call (carried through `snapshot`/`restore` and `clone`), so returned sizes sum to the exact stream size.
-  - A final call with no new input wrote nothing, leaving the stream unterminated; it now writes an empty final block.
-- `gzip_compress_parallel` panicked in every worker thread at efforts 31-200 (full-optimal parsing has no chunk dictionary warm-up). Those efforts now compress on one thread (dd28ead).
-- A compressor whose call was stopped by its `Stop` token (cancellation or deadline) panicked on its next call, at `new(1..=30)` and `libdeflate(1..=12)`: each strategy took its matchfinder or near-optimal state out and only put it back on success (1383ac5). The state is now restored on every path. Too-small output buffers were not affected (overflow is reported after the strategy returns). `tests/conformance.rs` checks that a reused compressor matches a fresh one after stops and short buffers, across every level and entry point.
-- Near-optimal compression (efforts 23-30) discarded its 32 KiB dictionary at every chunk boundary: the binary-tree matchfinder's first window slide came one window late, wrapping its 16-bit positions so the first 32 KiB of each chunk found no matches (14017cc). `gzip_compress_parallel` at these efforts lost about 0.7% of the output per chunk on filtered images (+4.2% at 8 chunks); it is now within 0.3% of single-threaded output.
-- wasm32 builds with `simd128` but without the `simd` feature failed to compile: `lz_extend_word`'s cfg excluded every simd128 build while `lz_extend` only took the wasm128 path when `simd` was also on (af79e9d).
-- Full-optimal parsing (efforts 31-200) could run 1.3 s between `Stop` polls on a 16 MiB input: it polled once per squeeze iteration. It now polls inside the greedy seed parse, the DP pass, the hash-chain search and the block-split search (worst gap 18 ms, output byte-identical, speed within ±1%). `Cancelled` returns an error; a deadline (`TimedOut`) still returns the best parse found so far (46966b4, 1d62cb7, fb272d5).
-
-- **A second, newer Miri blocker: the gate could not finish at all.** With
-  `fuzz_regression` skipped, the 2026-08-29 run (33259166054) got to test 27 of 92 and
-  then hung **2 hours 28 minutes** on `compress::full_optimal::tests::flush_survives_literal_run_over_23_bits`
-  until GitHub shut the runner down (`The runner has received a shutdown signal`).
-  **No undefined behaviour was reported** — this is a throughput wall, not a soundness
-  finding. That test builds a ~19 MB input (10.3 MB of `'A'` match bytes plus
-  `(1 << 23) + 4096` PRNG literals) to gate issue #7, i.e. 8.4 million interpreted loop
-  iterations before the flush even begins. It landed 2026-08-26 in `486e04c`, *after* the
-  last Miri run, which is why July's run reached the end of the lib tests in 51 minutes
-  and this one could not. Skipped under Miri only — it still runs at full strength under
-  plain `cargo test` on all six platforms in `ci.yml`; including it gated nothing, it only
-  stopped the soundness run from ever reporting. Also added `timeout-minutes: 180` so a
-  future hang fails in bounded time instead of consuming a runner until it is killed.
-
-- **The Miri soundness gate was enabled on `main` in August.**
-  Review on 2026-10-08 found a C-oracle FFI failure
-  (`libdeflate_alloc_decompressor`, run 37713394120), fixed separately above. `miri.yml` triggered only on `push: tags: ["v*"]`, so it ran *after*
-  the decision it exists to inform — a soundness regression on `main` could not
-  surface until a release tag had already been cut. It also failed on its last
-  run (2026-07-14, `v0.4.0`, run 29316276934), and stayed failed. That failure
-  was **not** unsoundness: all 84 lib tests passed under Miri, then the run
-  aborted in `tests/fuzz_regression.rs` with `unsupported operation: statx not
-  available when isolation is enabled` — the suite enumerates
-  `fuzz/regression/` from disk, and `zenutils_fuzz::collect_seeds` reaches
-  `Path::exists()`. Filesystem enumeration is outside what Miri models, and the
-  workflow's `--skip` list did not name that test. Added `push: branches:
-  [main]` (tags kept, so a release still re-verifies at the published commit)
-  and `--skip fuzz_regression`, documented in place. Native coverage remains: that
-  test runs on all six platforms in `ci.yml`, twice, and now replays seven
-  committed regression seeds.
-
-- **Pushes to `main` now cancel their superseded CI runs.** `ci.yml` and
-  `miri.yml` keyed their concurrency group on
-  `${{ github.head_ref || github.run_id }}`. `github.head_ref` is populated only
-  for `pull_request` events, so on a push it was empty and the group fell through
-  to `github.run_id` — unique per run, so no two runs ever shared a group and
-  `cancel-in-progress` could never fire. Now keyed on `${{ github.ref }}`, which
-  is set for every trigger these workflows use. PR cancellation is unchanged;
-  consecutive pushes to a branch now supersede each other. `miri.yml` runs only
-  on `v*` tags and `workflow_dispatch`, where `github.ref` is the tag ref (unique
-  per tag, so release runs still never cancel one another) or the dispatched
-  branch ref (so a re-dispatch supersedes the run it replaces).
-- **The `Fuzz regression` CI job could not fail, and replayed nothing.** It ran
-  `cargo test --test fuzz_regression 2>/dev/null || echo "No regression test
-  found…"` inside an `if [ -d fuzz/regression ]` guard. Three separate defects
-  stacked: `|| echo` swallowed the exit status of a genuinely failing suite,
-  `2>/dev/null` hid the reason, and the `ls | wc -l` count matched on
-  `README.md` alone, so the branch was entered and the suite ran over zero
-  seeds. `tests/fuzz_regression.rs` has existed the whole time, so the "no test
-  harness" fallback was masking real failures rather than covering a missing
-  target. The step is now a bare `cargo test --test fuzz_regression`. The
-  harness pins the corpus size at `EXPECTED_SEEDS`, which is **deliberately 0
-  here** and documented in place: #7 needs a ~19 MB input and is gated by the
-  unit test in `src/compress/full_optimal.rs` instead of a committed seed, so
-  zenflate's empty corpus is now a visible decision rather than an accident.
-
-- **The first version of that corpus guard (`c0211d6d`) shipped an assertion
-  that could not fail**, which is the same defect it was written to remove. It
-  read `assert!(found >= MIN_SEEDS)` with `MIN_SEEDS = 0` — true for every
-  `usize` that can exist. Stable clippy rejected it
-  (`absurd_extreme_comparisons`, "because `MIN_SEEDS` is the minimum value for
-  this type, this comparison is always true"), which broke the `Clippy` job and
-  is how it was caught. The vacuity was not only theoretical: with the guard as
-  written, **emptying `fuzz/regression/` left the suite green** — the directory
-  check still saw a directory and `0 >= 0` still held. The bound is now an
-  equality against the committed count, plus an explicit check for the corpus
-  `README.md` (the only tracked file in that directory, and so the only reason
-  git materialises it at all). Mutation-verified, each run to completion:
-  renaming the directory away, emptying it, and adding one unaccounted-for seed
-  each fail with a distinct message (exit 101); restoring passes. The pre-fix
-  harness was re-run against the emptied-directory mutation to confirm it
-  passed — the hole was real, not hypothetical.
-
-- **FullOptimal (Zopfli) could silently emit a corrupt DEFLATE stream when a
-  single block contained a literal run of 2^23+ items** (issue #7, found by
-  the 2026-08-26 cross-codec ultracode sweep, adversarially verified). The
-  run count is packed into the low 23 bits of
-  `Sequence::litrunlen_and_length`; an overflowing run (matchless data — e.g.
-  unique-trigram content — after a compressible prefix keeps the dynamic
-  arm selected) bled into the 9-bit length field, and the garbage length hit
-  codeword slots the Huffman tables never filled, emitted as ZERO bits.
-  `flush_lz77_block` now subdivides oversized stores into multiple DEFLATE
-  blocks at the leaf (2^22-item cap; one extra block header per 4M items),
-  and the Sequences emit arm `debug_assert`s every match length is in the
-  DEFLATE range with a nonzero codeword. Regression test drives the flush
-  directly with a 10.3 MB match prefix + 8.4M-literal run and roundtrips;
-  mutation-verified (fails with `BadData` when the cap is disabled).
+- Primed-strip and parallel-gzip near-optimal output no longer depends on compressor reuse (13dc0d5).
+- Reused decoders clear stale `checksum_matched()` results before raw decode and early wrapper errors (66e37b11).
+- Incremental compression emits all input, carries partial bytes across calls, and terminates empty final calls correctly (78fabb5).
+- Compressors remain reusable after cooperative cancellation (1383ac5).
+- Parallel gzip supports full-optimal efforts through a serial fallback, and near-optimal chunk dictionaries survive window slides (dd28ead, 14017cc).
+- Full-optimal compression splits oversized literal stores before packed sequence counts overflow (486e04c).
+- Full-optimal parsing polls cancellation inside greedy parsing, dynamic programming and block splitting; timeouts retain the best parse found (46966b4, 1d62cb7, fb272d5).
+- Restore no_std+compress+unchecked builds and wasm32 simd128 builds without the simd feature (eb17f1de, af79e9d).
+- Preserve native C-oracle checks while keeping Rust assertions under Miri, and expand cross-API PNG conformance through effort 31 (9e5da1da, c82d7631).
 
 ## [0.4.0] - 2026-07-14
 

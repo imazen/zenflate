@@ -187,7 +187,7 @@ checksum = "d107c80dd656e1a2c254dfb1d57ece73b7f515b8a8684c270c23cab68f4a440d"
 
 [[package]]
 name = "zenflate"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "archmage",
  "enough",

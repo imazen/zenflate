@@ -6,7 +6,7 @@ Pure Rust DEFLATE / zlib / gzip. Compression spans effort levels 0–200 across 
 
 ```toml
 [dependencies]
-zenflate = "0.4"
+zenflate = "0.4.1"
 ```
 
 ```rust
@@ -90,7 +90,7 @@ match Decompressor::new().gzip_decompress(gzip_bytes, &mut out, Unstoppable) {
 ### Streaming decompression
 
 For inputs that don't fit in memory or arrive incrementally. Works with
-`&[u8]` (zero overhead) or any `std::io::BufRead` via `BufReadSource`.
+`&[u8]` or any `std::io::BufRead` via `BufReadSource`.
 
 Construct with `deflate`/`zlib`/`gzip` (each takes the source plus an output
 buffer capacity — `DEFAULT_CAPACITY` is 64 KiB), then drive the
@@ -99,7 +99,7 @@ buffer capacity — `DEFAULT_CAPACITY` is 64 KiB), then drive the
 ```rust
 use zenflate::{StreamDecompressor, DEFAULT_CAPACITY};
 
-// From a slice (`&[u8]` is a zero-overhead source):
+// From a slice (`&[u8]` is an input source):
 let mut stream = StreamDecompressor::deflate(compressed_data, DEFAULT_CAPACITY);
 while !stream.is_done() {
     stream.fill()?;             // pull from source, decompress into the buffer
@@ -127,6 +127,15 @@ without progress:
 let mut stream = StreamDecompressor::gzip(compressed_data, DEFAULT_CAPACITY)
     .with_max_output_size(Some(64 * 1024 * 1024)); // DecompressionError::OutputLimitExceeded past 64 MiB
 ```
+
+### Checksum policy
+
+Zlib and gzip decoding verify checksums by default. Both decoder types accept
+`with_checksum(ChecksumPolicy::Verify | Report | Ignore)`. `Report` computes the
+checksum and exposes the comparison through `checksum_matched()` without
+rejecting a mismatch. `Ignore` avoids checksum computation and comparison;
+gzip's uncompressed-length check still applies. `with_skip_checksum(true)`
+retains its existing meaning: `Report`.
 
 ### Formats
 
@@ -173,11 +182,11 @@ CompressionLevel::libdeflate(6)
 | Preset | Effort | Strategy | Description |
 |--------|--------|----------|-------------|
 | `none()` | 0 | Store | Framing only, no compression |
-| `fastest()` | 1 | Turbo | Maximum throughput |
-| `fast()` | 10 | Greedy | Hash chains — big ratio jump over turbo |
+| `fastest()` | 1 | Turbo | Low-effort preset |
+| `fast()` | 10 | Greedy | Hash chains |
 | `balanced()` | 15 | Lazy | Lazy matching — good default |
-| `high()` | 22 | Lazy2 | Double-lazy — best before near-optimal |
-| `best()` | 30 | Near-optimal | Best compression ratio |
+| `high()` | 22 | Lazy2 | Double-lazy matching |
+| `best()` | 30 | Near-optimal | Near-optimal preset |
 
 Effort levels map to seven strategies:
 
@@ -228,8 +237,8 @@ clear loss, the guard skips the next three blocks. This improves flat-colour
 art but does not guarantee output no larger than `png(2)`.
 From `png(10)` through `png(26)` target block boundaries come from the input
 alone; near-optimal parsing can still end a block early if its match cache
-fills. `png(27..=30)` can also split inside those input-derived segments
-(about 0.1% smaller on the measured set, less strictly nested). `monotonicity_fallback()` names the lower level
+fills. `png(27..=30)` can also split inside those input-derived segments;
+higher effort does not guarantee smaller output. `monotonicity_fallback()` names the lower level
 to compare against at each change of algorithm.
 
 ```rust
@@ -239,35 +248,6 @@ let mut compressor = Compressor::new(CompressionLevel::png(6));
 let mut idat = vec![0u8; Compressor::zlib_compress_bound(filtered_rows.len())];
 let size = compressor.zlib_compress(&filtered_rows, &mut idat, Unstoppable)?;
 ```
-
-Measured on 86 PNG filtered streams (64–1024 px), Ampere Altra Neoverse-N1,
-one core, each library compressing the same bytes:
-
-| zenflate | Ratio | MB/s | Nearby levels of other libraries |
-|----------|-------|------|----------------------------------|
-| `png(1)` | 3.078 | 1129 | fdeflate ultra-fast: 2.835 @ 707 |
-| `png(2)` | 3.360 | 466 | |
-| `png(3)` | 3.573 | 215 | libdeflate 1: 3.611 @ 197, zlib-rs 1: 2.590 @ 207 |
-| `png(4)` | 3.651 | 171 | miniz_oxide 1: 3.199 @ 168 |
-| `png(9)` | 3.771 | 98 | |
-| `png(10)` | 3.823 | 60 | libdeflate 6: 3.839 @ 65 |
-| `png(12)` | 3.903 | 35 | zlib-rs 6: 3.863 @ 49 |
-| `png(16)` | 3.948 | 18 | miniz_oxide 6: 3.849 @ 21, libdeflate 9: 3.928 @ 15 |
-| `png(18)` | 3.958 | 14 | zlib-rs 9: 3.973 @ 10, miniz_oxide 9: 3.911 @ 8 |
-| `png(19)` | 4.087 | 8 | |
-| `png(23)` | 4.115 | 7 | |
-| `png(26)` | 4.135 | 4 | |
-| `png(28)` | 4.143 | 3 | |
-| `png(30)` | 4.145 | 2 | libdeflate 12: 4.144 @ 2 |
-
-Higher levels can still produce a slightly larger file than a lower one on
-some images: on this set by at most 0.81% from `png(19)` through `png(26)`.
-libdeflate 6 beats `png(10)` on both size and speed; `png(30)` is smaller than
-libdeflate 12 and `png(28)` faster. Per-image data:
-[`benchmarks/png_ladder_ramp_2026-10-07.txt`](https://github.com/imazen/zenflate/blob/main/benchmarks/png_ladder_ramp_2026-10-07.txt),
-[`benchmarks/png_ladder_final_2026-10-07.txt`](https://github.com/imazen/zenflate/blob/main/benchmarks/png_ladder_final_2026-10-07.txt);
-held-out validation of `png(1..=9)`:
-[`benchmarks/png_mode_2026-10-06.md`](https://github.com/imazen/zenflate/blob/main/benchmarks/png_mode_2026-10-06.md).
 
 ### PNG strips for parallel encode and decode
 
@@ -295,6 +275,13 @@ for (k, strip) in strips.iter().enumerate() {
 }
 z.extend_from_slice(&adler.to_be_bytes());
 ```
+
+For ordinary sequential decoding, `compress_with_history(input, strip_start,
+is_last, output, stop)` lets a strip reference the preceding 32 KiB. Supply the
+history and strip in one slice; only `input[strip_start..]` is emitted. Those
+strips can be compressed independently but must be decoded in order with the
+preceding output available. Do not use them for independent iDOT decoding.
+Efforts above 30 currently ignore history and compress the strip alone.
 
 ### Parallel gzip compression
 
@@ -329,7 +316,7 @@ struct MyStop { cancelled: std::sync::Arc<std::sync::atomic::AtomicBool> }
 impl Stop for MyStop {
     fn check(&self) -> Result<(), StopReason> {
         if self.cancelled.load(std::sync::atomic::Ordering::Relaxed) {
-            Err(StopReason)
+            Err(StopReason::Cancelled)
         } else {
             Ok(())
         }
@@ -350,14 +337,14 @@ the loop and can stop between `fill()` calls.
 | `simd` | yes | Runtime-dispatched SIMD checksums and matchfinder multiversioning (via archmage); without it, scalar paths |
 | `avx512` | yes | AVX-512 SIMD tiers (implies `simd`) |
 | `threads` | yes | Parallel gzip (`gzip_compress_parallel`, implies `compress`); disable for thread-less `wasm32` |
-| `unchecked` | no | Elide bounds checks in compression hot paths (+0-12% compression speed) |
+| `unchecked` | no | Elide bounds checks in compression hot paths |
 
 Decompression works in `no_std` without `alloc`; all state is stack-allocated.
 
 For a minimal, fast-to-compile decoder, disable default features:
 
 ```toml
-zenflate = { version = "0.4.0", default-features = false, features = ["std"] }
+zenflate = { version = "0.4.1", default-features = false, features = ["std"] }
 ```
 
 That decode-only configuration has a single direct
@@ -368,61 +355,14 @@ formats with checksum verification (scalar Adler-32/CRC-32).
 compress and `simd` if you want SIMD checksums; both were previously implied
 by `alloc` / always-on.
 
-<!-- crates.io:skip-start -->
 ## Performance
 
-Measured on **zenflate 0.4.0**, AMD Ryzen 9 7950X (Zen 4), Linux/WSL2, **safe**
-mode (the default — `forbid(unsafe_code)`, no `unchecked`), **no**
-`-C target-cpu=native` (runtime SIMD dispatch only). The full head-to-head —
-x86 + aarch64, the whole Rust ecosystem, real corpora, per-host — is committed at
-**[benchmarks/deflate_rust_ecosystem_2026-07-13.md](https://github.com/imazen/zenflate/blob/main/benchmarks/deflate_rust_ecosystem_2026-07-13.md)**.
-One machine, one run set — re-measure before quoting externally.
+Performance depends on input, effort, CPU and enabled features. This release
+makes no speed or compression-ratio comparison claims. Historical measurements
+and their commands remain in [benchmarks/](https://github.com/imazen/zenflate/tree/main/benchmarks);
+they are not measurements of this release. Fresh comparisons are planned for a
+later release.
 
-**Compression** (1 MB mixed synthetic, median of n=100, *lower is better*):
-
-| Library | L1 | L6 | L12 / max |
-|---------|-----|-----|-----------|
-| **zenflate** | 5.53 ms | 6.08 ms | 8.31 ms |
-| libdeflate (C) | 4.95 ms | 6.03 ms | 17.02 ms |
-| zlib-rs | 5.35 ms | 12.69 ms | 14.56 ms (L9) |
-| miniz_oxide | 2.81 ms | 14.63 ms | 15.33 ms (L9) |
-
-At L6 zenflate matches C and is ~2× faster than every other Rust crate; at L12 it
-is ~2× faster than C (a different, faster near-optimal algorithm). Level numbers
-are not equivalent across libraries — compare at matched ratio (see the benchmark
-file). Via `CompressionLevel::libdeflate(n)`, zenflate emits **byte-identical**
-output to C libdeflate at every level.
-
-**Decompression** (1,000,000 bytes, compressed at zenflate L6, *lower is better*):
-
-| Data | zenflate | libdeflate (C) | flate2 (zlib-rs) | miniz_oxide |
-|------|----------|----------------|------------------|-------------|
-| Sequential | 45.9 µs | 35.2 µs | 37.9 µs | 89.0 µs |
-| Mixed | 1.31 ms | 1.24 ms | 1.54 ms | 1.81 ms |
-| Photo | 1.51 ms | 1.44 ms | 1.73 ms | 2.10 ms |
-
-These are the times from the committed ecosystem record linked above. On its
-synthetic mixed/photo inputs zenflate was the fastest Rust decoder measured.
-The same record's Silesia results vary by file and do not support a universal lead.
-
-**PNG streams** (106 IDAT streams, 64–2560 px, median time per image relative to
-fdeflate, measured 2026-10-07 after 0.4.0, Core Ultra 7 265K one core): one-shot
-0.96×, streaming 0.98×; Ryzen 9 9950X3D (Zen 5) one-shot 0.98× with the
-AVX-512 build; Neoverse-N1 one-shot 0.83×, streaming 0.87×
-([`benchmarks/chunk32_copy_2026-10-07.txt`](https://github.com/imazen/zenflate/blob/main/benchmarks/chunk32_copy_2026-10-07.txt),
-[`benchmarks/oneshot_v4_2026-10-07.txt`](https://github.com/imazen/zenflate/blob/main/benchmarks/oneshot_v4_2026-10-07.txt)).
-
-**Checksums** (1 MiB, median of five interleaved rounds on the same Zen 4 host,
-2026-07-13):
-
-| Algorithm | Without `avx512` | With `avx512` |
-|-----------|-----------------|---------------|
-| Adler-32 | 77.4 GiB/s | 112.8 GiB/s |
-| CRC-32 | 18.4 GiB/s | 78.2 GiB/s |
-
-Source: [AVX-512 checksum A/B](https://github.com/imazen/zenflate/blob/main/benchmarks/avx512_checksum_ab_2026-07-13.md).
-
-<!-- crates.io:skip-end -->
 ## How it works
 
 zenflate started as a port of Eric Biggers'
@@ -454,11 +394,6 @@ SIMD acceleration for checksums (AVX2/AVX-512/PCLMULQDQ on x86, NEON/PMULL on
 aarch64, simd128 on WASM) via [archmage](https://crates.io/crates/archmage)
 with zero `unsafe`.
 
-zenflate can produce byte-identical output to libdeflate at every level (via
-`CompressionLevel::libdeflate(n)`), and runs at roughly 0.8-0.9x the speed
-of the C original depending on level and data. The gap comes from register
-pressure differences and bounds checking.
-
 ### Acknowledgments
 
 - [libdeflate](https://github.com/ebiggers/libdeflate) by Eric Biggers —
@@ -477,46 +412,13 @@ pressure differences and bounds checking.
   ultra-fast, runs-only and greedy compressors that `png(1..=9)` adapt, and
   the double-literal decode tables and chunked match copy in the inflate loop
 
-### What's different from libdeflate
-
-`CompressionLevel::libdeflate(n)` produces byte-identical output to C. The
-recommended effort-based API (`CompressionLevel::new(n)`) uses different
-algorithms and tuning at every level:
-
-| Effort | Strategy | Matchfinder | Encoding | vs libdeflate |
-|--------|----------|-------------|----------|---------------|
-| 0 | Store | — | — | Same |
-| 1-4 | Turbo | Single-entry hash, limited skip updates | Standard | **Original** matchfinder, not in libdeflate |
-| 5-9 | FastHt | 2-entry hash, limited skip updates | Standard | **Original** matchfinder, not in libdeflate |
-| 10 | Greedy | Hash chains | Standard | `good_match` early-exit (libdeflate: disabled) |
-| 11-17 | Lazy | Hash chains | Standard | `good_match`/`max_lazy` tuning curves (libdeflate: disabled) |
-| 18-22 | Lazy2 | Hash chains | Standard | `good_match`/`max_lazy` tuning (libdeflate: disabled) |
-| 23-25 | NearOptimal | Binary trees | Exhaustive precode search | Multi-strategy precode flag search |
-| 26-27 | NearOptimal | Binary trees | + multi-strategy Huffman | + Brotli/Zopfli RLE smoothing, reduced max_bits sweep |
-| 28-30 | NearOptimal | Binary trees | + diversified optimization | + randomized cost model, 20-30 passes (libdeflate: 2-10) |
-| 31+ | FullOptimal | Zopfli hash chains | Katajainen package-merge | **Entirely different** algorithm (from zenzop) |
-
-At effort 10-22, the core matching algorithms are the same as libdeflate
-(greedy, lazy, double-lazy with hash chains), but zenflate adds `good_match`
-and `max_lazy` early-exit thresholds that libdeflate leaves disabled. These
-let the compressor skip deep chain searches and lazy evaluations when it
-already has a good enough match, trading a small amount of compression ratio
-for speed at lower effort levels.
-
-At effort 23+, the near-optimal parser is the same backward DP as
-libdeflate, but the block encoding pipeline diverges: multi-strategy
-Huffman code construction tries Brotli-inspired and Zopfli-style frequency
-smoothing with max-bits sweeps to find smaller encodings. At effort 28+,
-the optimizer runs 20-30 passes with randomized cost diversification
-instead of libdeflate's fixed 2-10 passes.
-
 ## MSRV
 
 The minimum supported Rust version is **1.89**.
 
 ## AI-Generated Code Notice
 
-Developed with Claude (Anthropic). Not all code manually reviewed. Review critical paths before production use.
+Developed with assistance from Claude (Anthropic) and Codex (OpenAI). Not all code manually reviewed. Review critical paths before production use.
 
 ## License
 
