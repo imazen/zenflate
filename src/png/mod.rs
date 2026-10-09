@@ -149,6 +149,38 @@ impl StripCompressor {
             .deflate_compress_segment(strip, is_last, output, stop)
     }
 
+    /// Compress the strip `input[strip_start..]`, letting matches reach back
+    /// into `input[..strip_start]`: the image bytes just before the strip
+    /// (only the last 32 KiB are used). History can recover matches across
+    /// strip boundaries; encoded size still depends on the input and strip
+    /// layout. These strips decode only
+    /// after the strips before them, so [`StripDecoder`] cannot decode them
+    /// on their own: don't use this for files that carry an `iDOT` table.
+    ///
+    /// The output still depends only on `input` and `strip_start`, never on
+    /// which compressor or thread produced the previous strip, so strips can
+    /// be compressed concurrently and in any order. Full-optimal levels
+    /// (efforts above 30) can't use the history and compress the strip
+    /// alone. `is_last`, `output` and errors are as for
+    /// [`compress`](Self::compress); size `output` with
+    /// [`bound`](Self::bound) of the strip's length.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `strip_start > input.len()`.
+    pub fn compress_with_history(
+        &mut self,
+        input: &[u8],
+        strip_start: usize,
+        is_last: bool,
+        output: &mut [u8],
+        stop: impl enough::Stop,
+    ) -> Result<usize, CompressionError> {
+        assert!(strip_start <= input.len(), "strip_start past the input");
+        self.inner
+            .deflate_compress_segment_after(input, strip_start, is_last, output, stop)
+    }
+
     /// Upper bound on [`compress`](Self::compress) output for a strip of
     /// `strip_len` bytes.
     #[must_use]

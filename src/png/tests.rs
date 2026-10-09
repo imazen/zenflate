@@ -430,3 +430,197 @@ fn cross_segment_back_reference_is_rejected() {
     // seg1 alone must fail.
     assert!(decode_segment(&seg1).is_err());
 }
+
+/// Primed strips: new/png efforts 0-30, all C-compatible levels, and a
+/// representative full-optimal level decode
+/// back as one zlib stream; output doesn't depend on order or compressor
+/// reuse; history beyond 32 KiB doesn't change anything; and on data with
+/// repeats across strip ends, primed strips are smaller than independent
+/// ones.
+#[test]
+fn strips_with_history() {
+    let data = test_data(300_000);
+    let mut all_levels = levels();
+    for e in 0..=30 {
+        for (name, level) in [
+            (format!("new({e})"), CompressionLevel::new(e)),
+            (format!("png({e})"), CompressionLevel::png(e)),
+        ] {
+            if !all_levels.iter().any(|(_, present)| *present == level) {
+                all_levels.push((name, level));
+            }
+        }
+    }
+    for e in 0..=12 {
+        all_levels.push((format!("libdeflate({e})"), CompressionLevel::libdeflate(e)));
+    }
+    for (name, level) in all_levels {
+        for parts in [1usize, 3, 7] {
+            let per = data.len().div_ceil(parts);
+            let starts: Vec<usize> = (0..data.len()).step_by(per).collect();
+            let n = starts.len();
+            let compress = |k: usize, comp: &mut StripCompressor, window: usize| {
+                let s = starts[k];
+                let e = (s + per).min(data.len());
+                let from = s.saturating_sub(window);
+                let mut out = vec![0u8; StripCompressor::bound(e - s)];
+                let len = comp
+                    .compress_with_history(
+                        &data[from..e],
+                        s - from,
+                        k + 1 == n,
+                        &mut out,
+                        Unstoppable,
+                    )
+                    .unwrap();
+                out.truncate(len);
+                out
+            };
+            // Forward with one compressor; backward with fresh ones; and
+            // with the whole preceding image as history.
+            let mut one = StripCompressor::new(level);
+            let fwd: Vec<Vec<u8>> = (0..n).map(|k| compress(k, &mut one, 32 * 1024)).collect();
+            let back: Vec<Vec<u8>> = (0..n)
+                .rev()
+                .map(|k| compress(k, &mut StripCompressor::new(level), 32 * 1024))
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect();
+            let long: Vec<Vec<u8>> = (0..n).map(|k| compress(k, &mut one, usize::MAX)).collect();
+            assert_eq!(fwd, back, "{name}, {parts} parts: order/reuse");
+            assert_eq!(fwd, long, "{name}, {parts} parts: history beyond 32 KiB");
+
+            let mut z = one.zlib_header().to_vec();
+            for s in &fwd {
+                z.extend_from_slice(s);
+            }
+            z.extend_from_slice(&adler32(1, &data).to_be_bytes());
+            let mut back_out = vec![0u8; data.len()];
+            let r = Decompressor::new()
+                .zlib_decompress(&z, &mut back_out, Unstoppable)
+                .unwrap_or_else(|e| panic!("{name}, {parts} parts: {e:?}"));
+            assert_eq!(r.output_written, data.len());
+            assert!(back_out == data, "{name}, {parts} parts: content");
+            // Keep the Rust reader live where native C FFI is unavailable.
+            #[cfg(all(not(miri), not(target_arch = "wasm32")))]
+            {
+                let mut reference = vec![0u8; data.len()];
+                let written = libdeflater::Decompressor::new()
+                    .zlib_decompress(&z, &mut reference)
+                    .unwrap();
+                assert_eq!(written, data.len(), "{name}, {parts}: C length");
+                assert_eq!(reference, data, "{name}, {parts}: C content");
+            }
+        }
+    }
+
+    // Repeats that straddle strip ends: history makes strips smaller.
+    let block: Vec<u8> = test_data(20_000);
+    let rep: Vec<u8> = block.iter().cycle().take(200_000).copied().collect();
+    let level = CompressionLevel::png(10);
+    let independent: usize = compress_strips(&rep, 5, level).iter().map(Vec::len).sum();
+    let per = rep.len().div_ceil(5);
+    let mut comp = StripCompressor::new(level);
+    let primed: usize = (0..5)
+        .map(|k| {
+            let s = k * per;
+            let e = (s + per).min(rep.len());
+            let mut out = vec![0u8; StripCompressor::bound(e - s)];
+            comp.compress_with_history(&rep[..e], s, k == 4, &mut out, Unstoppable)
+                .unwrap()
+        })
+        .sum();
+    assert!(
+        primed < independent,
+        "primed {primed} vs independent {independent}"
+    );
+}
+
+/// Empty/short tails and dictionary truncation, including reuse after overflow.
+#[test]
+fn history_boundaries_and_short_output_recovery() {
+    let data = test_data(33_027);
+    for level in [
+        CompressionLevel::new(1),
+        CompressionLevel::png(1),
+        CompressionLevel::png(4),
+        CompressionLevel::png(10),
+        CompressionLevel::png(19),
+        CompressionLevel::png(27),
+        CompressionLevel::png(30),
+        CompressionLevel::libdeflate(12),
+        CompressionLevel::new(31),
+    ] {
+        for history in [0usize, 1, 7, 32767, 32768, 32769] {
+            for tail in [0usize, 1, 7, 258] {
+                let input = &data[..history + tail];
+                let mut reused = StripCompressor::new(level);
+                assert!(
+                    reused
+                        .compress_with_history(input, history, true, &mut [], Unstoppable)
+                        .is_err()
+                );
+                let mut output = vec![0; StripCompressor::bound(tail)];
+                let n = reused
+                    .compress_with_history(input, history, true, &mut output, Unstoppable)
+                    .unwrap();
+                output.truncate(n);
+                let mut fresh = StripCompressor::new(level);
+                let mut expected = vec![0; StripCompressor::bound(tail)];
+                let n = fresh
+                    .compress_with_history(input, history, true, &mut expected, Unstoppable)
+                    .unwrap();
+                assert_eq!(
+                    output,
+                    expected[..n],
+                    "{level:?}, history {history}, tail {tail}"
+                );
+                let mut prefix = vec![0; StripCompressor::bound(history)];
+                let n = fresh
+                    .compress(&input[..history], false, &mut prefix, Unstoppable)
+                    .unwrap();
+                let mut zlib = fresh.zlib_header().to_vec();
+                zlib.extend_from_slice(&prefix[..n]);
+                zlib.extend_from_slice(&output);
+                zlib.extend_from_slice(&adler32(1, input).to_be_bytes());
+                assert_eq!(
+                    miniz_oxide::inflate::decompress_to_vec_zlib(&zlib).unwrap(),
+                    input,
+                    "{level:?}, history {history}, tail {tail}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn history_reuse_after_cancellation() {
+    struct Cancel;
+    impl enough::Stop for Cancel {
+        fn check(&self) -> Result<(), enough::StopReason> {
+            Err(enough::StopReason::Cancelled)
+        }
+    }
+    let data = test_data(80_000);
+    for e in [1, 4, 10, 19, 27, 30] {
+        let level = CompressionLevel::png(e);
+        let mut reused = StripCompressor::new(level);
+        let mut actual = vec![0; StripCompressor::bound(data.len() - 32768)];
+        assert!(matches!(
+            reused.compress_with_history(&data, 32768, true, &mut actual, Cancel),
+            Err(crate::CompressionError::Stopped(
+                enough::StopReason::Cancelled
+            ))
+        ));
+        let n = reused
+            .compress_with_history(&data, 32768, true, &mut actual, Unstoppable)
+            .unwrap();
+        actual.truncate(n);
+        let mut expected = vec![0; StripCompressor::bound(data.len() - 32768)];
+        let n = StripCompressor::new(level)
+            .compress_with_history(&data, 32768, true, &mut expected, Unstoppable)
+            .unwrap();
+        assert_eq!(actual, expected[..n], "png({e}) after cancellation");
+    }
+}

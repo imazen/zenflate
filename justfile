@@ -136,6 +136,10 @@ test-checksum-reuse:
 fuzz-check:
     cargo +nightly fuzz build
 
+# Primed strips: levels, independent readers, dictionary boundaries and recovery.
+test-strip-history:
+    cargo test --release --lib history
+
 # Exact match-copy semantics across chunk boundaries and the full DEFLATE window.
 test-match-copy:
     cargo test --lib chunked_copy_matches_bytewise_back_references
