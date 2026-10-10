@@ -1,0 +1,38 @@
+# just inflate-ab: one-shot deflate_decompress, new = a7c256bb (scan, COUNT=false) vs old = 9f8684bf (main).
+# host dev (Ryzen 9 9950X3D), run-heavy (nice 19), zenbench paired; input shared, outputs 64-byte aligned.
+# Run 1 (before alignment control) had stored/small +0.4..+3.1% and stored/medium +3.9..+4.7%; with aligned buffers those vanish (run below and a stored-only rerun).
+# Codegen: deflate_decompress 8128 -> 8152 B, core_v4 8012 -> 7959 B; disassembly differs by register allocation/scheduling only (46 of ~1960 lines).
+  stored/small  200 rounds × 31K calls
+  ├─ old    23.9 ±2.0ns  [23.4–24.5]ns    160G
+  ╰─ new    24.2 ±2.5ns  [-1.6%–+0.7%]    158G [1]
+  fixed/small  200 rounds × 348 calls
+  ├─ old    3.0 ±0.0µs  [2.9–3.0]µs      1.28G
+  ╰─ new    3.0 ±0.0µs  [-0.0%–+0.1%]    1.28G [1]
+  dynamic/small  200 rounds × 253 calls
+  ├─ old    4.1 ±0.0µs  [4.1–4.2]µs      944M
+  ╰─ new    4.2 ±0.0µs  [-0.1%–+0.2%]    930M [1]
+  stored/medium  200 rounds × 580 calls
+  ├─ old    2.2 ±0.0µs  [2.2–2.3]µs      109G
+  ╰─ new    2.3 ±0.0µs  [-0.4%–+0.1%]    108G [1]
+  fixed/medium  60 rounds × 29 calls
+  ├─ old    170.5 ±1.6µs  [169.4–171.9]µs     1.43G
+  ╰─ new    172.1 ±1.4µs  [+0.6%–+1.4%]       1.42G [1]
+  dynamic/medium  90 rounds × 44 calls
+  ├─ old    115.1 ±0.7µs  [114.3–116.1]µs     2.12G
+  ╰─ new    114.5 ±0.5µs  [-0.1%–+0.2%]       2.13G [1]
+  stored/large  200 rounds × 16 calls
+  ├─ old    331.6 ±41.5µs  [326.4–337.0]µs     47.1G
+  ╰─ new    332.6 ±51.2µs  [-2.6%–+3.2%]       47.0G [1]
+  fixed/large  30 rounds × 1 calls
+  ├─ old    11.6 ±0.0ms  [11.6–11.6]ms    1.35G
+  ╰─ new    11.6 ±0.1ms  [-0.3%–+0.5%]    1.35G [1]
+  dynamic/large  30 rounds × 1 calls
+  ├─ old    8.1 ±0.0ms  [8.1–8.2]ms      1.93G
+  ╰─ new    8.0 ±0.0ms  [-0.9%–-0.5%]    1.94G [1]
+  idat/pngsuite (174 streams)  100 rounds × 18 calls
+  ├─ old    281.3 ±3.2µs  [279.5–283.2]µs     1.73G
+  ╰─ new    283.3 ±4.4µs  [+0.1%–+0.9%]       1.71G [1]
+  idat/gb82 (25 streams)  30 rounds × 1 calls
+  ├─ old    24.9 ±0.2ms  [24.8–25.0]ms    954M
+  ╰─ new    24.7 ±0.1ms  [-1.3%–-0.7%]    961M [1]
+  total: 382.7s  (882 noisy rounds)

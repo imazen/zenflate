@@ -24,6 +24,7 @@ exclude = [
     "Cargo.toml.original.txt",
     "Dockerfile",
     "justfile",
+    "bench/",
     "benches/",
     "benchmarks/",
     "scripts/",
