@@ -35,7 +35,8 @@ jobs:
       # Disable SIMD here: CPU dispatch and intrinsics are checked by native
       # tier tests; these bounded interpreter tests exercise scalar memory access.
       - name: Bounded unchecked memory checks
-        run: cargo miri test --no-default-features --features std,compress,unchecked --lib miri_tests:: -- --nocapture
+        run: |
+          cargo miri test --no-default-features --features std,compress,unchecked --lib miri_tests:: -- --nocapture
 
       - name: Dynamic-header regression
         run: cargo miri test --no-default-features --features std,compress,unchecked --lib dynamic_header_with_every_precode_symbol_decodes
