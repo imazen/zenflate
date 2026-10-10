@@ -569,3 +569,20 @@ Smoke mode retains every arm and full input, with one measurement round.
 The corpus bench now fetches gb82 through codec-corpus and fails on missing
 Canterbury, Silesia or photo inputs; its previous missing-cache path silently
 skipped the photo cases on this host.
+
+### Safe versus unchecked (2026-10-10)
+
+[Current paired measurements](benchmarks/unchecked_2026-10-10/README.md) use
+archmage 0.9.30, Rust 1.98.1, one Core Ultra 7 265K CPU, and 25 PNG variants
+from four source images. Safe already has fixed matchfinder arrays and fixed DP
+views; both feature configurations use the same large-buffer storage types.
+Unchecked took 6.9% less time at new(10) and 7.7% less at libdeflate(1), but
+6.4–11.3% more on the tested near-optimal settings. One-shot decode took 4.1%
+more time; streaming was effectively unchanged. All encoded sizes matched in
+all six process runs. These are workload-specific results, not an ARM or
+AVX-512 conclusion. Keep the safe default. run-heavy: rc=0, 1126s,
+peak-RSS 0.30GiB; full resource record and raw data are linked above.
+
+The focused Miri workflow passed remotely on 8c74e3f1 (Actions run 38009207034).
+All-target release-mode validation, including the five gb82 photo inputs,
+passed locally; the default and unchecked Clippy checks also passed.

@@ -160,11 +160,10 @@ impl MwcRng {
 
 /// All near-optimal-specific state, separate from the main Compressor.
 ///
-/// With `unchecked`, all large fields are fixed arrays so `Box<NearOptimalState>`
-/// is a single heap allocation (~9MB), matching libdeflate C's single malloc.
-/// Without `unchecked`, fields use Vec (separate allocations per field).
-///
-/// Clone is derived — all large fields are Vec (~4.5KB on the stack, data on heap).
+/// Large per-block tables are heap-backed Vecs in both feature configurations;
+/// the binary tree matchfinder owns boxed fixed-size arrays. The safe DP loop
+/// borrows fixed-size views into its tables. `unchecked` changes access patterns,
+/// not this storage layout.
 #[derive(Clone)]
 pub(crate) struct NearOptimalState {
     /// Binary tree matchfinder.
