@@ -586,3 +586,9 @@ peak-RSS 0.30GiB; full resource record and raw data are linked above.
 The focused Miri workflow passed remotely on 8c74e3f1 (Actions run 38009207034).
 All-target release-mode validation, including the five gb82 photo inputs,
 passed locally; the default and unchecked Clippy checks also passed.
+
+Local publication preparation completed on 2026-10-10: all-target release-mode
+checks, safe and unchecked suites, doctests, feature matrix, Clippy, rustdoc,
+API snapshots, and semver-checks against 0.4.0 passed. `cargo package` verified
+the 0.4.1 archive. Publication still requires README approval and green CI on
+the exact release commit; no tag, GitHub release or crate publication was made.
