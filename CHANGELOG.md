@@ -6,7 +6,7 @@
 
 (none)
 
-## [0.4.1] - 2026-10-09
+## [0.4.1] - 2026-10-10
 
 ### Added
 
@@ -19,10 +19,11 @@
 
 - Inflate uses double-literal tables, chunked match copies and runtime-dispatched x86 loops. One-shot decoding may overwrite bytes beyond `output_written` within the supplied output slice; callers needing to preserve a tail must exclude it from that slice (85241b5, 3945e3e, 55f8045, 66ead6f).
 - Streaming decode reuses tables on reset and grows input staging as needed; std builds cache fixed-Huffman tables (bb058c6, 0c9c89c).
-- Dependency floors updated to `archmage` 0.9.30 and `enough` 0.4.4; archmage 0.9.30 fixes a dispatch-disable race relevant to tier tests (c02c2f4; release preparation).
+- Dependency floors updated to `archmage` 0.9.30 and `enough` 0.4.4; archmage 0.9.30 fixes a dispatch-disable race relevant to tier tests (c02c2f4, 8cdc1a21).
 
 ### Fixed
 
+- Focus Miri on bounded unchecked-memory and caller tests so the soundness gate completes; broad native coverage remains unchanged (65534189).
 - Primed-strip and parallel-gzip near-optimal output no longer depends on compressor reuse (13dc0d5).
 - Reused decoders clear stale `checksum_matched()` results before raw decode and early wrapper errors (66e37b11).
 - Incremental compression emits all input, carries partial bytes across calls, and terminates empty final calls correctly (78fabb5).

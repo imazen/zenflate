@@ -2,7 +2,7 @@
 
 # zenflate
 
-Pure Rust DEFLATE / zlib / gzip. Compression spans effort levels 0–200 across seven strategies (and can emit byte-identical output to C libdeflate on demand), with whole-buffer and streaming decompression plus SIMD Adler-32 / CRC-32. `#![forbid(unsafe_code)]` by default (with an opt-in `unchecked` fast path) and `no_std`-friendly: compression and streaming decompression require `alloc`, while whole-buffer decompression works without `alloc`. With `std`, the fixed-Huffman table cache allocates once per process.
+Pure Rust DEFLATE / zlib / gzip. Compression spans effort levels 0–200 (with a separate C libdeflate compatibility mode), with whole-buffer and streaming decompression plus SIMD Adler-32 / CRC-32. `#![forbid(unsafe_code)]` by default (with an opt-in `unchecked` fast path) and `no_std`-friendly: compression and streaming decompression require `alloc`, while whole-buffer decompression works without `alloc`. With `std`, the fixed-Huffman table cache allocates once per process.
 
 ## Quick start
 
@@ -76,9 +76,8 @@ preserved, so don't decode into part of a buffer whose tail you need.
 don't know the decompressed length up front (the gzip trailer is attacker-
 controlled), so size `output` to your maximum and decompression returns an error
 rather than over-allocating. If you instead use the streaming
-[`StreamDecompressor`](#streaming-decompression) (which grows its own buffer),
-cap it explicitly with `.with_max_output_size(Some(max_bytes))` — otherwise a
-small "zip bomb" can expand without bound.
+[`StreamDecompressor`](#streaming-decompression) (which manages its own buffer),
+limit total decoded output with `.with_max_output_size(Some(max_bytes))`.
 
 ```rust
 // gzip into a hard-capped buffer (rejects anything larger):
@@ -121,7 +120,7 @@ let mut stream = StreamDecompressor::gzip(BufReadSource::new(file), DEFAULT_CAPA
 **Untrusted input / decompression bombs.** The whole-buffer `Decompressor`
 is naturally bounded by the output slice you pass it. The streaming API
 produces output incrementally, so for untrusted data cap the total with
-`with_max_output_size` (decoding then errors instead of allocating past the
+`with_max_output_size` (decoding errors when total output would exceed the
 cap); a stall guard also rejects streams that emit thousands of empty blocks
 without progress:
 
@@ -133,7 +132,8 @@ let mut stream = StreamDecompressor::gzip(compressed_data, DEFAULT_CAPACITY)
 ### Checksum policy
 
 Zlib and gzip decoding verify checksums by default. Both decoder types accept
-`with_checksum(ChecksumPolicy::Verify | Report | Ignore)`. `Report` computes the
+`with_checksum(policy)`, with `ChecksumPolicy::Verify`, `Report` or `Ignore`.
+`Report` computes the
 checksum and exposes the comparison through `checksum_matched()` without
 rejecting a mismatch. `Ignore` avoids checksum computation and comparison;
 gzip's uncompressed-length check still applies. `with_skip_checksum(true)`
@@ -215,7 +215,7 @@ Reuse `Compressor` and `Decompressor` across calls to avoid re-initialization.
 #### Recommended effort levels
 
 For most uses, `balanced()` (effort 15) is a good default. Use `fast()` (effort 10)
-when speed matters more than the last few percent of compression.
+to spend less time searching for matches.
 
 ### PNG image data
 
@@ -291,10 +291,11 @@ Efforts above 30 currently ignore history and compress the strip alone.
 use zenflate::{Compressor, CompressionLevel, Unstoppable};
 
 let mut compressor = Compressor::new(CompressionLevel::balanced());
+let num_threads = 4;
 let bound = Compressor::gzip_compress_bound(data.len()) + num_threads * 5;
 let mut compressed = vec![0u8; bound];
 let size = compressor
-    .gzip_compress_parallel(data, &mut compressed, 4, Unstoppable)
+    .gzip_compress_parallel(data, &mut compressed, num_threads, Unstoppable)
     .unwrap();
 ```
 
@@ -360,10 +361,10 @@ by `alloc` / always-on.
 ## Performance
 
 Performance depends on input, effort, CPU and enabled features. This release
-makes no speed or compression-ratio comparison claims. Historical measurements
+makes no speed or compression-ratio comparison claims. Dated measurements
 and their commands remain in [benchmarks/](https://github.com/imazen/zenflate/tree/main/benchmarks);
-they are not measurements of this release. Fresh comparisons are planned for a
-later release.
+consult each record for its commit and workload. A refreshed comparison suite
+is planned for a later release.
 
 ## How it works
 
@@ -373,7 +374,7 @@ own implementation. The core decompressor, matchfinders, Huffman construction,
 and block splitting trace back to libdeflate. On top of that foundation,
 zenflate pulls in techniques from several other projects and adds original work:
 
-- **Effort-based compression (0-200)** with seven strategies and named presets,
+- **Effort-based compression (0-200)** with named presets,
   replacing libdeflate's fixed 0-12 levels. Includes two original matchfinder
   designs (turbo, fast HT) for the low-effort range.
 - **Full-optimal compression** (Zopfli-style iterative squeeze), ported from
@@ -426,26 +427,8 @@ Developed with assistance from Claude (Anthropic) and Codex (OpenAI). Not all co
 
 Dual-licensed: [AGPL-3.0](https://github.com/imazen/zenflate/blob/main/LICENSE-AGPL3) or [commercial](https://github.com/imazen/zenflate/blob/main/LICENSE-COMMERCIAL).
 
-I've maintained and developed open-source image server software — and the 40+
-library ecosystem it depends on — full-time since 2011. Fifteen years of
-continual maintenance, backwards compatibility, support, and the (very rare)
-security patch. That kind of stability requires sustainable funding, and
-dual-licensing is how we make it work without venture capital or rug-pulls.
-Support sustainable and secure software; swap patch tuesday for patch leap-year.
-
-[Our open-source products](https://www.imazen.io/open-source)
-
-**Your options:**
-
-- **Startup license** — $1 if your company has under $1M revenue and fewer
-  than 5 employees. [Get a key →](https://www.imazen.io/pricing)
-- **Commercial subscription** — Governed by the Imazen Site-wide Subscription
-  License v1.1 or later. Apache 2.0-like terms, no source-sharing requirement.
-  Sliding scale by company size.
-  [Pricing & 60-day free trial →](https://www.imazen.io/pricing)
-- **AGPL v3** — Free and open. Share your source if you distribute.
-
-See [LICENSE-COMMERCIAL](https://github.com/imazen/zenflate/blob/main/LICENSE-COMMERCIAL) for details.
+See the license files for the applicable terms. Commercial licensing information
+is available at [Imazen](https://www.imazen.io/pricing).
 
 Upstream code from [ebiggers/libdeflate](https://github.com/ebiggers/libdeflate) is licensed under MIT.
 Our additions and improvements are dual-licensed (AGPL-3.0 or commercial) as above.

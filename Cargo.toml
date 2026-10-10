@@ -25,6 +25,8 @@ exclude = [
     "Dockerfile",
     "justfile",
     "benches/",
+    "benchmarks/",
+    "scripts/",
     "docs/",
     "tests/",
     "examples/heap_*.rs",
