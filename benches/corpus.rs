@@ -7,6 +7,8 @@
 //!   ~/.cache/compression-corpus/canterbury/
 //!   ~/.cache/compression-corpus/silesia/
 //!   ~/.cache/codec-corpus/v1/gb82/
+//! Missing gb82 files are fetched through codec-corpus. Compression corpora
+//! must be installed with `just corpus-download`; missing inputs are errors.
 //!
 //! Run with: `cargo bench --bench corpus`
 
@@ -37,13 +39,6 @@ fn home_dir() -> Option<PathBuf> {
     std::env::var("HOME").ok().map(PathBuf::from)
 }
 
-fn codec_corpus_dir() -> PathBuf {
-    if let Some(d) = home_dir() {
-        return d.join(".cache/codec-corpus/v1");
-    }
-    PathBuf::from("/tmp/.cache/codec-corpus/v1")
-}
-
 /// Load a file from the Canterbury corpus. Returns None if not found.
 fn load_canterbury(name: &str) -> Option<Vec<u8>> {
     let path = corpus_cache_dir().join("canterbury").join(name);
@@ -57,8 +52,8 @@ fn load_silesia(name: &str) -> Option<Vec<u8>> {
 }
 
 /// Load a PNG from gb82 and decode to raw RGB pixels. Returns None if not found.
-fn load_gb82_rgb(name: &str) -> Option<Vec<u8>> {
-    let path = codec_corpus_dir().join("gb82").join(name);
+fn load_gb82_rgb(directory: &std::path::Path, name: &str) -> Option<Vec<u8>> {
+    let path = directory.join(name);
     let file = std::fs::File::open(&path).ok()?;
     let decoder = png::Decoder::new(std::io::BufReader::new(file));
     let mut reader = decoder.read_info().ok()?;
@@ -85,9 +80,10 @@ fn canterbury_files() -> Vec<(&'static str, Vec<u8>)> {
     ];
     let mut files = Vec::new();
     for name in &names {
-        if let Some(data) = load_canterbury(name) {
-            files.push((*name, data));
-        }
+        let data = load_canterbury(name).unwrap_or_else(|| {
+            panic!("missing Canterbury input: {name}; run just corpus-download")
+        });
+        files.push((*name, data));
     }
     files
 }
@@ -114,15 +110,17 @@ fn silesia_files() -> Vec<(&'static str, Vec<u8>)> {
         if *name == "mozilla" {
             continue;
         }
-        if let Some(data) = load_silesia(name) {
-            files.push((*name, data));
-        }
+        let data = load_silesia(name)
+            .unwrap_or_else(|| panic!("missing Silesia input: {name}; run just corpus-download"));
+        files.push((*name, data));
     }
     files
 }
 
 /// Load gb82 photos as raw RGB pixels.
 fn gb82_files() -> Vec<(&'static str, Vec<u8>)> {
+    let corpus = codec_corpus::Corpus::new().expect("initialize codec corpus");
+    let directory = corpus.get("gb82").expect("fetch gb82 corpus");
     let names = [
         ("dog", "dog-lossless.png"),
         ("city", "city-lossless.png"),
@@ -132,9 +130,9 @@ fn gb82_files() -> Vec<(&'static str, Vec<u8>)> {
     ];
     let mut files = Vec::new();
     for (label, filename) in &names {
-        if let Some(data) = load_gb82_rgb(filename) {
-            files.push((*label, data));
-        }
+        let data = load_gb82_rgb(&directory, filename)
+            .unwrap_or_else(|| panic!("missing or unreadable gb82 input: {filename}"));
+        files.push((*label, data));
     }
     files
 }
@@ -171,13 +169,7 @@ fn bench_corpus_compress(
     files: &[(&str, Vec<u8>)],
     levels: &[u32],
 ) {
-    if files.is_empty() {
-        eprintln!(
-            "WARNING: {corpus_name} corpus not found, skipping. \
-             Download to ~/.cache/compression-corpus/{corpus_name}/"
-        );
-        return;
-    }
+    assert!(!files.is_empty(), "empty corpus: {corpus_name}");
 
     for (name, data) in files {
         let group_name = format!("corpus_compress/{corpus_name}/{name}");
@@ -278,9 +270,7 @@ fn bench_corpus_compress(
 // ---------------------------------------------------------------------------
 
 fn bench_corpus_decompress(c: &mut Criterion, corpus_name: &str, files: &[(&str, Vec<u8>)]) {
-    if files.is_empty() {
-        return;
-    }
+    assert!(!files.is_empty(), "empty corpus: {corpus_name}");
 
     let level = 6u32;
 
@@ -414,9 +404,7 @@ fn bench_corpus_aggregate(
     files: &[(&str, Vec<u8>)],
     levels: &[u32],
 ) {
-    if files.is_empty() {
-        return;
-    }
+    assert!(!files.is_empty(), "empty corpus: {corpus_name}");
 
     // Concatenate all files for aggregate throughput measurement
     let total: Vec<u8> = files.iter().flat_map(|(_, d)| d.iter().copied()).collect();
@@ -531,8 +519,17 @@ fn bench_photos(c: &mut Criterion) {
 // Harness
 // ---------------------------------------------------------------------------
 
+// Cargo invokes harness=false benches without --test on this toolchain.
+// Debug builds smoke-test every arm; release builds retain full measurements.
+fn configure_test_mode(c: &mut Criterion) {
+    if cfg!(debug_assertions) || std::env::args().any(|arg| arg == "--test") {
+        c.sample_size(1);
+    }
+}
+
 criterion_group!(
     corpus_benches,
+    configure_test_mode,
     bench_canterbury,
     bench_silesia,
     bench_photos

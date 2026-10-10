@@ -559,3 +559,13 @@ already bound matchfinder tables and the safe DP loop (259-entry view).
 The focused Miri run passed on 2026-10-10 with archmage 0.9.30: byte boundaries,
 raw match extension, compression/reuse callers and the dynamic-header regression.
 Command: `just miri-focused`. run-heavy: rc=0, 540s, peak-RSS 1.76GiB.
+
+The Miri selector command uses a YAML block scalar: an unquoted `::` followed
+by a space was rejected by Actions; fixed in 73f1da7c and parsed locally.
+
+Release validation uses `cargo test --all-targets --release -- --test`: custom
+benchmark harnesses otherwise run full statistical measurements under Cargo test.
+Smoke mode retains every arm and full input, with one measurement round.
+The corpus bench now fetches gb82 through codec-corpus and fails on missing
+Canterbury, Silesia or photo inputs; its previous missing-cache path silently
+skipped the photo cases on this host.

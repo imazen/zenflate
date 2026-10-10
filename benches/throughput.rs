@@ -578,8 +578,17 @@ fn bench_stream_decompress(c: &mut Criterion) {
 // Harness
 // ---------------------------------------------------------------------------
 
+// Cargo invokes harness=false benches without --test on this toolchain.
+// Debug builds smoke-test every arm; release builds retain full measurements.
+fn configure_test_mode(c: &mut Criterion) {
+    if cfg!(debug_assertions) || std::env::args().any(|arg| arg == "--test") {
+        c.sample_size(1);
+    }
+}
+
 criterion_group!(
     benches,
+    configure_test_mode,
     bench_compress,
     bench_decompress,
     bench_stream_decompress,

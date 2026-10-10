@@ -34,6 +34,10 @@ bench:
 bench-unchecked:
     cargo bench --features unchecked
 
+# Smoke-test every benchmark arm in debug mode (full corpus inputs).
+bench-smoke:
+    cargo test --release --bench checksum_tiers --bench corpus --bench throughput -- --test
+
 # Run clippy (both feature sets)
 clippy:
     cargo clippy --all-targets -- -D warnings
@@ -164,7 +168,7 @@ miri-focused:
 
 # Required local publication checks; packaging verifies the distributable crate.
 release-check:
-    cargo test --all-targets
+    cargo test --all-targets --release -- --test
     cargo test --doc
     cargo semver-checks --baseline-version 0.4.0
     cargo package

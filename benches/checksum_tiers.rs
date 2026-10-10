@@ -65,6 +65,13 @@ fn bench_checksums(suite: &mut Suite) {
         for (name, is_crc) in [("adler32", false), ("crc32", true)] {
             suite.compare(format!("{name}/{label}"), |g| {
                 g.throughput(Throughput::Bytes(n as u64));
+                if cfg!(debug_assertions) || std::env::args().any(|arg| arg == "--test") {
+                    let config = g.config();
+                    config.min_rounds(1).max_rounds(1);
+                    config.warmup_time(std::time::Duration::ZERO);
+                    config.min_iterations = 1;
+                    config.max_iterations = 1;
+                }
                 for (arm, simd) in [(TIER_NAME, true), ("scalar", false)] {
                     g.bench(arm, move |b| {
                         b.iter(move || {
