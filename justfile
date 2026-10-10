@@ -172,3 +172,7 @@ release-check:
 # Repeatable safe/unchecked comparison on a fixed subset of vs_png inputs.
 compare-unchecked inputs results:
     bash scripts/compare-unchecked.sh {{inputs}} {{results}}
+
+# Aggregate paired timings and verify every expected input and encoded size.
+summarize-unchecked results:
+    python3 scripts/summarize-unchecked.py {{results}}
