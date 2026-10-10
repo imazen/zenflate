@@ -28,6 +28,9 @@ pub struct ScanError {
     /// this position (the bit buffer reads ahead by at most 8 bytes). `input.len()` for
     /// truncated input.
     pub input_pos: usize,
+    /// Decompressed bytes produced before the error: what a streaming decoder
+    /// delivers before it fails.
+    pub output_len: usize,
 }
 
 /// Walk a raw DEFLATE stream without writing output: matches are counted, not copied,
@@ -66,7 +69,7 @@ pub fn deflate_scan(
             stopped: true,
         });
     }
-    let mut fail_at = input.len();
+    let mut fail_at = (input.len(), 0);
     let mut d = Decompressor::new();
     match d.deflate_decompress_core_impl::<true>(input, &mut [], stop_at, &mut fail_at, &stop) {
         Ok((input_consumed, output_len, stopped)) => Ok(ScanOutcome {
@@ -76,7 +79,8 @@ pub fn deflate_scan(
         }),
         Err(error) => Err(ScanError {
             error,
-            input_pos: fail_at,
+            input_pos: fail_at.0,
+            output_len: fail_at.1,
         }),
     }
 }
@@ -92,6 +96,7 @@ pub fn zlib_scan(
     let bad = |input_pos| ScanError {
         error: DecompressionError::InvalidHeader,
         input_pos,
+        output_len: 0,
     };
     let [cmf, flg] = *input.first_chunk::<2>().ok_or(bad(input.len()))?;
     if !u16::from_be_bytes([cmf, flg]).is_multiple_of(31)
@@ -112,6 +117,7 @@ pub fn zlib_scan(
             return Err(ScanError {
                 error: DecompressionError::BadData,
                 input_pos: input.len(),
+                output_len: r.output_len,
             });
         }
         r.input_consumed += ZLIB_FOOTER_SIZE;

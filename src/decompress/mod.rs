@@ -1057,14 +1057,14 @@ impl Decompressor {
                 return oneshot_v4::core_v4(token, self, input, output, stop);
             }
         }
-        self.deflate_decompress_core_impl::<false>(input, output, usize::MAX, &mut 0, stop)
+        self.deflate_decompress_core_impl::<false>(input, output, usize::MAX, &mut (0, 0), stop)
             .map(|(i, o, _)| (i, o))
     }
 
     /// The inflate loop. `COUNT` is the count-only scan ([`deflate_scan`]): nothing is written
     /// (`output` is unused), double-literal entries are off so each symbol's bits are
     /// known, the loop returns `(consumed, out, true)` once `stop_at` output bytes exist,
-    /// and a data error records the input position in `fail_at`. The decode instantiation
+    /// and an error records the input loaded and the output produced in `fail_at`. The decode instantiation
     /// (`COUNT = false`, `stop_at = usize::MAX`) compiles to the plain loop.
     #[inline(always)]
     pub(crate) fn deflate_decompress_core_impl<const COUNT: bool>(
@@ -1072,7 +1072,7 @@ impl Decompressor {
         input: &[u8],
         output: &mut [u8],
         stop_at: usize,
-        fail_at: &mut usize,
+        fail_at: &mut (usize, usize),
         stop: &impl enough::Stop,
     ) -> Result<(usize, usize, bool), DecompressionError> {
         // No x86-64-v3 build of this loop (unlike the streaming decoder):
@@ -1085,13 +1085,30 @@ impl Decompressor {
         let mut overread_count: usize = 0;
 
         let bad = DecompressionError::BadData;
+        // Count mode records (input loaded, output produced) where an error is detected.
         macro_rules! fail {
             () => {{
                 if COUNT {
-                    *fail_at = in_pos;
+                    *fail_at = (in_pos, out_pos);
                 }
                 return Err(bad);
             }};
+        }
+        macro_rules! refill {
+            () => {
+                if let Err(e) = refill_bits(
+                    &mut bitbuf,
+                    &mut bitsleft,
+                    input,
+                    &mut in_pos,
+                    &mut overread_count,
+                ) {
+                    if COUNT {
+                        *fail_at = (input.len(), out_pos);
+                    }
+                    return Err(e);
+                }
+            };
         }
         // Count mode: `stop_at` output bytes exist; report the input through the last
         // whole byte holding bits of the symbol that produced them.
@@ -1120,13 +1137,7 @@ impl Decompressor {
             stop.check()?;
 
             // --- Read block header ---
-            refill_bits(
-                &mut bitbuf,
-                &mut bitsleft,
-                input,
-                &mut in_pos,
-                &mut overread_count,
-            )?;
+            refill!();
 
             let is_final = (bitbuf & 1) != 0;
             let block_type = ((bitbuf >> 1) & 3) as u32;
@@ -1145,13 +1156,7 @@ impl Decompressor {
                 bitbuf >>= 20;
                 bitsleft -= 20;
 
-                refill_bits(
-                    &mut bitbuf,
-                    &mut bitsleft,
-                    input,
-                    &mut in_pos,
-                    &mut overread_count,
-                )?;
+                refill!();
 
                 // Remaining precode lens (3 bits each, max 18 more)
                 for &perm in &DEFLATE_PRECODE_LENS_PERMUTATION[1..num_explicit_precode_lens] {
@@ -1184,13 +1189,7 @@ impl Decompressor {
                 let mut i = 0usize;
                 while i < total_syms {
                     if bitsleft < DEFLATE_MAX_PRE_CODEWORD_LEN + 7 {
-                        refill_bits(
-                            &mut bitbuf,
-                            &mut bitsleft,
-                            input,
-                            &mut in_pos,
-                            &mut overread_count,
-                        )?;
+                        refill!();
                     }
 
                     let entry = self.precode_decode_table
@@ -1305,6 +1304,11 @@ impl Decompressor {
                     return Ok((in_pos + (stop_at - out_pos), stop_at, true));
                 }
                 if len > input.len() - in_pos {
+                    if COUNT {
+                        // the stored bytes present are output a streaming decoder delivers
+                        out_pos += input.len() - in_pos;
+                        in_pos = input.len();
+                    }
                     fail!();
                 }
 
@@ -1525,13 +1529,7 @@ impl Decompressor {
                         stop.check()?;
                         next_stop_check = next(out_pos);
                     }
-                    refill_bits(
-                        &mut bitbuf,
-                        &mut bitsleft,
-                        input,
-                        &mut in_pos,
-                        &mut overread_count,
-                    )?;
+                    refill!();
 
                     let mut entry =
                         table_lookup(&self.litlen_decode_table, bitbuf & litlen_tablemask);
@@ -3176,7 +3174,7 @@ mod oneshot_v4 {
         output: &mut [u8],
         stop: &impl enough::Stop,
     ) -> Result<(usize, usize), DecompressionError> {
-        d.deflate_decompress_core_impl::<false>(input, output, usize::MAX, &mut 0, stop)
+        d.deflate_decompress_core_impl::<false>(input, output, usize::MAX, &mut (0, 0), stop)
             .map(|(i, o, _)| (i, o))
     }
 }

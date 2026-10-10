@@ -12,6 +12,24 @@ use zenflate::{Decompressor, Unstoppable, deflate_scan, zlib_scan};
 
 const SCAN_LIMIT: usize = 1 << 20;
 
+/// Bytes the streaming decoder delivers from `stream` before it ends or fails.
+fn stream_produced(stream: &[u8]) -> usize {
+    let mut d = zenflate::StreamDecompressor::deflate(stream, 1 << 16);
+    let mut n = 0;
+    while !d.is_done() {
+        match d.fill() {
+            Ok(got) if !got.is_empty() => {
+                let k = got.len();
+                n += k;
+                d.advance(k);
+            }
+            Ok(_) => break,
+            Err(_) => return n + d.peek().len(),
+        }
+    }
+    n
+}
+
 /// Bytes miniz_oxide produces from `prefix` when told more input follows (so it never
 /// pads with zero bits): an independent count of what a prefix can yield.
 fn miniz_produced(prefix: &[u8], cap: usize) -> usize {
@@ -53,7 +71,12 @@ pub fn check_scan(stream: &[u8], stops: &[usize]) {
                 assert_eq!(used, s.input_consumed, "miniz_oxide consumed differs");
             }
         }
-        (Err(e), Err(s)) => assert_eq!(*e, s.error, "scan and decode fail differently"),
+        (Err(e), Err(s)) => {
+            assert_eq!(*e, s.error, "scan and decode fail differently");
+            if *e != zenflate::DecompressionError::InsufficientSpace {
+                assert_eq!(s.output_len, stream_produced(stream), "output before the error");
+            }
+        }
         (Err(zenflate::DecompressionError::InsufficientSpace), Ok(s)) => {
             assert!(s.output_len > SCAN_LIMIT)
         }
