@@ -35,11 +35,13 @@ use zenutils_fuzz::RegressionSuite;
 /// landed 1-2 bytes past `zlib_compress_bound` (stored fallback compared
 /// bytes, not bits). `fuzz_api/png1-short-buffer-cap{8,12}.bin`: `png(1)`
 /// into an 8- or 12-byte buffer pushed the bit buffer past 64 bits (debug
-/// assertion / shift overflow) before 4a17814. Bugs whose
+/// assertion / shift overflow) before 4a17814. `fuzz_scan/miniz-rejects-zenflate-accepts.bin`: a stream miniz_oxide
+/// rejects and zenflate decodes; the scan check used miniz as its stop-position
+/// oracle anyway (test harness bug, fixed with the target). Bugs whose
 /// reproducers exceed the 8 KB seed ceiling are gated by unit tests instead:
 /// #7's 19 MB literal run (`full_optimal.rs`), incremental calls past one
 /// sequence store and parallel full-optimal (`compress/mod.rs`).
-const EXPECTED_SEEDS: usize = 7;
+const EXPECTED_SEEDS: usize = 8;
 
 /// Count the files `RegressionSuite::run` will actually replay, using its own
 /// filters: recurse into subdirectories, skip dotfiles, `*.md` and `*.txt`.

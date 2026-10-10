@@ -28,6 +28,9 @@ pub fn check_scan(stream: &[u8], stops: &[usize]) {
     let mut out = vec![0u8; SCAN_LIMIT];
     let one = Decompressor::new().deflate_decompress(stream, &mut out, Unstoppable);
     let scan = deflate_scan(stream, None, Unstoppable);
+    // miniz_oxide is an oracle only for streams it decodes too (the two disagree on a
+    // few invalid inputs; `inflate_diff_check.rs` compares them the same way).
+    let mut miniz_ok = false;
     match (&one, &scan) {
         (Ok(r), Ok(s)) => {
             assert_eq!(
@@ -45,7 +48,8 @@ pub fn check_scan(stream: &[u8], stops: &[usize]) {
                 0,
                 miniz_oxide::inflate::core::inflate_flags::TINFL_FLAG_USING_NON_WRAPPING_OUTPUT_BUF,
             );
-            if status == miniz_oxide::inflate::TINFLStatus::Done {
+            miniz_ok = status == miniz_oxide::inflate::TINFLStatus::Done;
+            if miniz_ok {
                 assert_eq!(used, s.input_consumed, "miniz_oxide consumed differs");
             }
         }
@@ -74,6 +78,9 @@ pub fn check_scan(stream: &[u8], stops: &[usize]) {
         let at = deflate_scan(stream, Some(k), Unstoppable).expect("prefix of a valid stream");
         assert!(at.stopped && at.output_len >= k && at.input_consumed <= s.input_consumed);
         let p = at.input_consumed;
+        if !miniz_ok {
+            continue;
+        }
         let cap = at.output_len + 300;
         assert!(miniz_produced(&stream[..p], cap) >= k, "prefix {p} yields fewer than {k}");
         assert!(miniz_produced(&stream[..p - 1], cap) < k, "prefix {} already yields {k}", p - 1);
