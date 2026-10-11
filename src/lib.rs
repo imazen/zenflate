@@ -183,7 +183,10 @@ pub use compress::{CompressionLevel, Compressor, CompressorSnapshot};
 pub use decompress::streaming::BufReadSource;
 #[cfg(feature = "alloc")]
 pub use decompress::streaming::{DEFAULT_CAPACITY, InputSource, StreamDecompressor};
-pub use decompress::{ChecksumPolicy, DecompressOutcome, Decompressor};
+pub use decompress::{
+    ChecksumPolicy, DecompressOutcome, Decompressor, ScanError, ScanOutcome, deflate_scan,
+    zlib_scan,
+};
 pub use enough::{Stop, StopReason, Unstoppable};
 #[cfg(feature = "alloc")]
 pub use error::StreamError;

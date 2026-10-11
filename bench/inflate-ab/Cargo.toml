@@ -1,0 +1,20 @@
+# Paired A/B of one-shot inflate: this checkout vs a pinned main commit, in one
+# binary (zenbench interleaves the two). `just inflate-ab`. Not published.
+[package]
+name = "zenflate-inflate-ab"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+new = { package = "zenflate", path = "../.." }
+# main before the count-only scan (bump to compare another change)
+old = { package = "zenflate", git = "https://github.com/imazen/zenflate", rev = "9f8684bf7892" }
+zenbench = "0.1.10"
+codec-corpus = "1.1.0"
+miniz_oxide = "0.9.1"
+
+[profile.release]
+debug = 1

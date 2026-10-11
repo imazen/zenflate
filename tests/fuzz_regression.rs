@@ -14,6 +14,11 @@ mod inflate_diff {
     #![allow(dead_code)]
     include!("../fuzz/fuzz_targets/inflate_diff_check.rs");
 }
+/// The `fuzz_scan` target's check, replayed here on stable.
+mod scan {
+    #![allow(dead_code)]
+    include!("../fuzz/fuzz_targets/scan_check.rs");
+}
 use zenutils_fuzz::RegressionSuite;
 
 /// Exact number of replayable seeds committed under `fuzz/regression/`.
@@ -30,11 +35,15 @@ use zenutils_fuzz::RegressionSuite;
 /// landed 1-2 bytes past `zlib_compress_bound` (stored fallback compared
 /// bytes, not bits). `fuzz_api/png1-short-buffer-cap{8,12}.bin`: `png(1)`
 /// into an 8- or 12-byte buffer pushed the bit buffer past 64 bits (debug
-/// assertion / shift overflow) before 4a17814. Bugs whose
+/// assertion / shift overflow) before 4a17814. `fuzz_scan/miniz-rejects-zenflate-accepts.bin`: a stream miniz_oxide
+/// rejects and zenflate decodes; the scan check used miniz as its stop-position
+/// oracle anyway (test harness bug, fixed with the target).
+/// `fuzz_scan/error-past-decode-buffer.bin`: bad data past 1 MiB of output, where the
+/// harness's decode buffer is already full (harness bug). Bugs whose
 /// reproducers exceed the 8 KB seed ceiling are gated by unit tests instead:
 /// #7's 19 MB literal run (`full_optimal.rs`), incremental calls past one
 /// sequence store and parallel full-optimal (`compress/mod.rs`).
-const EXPECTED_SEEDS: usize = 7;
+const EXPECTED_SEEDS: usize = 9;
 
 /// Count the files `RegressionSuite::run` will actually replay, using its own
 /// filters: recurse into subdirectories, skip dotfiles, `*.md` and `*.txt`.
@@ -112,6 +121,7 @@ fn fuzz_regression() {
             let _ = d.gzip_decompress(data, &mut output, Unstoppable);
         })
         .target("fuzz_inflate_diff", inflate_diff::check)
+        .target("fuzz_scan", scan::check)
         .target("fuzz_api", |data| {
             use arbitrary::Arbitrary;
             if let Ok(input) = api::Input::arbitrary_take_rest(arbitrary::Unstructured::new(data)) {

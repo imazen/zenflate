@@ -180,3 +180,8 @@ compare-unchecked inputs results:
 # Aggregate paired timings and verify every expected input and encoded size.
 summarize-unchecked results:
     python3 scripts/summarize-unchecked.py {{results}}
+
+# Paired one-shot inflate A/B: this checkout vs the main commit pinned in
+# bench/inflate-ab/Cargo.toml (zenbench interleaves both in one binary).
+inflate-ab:
+    cd bench/inflate-ab && cargo run --release

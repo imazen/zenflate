@@ -6,6 +6,10 @@
 
 (none)
 
+### Added
+
+- `deflate_scan` / `zlib_scan`: where a DEFLATE (zlib) stream ends, or where its first `N` output bytes end, without producing output (matches counted, no window). A count-only copy of the generic inflate loop on the decoder's table builders; the decode loop is unchanged (identical machine code to main). a7c256bb
+
 ## [0.4.1] - 2026-10-10
 
 ### Added

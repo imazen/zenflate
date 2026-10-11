@@ -18,6 +18,7 @@ The comparisons are built so the numbers mean something:
   the corpus cache into `Vec<u8>` *before* timing starts; the timed closure only
   calls compress/decompress on the in-RAM buffer. No file open/read/write is
   measured. Output is consumed so it isn't optimized away.
+- **Same-binary A/B carries placement bias.** `just inflate-ab` links two zenflate copies into one binary; an A/A control (main twice, identical machine code) measured fixed/large −4.6..−3.9% and other CIs off zero in both directions, so a few-percent A/B delta is not a code difference unless the disassembly differs (`inflate_ab_scan_2026-10-10.txt`).
 - **Single-thread vs single-thread.** The core compress/decompress comparison is
   one call on the calling thread for every contender. Parallel gzip
   (`gzip_compress_parallel`) is measured separately and labelled with its thread

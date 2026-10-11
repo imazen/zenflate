@@ -1,0 +1,270 @@
+# just inflate-ab: one-shot deflate_decompress, new = a7c256bb (scan, COUNT=false) vs old = 9f8684bf (main).
+# host dev (Ryzen 9 9950X3D), run-heavy (nice 19), zenbench paired; input shared, outputs 64-byte aligned.
+# Run 1 (before alignment control) had stored/small +0.4..+3.1% and stored/medium +3.9..+4.7%; with aligned buffers those vanish (run below and a stored-only rerun).
+# Codegen: deflate_decompress 8128 -> 8152 B, core_v4 8012 -> 7959 B; disassembly differs by register allocation/scheduling only (46 of ~1960 lines).
+  stored/small  200 rounds × 31K calls
+  ├─ old    23.9 ±2.0ns  [23.4–24.5]ns    160G
+  ╰─ new    24.2 ±2.5ns  [-1.6%–+0.7%]    158G [1]
+  fixed/small  200 rounds × 348 calls
+  ├─ old    3.0 ±0.0µs  [2.9–3.0]µs      1.28G
+  ╰─ new    3.0 ±0.0µs  [-0.0%–+0.1%]    1.28G [1]
+  dynamic/small  200 rounds × 253 calls
+  ├─ old    4.1 ±0.0µs  [4.1–4.2]µs      944M
+  ╰─ new    4.2 ±0.0µs  [-0.1%–+0.2%]    930M [1]
+  stored/medium  200 rounds × 580 calls
+  ├─ old    2.2 ±0.0µs  [2.2–2.3]µs      109G
+  ╰─ new    2.3 ±0.0µs  [-0.4%–+0.1%]    108G [1]
+  fixed/medium  60 rounds × 29 calls
+  ├─ old    170.5 ±1.6µs  [169.4–171.9]µs     1.43G
+  ╰─ new    172.1 ±1.4µs  [+0.6%–+1.4%]       1.42G [1]
+  dynamic/medium  90 rounds × 44 calls
+  ├─ old    115.1 ±0.7µs  [114.3–116.1]µs     2.12G
+  ╰─ new    114.5 ±0.5µs  [-0.1%–+0.2%]       2.13G [1]
+  stored/large  200 rounds × 16 calls
+  ├─ old    331.6 ±41.5µs  [326.4–337.0]µs     47.1G
+  ╰─ new    332.6 ±51.2µs  [-2.6%–+3.2%]       47.0G [1]
+  fixed/large  30 rounds × 1 calls
+  ├─ old    11.6 ±0.0ms  [11.6–11.6]ms    1.35G
+  ╰─ new    11.6 ±0.1ms  [-0.3%–+0.5%]    1.35G [1]
+  dynamic/large  30 rounds × 1 calls
+  ├─ old    8.1 ±0.0ms  [8.1–8.2]ms      1.93G
+  ╰─ new    8.0 ±0.0ms  [-0.9%–-0.5%]    1.94G [1]
+  idat/pngsuite (174 streams)  100 rounds × 18 calls
+  ├─ old    281.3 ±3.2µs  [279.5–283.2]µs     1.73G
+  ╰─ new    283.3 ±4.4µs  [+0.1%–+0.9%]       1.71G [1]
+  idat/gb82 (25 streams)  30 rounds × 1 calls
+  ├─ old    24.9 ±0.2ms  [24.8–25.0]ms    954M
+  ╰─ new    24.7 ±0.1ms  [-1.3%–-0.7%]    961M [1]
+  total: 382.7s  (882 noisy rounds)
+
+# Run 3: new = 4b2d4241 (ScanError.output_len; refill! macro). Same symbol sizes as a7c256bb.
+  stored/small  200 rounds × 45K calls
+  ├─ old    24.7 ±2.8ns  [24.2–25.3]ns    154G
+  ╰─ new    25.0 ±3.2ns  [-2.3%–+0.1%]    153G [1]
+  fixed/small  200 rounds × 345 calls
+  ├─ old    3.1 ±0.0µs  [3.1–3.2]µs      1.22G
+  ╰─ new    3.2 ±0.1µs  [-0.0%–+1.0%]    1.21G [1]
+  dynamic/small  200 rounds × 248 calls
+  ├─ old    4.3 ±0.1µs  [4.2–4.4]µs      907M
+  ╰─ new    4.3 ±0.1µs  [-0.2%–+0.0%]    918M [1]
+  stored/medium  200 rounds × 577 calls
+  ├─ old    2.1 ±0.1µs  [2.0–2.1]µs      118G
+  ╰─ new    2.1 ±0.1µs  [-0.5%–+0.1%]    118G [1]
+  fixed/medium  120 rounds × 28 calls
+  ├─ old    174.7 ±2.8µs  [173.4–176.2]µs     1.40G
+  ╰─ new    176.1 ±3.7µs  [+0.4%–+1.2%]       1.39G [1]
+  dynamic/medium  60 rounds × 42 calls
+  ├─ old    118.2 ±2.4µs  [117.4–119.1]µs     2.07G
+  ╰─ new    118.9 ±2.4µs  [-0.1%–+0.4%]       2.05G [1]
+  stored/large  200 rounds × 14 calls
+  ├─ old    387.3 ±68.8µs  [369.0–408.2]µs     40.3G [1]
+  ╰─ new    382.1 ±81.2µs  [-3.6%–+4.4%]       40.9G [2] [3]
+  fixed/large  30 rounds × 1 calls
+  ├─ old    11.7 ±0.1ms  [11.6–11.7]ms    1.34G
+  ╰─ new    11.7 ±0.1ms  [-0.4%–+0.4%]    1.34G [1]
+  dynamic/large  30 rounds × 1 calls
+  ├─ old    8.1 ±0.0ms  [8.1–8.2]ms      1.93G
+  ╰─ new    8.1 ±0.1ms  [-0.7%–+0.1%]    1.93G [1]
+  idat/pngsuite (174 streams)  90 rounds × 17 calls
+  ├─ old    282.2 ±4.0µs  [280.4–284.3]µs     1.72G
+  ╰─ new    283.0 ±4.1µs  [-0.2%–+0.4%]       1.72G [1]
+  idat/gb82 (25 streams)  30 rounds × 1 calls
+  ├─ old    25.2 ±0.4ms  [25.0–25.4]ms    943M
+  ╰─ new    25.0 ±0.2ms  [-1.4%–-0.4%]    951M [1]
+  total: 390.9s  (1210 noisy rounds)
+
+# --- Separate scan loop (0127b96f): decode core restored byte for byte from main. ---
+# deflate_decompress / core_v4 / load_static_tables / build_decode_table: same sizes as main; normalized objdump of the first two identical (0 diff lines of 1954 / 1896).
+# Run 4 (default codegen)
+  stored/small  200 rounds × 41K calls
+  ╰─ new    23.9 ±2.9ns  [-0.6%–+1.6%]    160G [1]
+  fixed/small  200 rounds × 351 calls
+  ╰─ new    3.0 ±0.0µs  [-0.0%–+0.2%]    1.26G [1]
+  dynamic/small  200 rounds × 255 calls
+  ╰─ new    4.1 ±0.0µs  [-0.0%–+0.2%]    948M [1]
+  stored/medium  200 rounds × 412 calls
+  ╰─ new    2.3 ±0.1µs  [-0.1%–+0.6%]    106G [1]
+  fixed/medium  80 rounds × 29 calls
+  ╰─ new    171.4 ±1.4µs  [+0.2%–+0.8%]       1.42G [1]
+  dynamic/medium  80 rounds × 44 calls
+  ╰─ new    114.3 ±0.4µs  [+0.1%–+0.4%]       2.14G [1]
+  stored/large  200 rounds × 16 calls
+  ╰─ new    332.7 ±43.4µs  [-1.8%–+4.0%]       47.0G [1]
+  fixed/large  30 rounds × 1 calls
+  ╰─ new    12.0 ±0.0ms  [+2.9%–+3.9%]    1.30G
+  dynamic/large  30 rounds × 1 calls
+  ╰─ new    8.1 ±0.0ms  [+0.5%–+0.8%]    1.94G [1]
+  idat/pngsuite (174 streams)  90 rounds × 18 calls
+  ╰─ new    276.5 ±5.0µs  [-0.6%–+0.2%]       1.76G [1]
+  idat/gb82 (25 streams)  30 rounds × 1 calls
+  ╰─ new    24.8 ±0.1ms  [-0.1%–+0.5%]    957M [1]
+  total: 381.2s  (890 noisy rounds)
+# Run 5 (default codegen)
+  stored/small  200 rounds × 41K calls
+  ╰─ new    24.1 ±3.1ns  [-1.5%–+1.3%]    158G [1]
+  fixed/small  200 rounds × 348 calls
+  ╰─ new    3.1 ±0.0µs  [-0.1%–+0.1%]    1.24G [1]
+  dynamic/small  200 rounds × 255 calls
+  ╰─ new    4.2 ±0.0µs  [-0.2%–-0.0%]    939M [1]
+  stored/medium  200 rounds × 578 calls
+  ╰─ new    2.2 ±0.1µs  [-0.4%–+0.3%]    109G [1]
+  fixed/medium  80 rounds × 29 calls
+  ╰─ new    171.0 ±1.6µs  [-0.3%–+0.4%]       1.43G [1]
+  dynamic/medium  120 rounds × 44 calls
+  ╰─ new    115.5 ±0.8µs  [+0.0%–+0.4%]       2.11G [1]
+  stored/large  200 rounds × 16 calls
+  ╰─ new    331.8 ±53.7µs  [-2.4%–+3.8%]       47.1G [1]
+  fixed/large  30 rounds × 1 calls
+  ╰─ new    12.0 ±0.0ms  [+3.5%–+4.2%]    1.30G
+  dynamic/large  30 rounds × 1 calls
+  ╰─ new    8.1 ±0.1ms  [+0.6%–+1.1%]    1.92G [1]
+  idat/pngsuite (174 streams)  150 rounds × 18 calls
+  ╰─ new    283.7 ±5.2µs  [-0.0%–+1.2%]       1.71G [1]
+  idat/gb82 (25 streams)  30 rounds × 1 calls
+  ╰─ new    24.9 ±0.3ms  [+0.7%–+1.2%]    953M [1]
+  total: 409.0s  (966 noisy rounds)
+# Run 6 (default codegen)
+  stored/small  200 rounds × 38K calls
+  ╰─ new    24.0 ±2.4ns  [-1.5%–+0.3%]    159G [1]
+  fixed/small  200 rounds × 350 calls
+  ╰─ new    3.0 ±0.0µs  [-0.1%–+0.1%]    1.27G [1]
+  dynamic/small  200 rounds × 255 calls
+  ╰─ new    4.2 ±0.0µs  [+0.1%–+3.0%]    923M [1]
+  stored/medium  200 rounds × 587 calls
+  ╰─ new    2.2 ±0.1µs  [-5.8%–-4.1%]    109G
+  fixed/medium  80 rounds × 30 calls
+  ╰─ new    169.9 ±1.7µs  [+0.5%–+1.2%]       1.44G [1]
+  dynamic/medium  110 rounds × 44 calls
+  ╰─ new    113.4 ±0.6µs  [-1.6%–-0.3%]       2.15G [1]
+  stored/large  200 rounds × 17 calls
+  ╰─ new    337.0 ±55.6µs  [-1.8%–+4.0%]       46.4G [1]
+  fixed/large  30 rounds × 1 calls
+  ╰─ new    12.0 ±0.1ms  [+3.9%–+4.4%]    1.30G
+  dynamic/large  30 rounds × 1 calls
+  ╰─ new    8.1 ±0.0ms  [+0.5%–+0.8%]    1.94G [1]
+  idat/pngsuite (174 streams)  130 rounds × 18 calls
+  ╰─ new    279.9 ±4.1µs  [-0.3%–+0.3%]       1.74G [1]
+  idat/gb82 (25 streams)  30 rounds × 1 calls
+  ╰─ new    24.8 ±0.1ms  [-0.0%–+1.1%]    956M [1]
+  total: 399.7s  (923 noisy rounds)
+# A/A control: old = main rev 9f8684bf, new = main branch (same commit), default codegen
+  stored/small  200 rounds × 41K calls
+  ╰─ new    25.3 ±2.9ns  [-1.3%–+0.1%]    151G [1]
+  fixed/small  200 rounds × 349 calls
+  ╰─ new    3.1 ±0.0µs  [-0.1%–+0.1%]    1.25G [1]
+  dynamic/small  200 rounds × 253 calls
+  ╰─ new    4.2 ±0.0µs  [-0.4%–+0.0%]    927M [1]
+  stored/medium  200 rounds × 578 calls
+  ╰─ new    2.2 ±0.2µs  [-0.7%–+0.3%]    112G [1]
+  fixed/medium  110 rounds × 29 calls
+  ╰─ new    173.6 ±3.1µs  [-0.6%–+0.1%]       1.41G [1]
+  dynamic/medium  130 rounds × 44 calls
+  ╰─ new    114.1 ±0.9µs  [-0.6%–-0.0%]       2.14G [1]
+  stored/large  200 rounds × 16 calls
+  ╰─ new    332.8 ±44.4µs  [-1.9%–+3.5%]       47.0G [1]
+  fixed/large  30 rounds × 1 calls
+  ╰─ new    11.6 ±0.1ms  [-4.6%–-3.9%]    1.35G [1]
+  [1] drift r=0.52 — later rounds slower
+  dynamic/large  30 rounds × 1 calls
+  ╰─ new    8.0 ±0.1ms  [-0.7%–-0.3%]    1.95G [1]
+  idat/pngsuite (174 streams)  120 rounds × 18 calls
+  ╰─ new    277.5 ±3.7µs  [-0.7%–+0.1%]       1.75G [1]
+  idat/gb82 (25 streams)  30 rounds × 1 calls
+  ╰─ new    24.5 ±0.1ms  [-1.1%–-0.2%]    968M [1]
+  total: 410.6s  (979 noisy rounds)
+# A/A control, RUSTFLAGS='-C llvm-args=-align-all-functions=6 -C llvm-args=-align-all-nofallthru-blocks=6'
+  stored/small  200 rounds × 47K calls
+  ╰─ new    23.1 ±2.6ns  [-0.6%–+2.0%]    165G [1]
+  fixed/small  200 rounds × 349 calls
+  ╰─ new    3.1 ±0.0µs  [+0.0%–+0.2%]    1.24G [1]
+  dynamic/small  200 rounds × 256 calls
+  ╰─ new    4.2 ±0.0µs  [-0.0%–+0.2%]    936M [1]
+  stored/medium  200 rounds × 575 calls
+  ╰─ new    2.2 ±0.2µs  [+0.1%–+0.9%]    109G [1]
+  fixed/medium  80 rounds × 30 calls
+  ╰─ new    166.4 ±2.3µs  [-0.5%–+0.5%]       1.47G [1]
+  dynamic/medium  140 rounds × 44 calls
+  ╰─ new    115.5 ±1.6µs  [+0.0%–+1.7%]       2.11G [1]
+  stored/large  200 rounds × 16 calls
+  ╰─ new    336.7 ±57.3µs  [-1.9%–+4.2%]       46.4G [1]
+  fixed/large  30 rounds × 1 calls
+  ╰─ new    11.5 ±0.0ms  [-1.3%–-0.6%]    1.36G [1]
+  dynamic/large  30 rounds × 1 calls
+  ╰─ new    8.0 ±0.0ms  [+0.0%–+0.4%]    1.95G [1]
+  idat/pngsuite (174 streams)  130 rounds × 18 calls
+  ╰─ new    275.2 ±4.5µs  [-0.8%–+0.0%]       1.77G [1]
+  idat/gb82 (25 streams)  30 rounds × 1 calls
+  ╰─ new    24.6 ±0.1ms  [-1.4%–-0.6%]    966M [1]
+  total: 408.2s  (947 noisy rounds)
+# A/B aligned run 1 (same RUSTFLAGS)
+  stored/small  200 rounds × 47K calls
+  ╰─ new    23.1 ±2.3ns  [-4.7%–-0.7%]    165G [1]
+  fixed/small  200 rounds × 348 calls
+  ╰─ new    3.1 ±0.0µs  [-0.2%–+0.0%]    1.25G [1]
+  dynamic/small  200 rounds × 255 calls
+  ╰─ new    4.2 ±0.0µs  [+0.1%–+0.3%]    936M [1]
+  stored/medium  200 rounds × 576 calls
+  ╰─ new    2.2 ±0.0µs  [-0.4%–+0.4%]    109G [1]
+  fixed/medium  90 rounds × 30 calls
+  ╰─ new    170.3 ±1.8µs  [+0.5%–+1.3%]       1.43G [1]
+  dynamic/medium  110 rounds × 44 calls
+  ╰─ new    116.2 ±0.9µs  [+0.4%–+1.3%]       2.10G [1]
+  stored/large  200 rounds × 16 calls
+  ╰─ new    325.4 ±38.1µs  [-2.5%–+3.5%]       48.0G [1]
+  fixed/large  30 rounds × 1 calls
+  ╰─ new    12.0 ±0.2ms  [+2.3%–+3.2%]    1.30G
+  dynamic/large  40 rounds × 1 calls
+  ╰─ new    8.2 ±0.1ms  [+1.5%–+1.8%]    1.91G
+  idat/pngsuite (174 streams)  70 rounds × 18 calls
+  ╰─ new    278.3 ±3.8µs  [-0.3%–+0.2%]       1.75G [1]
+  idat/gb82 (25 streams)  40 rounds × 1 calls
+  ╰─ new    25.0 ±0.1ms  [+1.1%–+1.6%]    949M
+  total: 391.8s  (908 noisy rounds)
+# A/B aligned run 2 (same RUSTFLAGS)
+  stored/small  200 rounds × 47K calls
+  ╰─ new    25.3 ±3.1ns  [-1.2%–+1.4%]    151G [2] [3]
+  fixed/small  200 rounds × 349 calls
+  ╰─ new    3.1 ±0.0µs  [-0.0%–+0.2%]    1.24G [1]
+  dynamic/small  200 rounds × 257 calls
+  ╰─ new    4.2 ±0.0µs  [+0.2%–+0.4%]    935M [1]
+  stored/medium  200 rounds × 580 calls
+  ╰─ new    2.2 ±0.0µs  [-0.1%–+0.4%]    111G [1]
+  fixed/medium  80 rounds × 30 calls
+  ╰─ new    168.8 ±1.4µs  [+0.6%–+1.3%]       1.45G [1]
+  dynamic/medium  120 rounds × 44 calls
+  ╰─ new    115.3 ±0.8µs  [-0.2%–+0.4%]       2.12G [1]
+  stored/large  200 rounds × 15 calls
+  ╰─ new    343.8 ±58.6µs  [-1.9%–+3.9%]       45.4G [1]
+  fixed/large  30 rounds × 1 calls
+  ╰─ new    12.0 ±0.1ms  [+2.1%–+2.8%]    1.31G
+  dynamic/large  30 rounds × 1 calls
+  ╰─ new    8.2 ±0.1ms  [+0.9%–+1.5%]    1.92G [1]
+  idat/pngsuite (174 streams)  110 rounds × 18 calls
+  ╰─ new    278.3 ±5.4µs  [+0.2%–+1.5%]       1.75G [1]
+  idat/gb82 (25 streams)  30 rounds × 1 calls
+  ╰─ new    25.1 ±0.2ms  [+1.2%–+2.3%]    947M
+  total: 398.0s  (938 noisy rounds)
+# A/B aligned run 3 (same RUSTFLAGS)
+  stored/small  200 rounds × 47K calls
+  ╰─ new    23.5 ±2.2ns  [-2.2%–+1.5%]    162G [1]
+  fixed/small  200 rounds × 349 calls
+  ╰─ new    3.0 ±0.0µs  [+0.1%–+0.3%]    1.25G [1]
+  dynamic/small  200 rounds × 252 calls
+  ╰─ new    4.2 ±0.1µs  [+0.2%–+0.5%]    930M [1]
+  stored/medium  200 rounds × 575 calls
+  ╰─ new    2.2 ±0.0µs  [-0.2%–+0.3%]    111G [1]
+  fixed/medium  30 rounds × 30 calls
+  ╰─ new    169.2 ±0.9µs  [+0.4%–+1.5%]       1.44G [1]
+  dynamic/medium  100 rounds × 43 calls
+  ╰─ new    115.2 ±0.6µs  [+0.3%–+0.6%]       2.12G [1]
+  stored/large  200 rounds × 17 calls
+  ╰─ new    333.8 ±50.0µs  [-1.8%–+3.9%]       46.8G [1]
+  fixed/large  30 rounds × 1 calls
+  ╰─ new    11.9 ±0.1ms  [+2.1%–+2.6%]    1.31G
+  dynamic/large  50 rounds × 1 calls
+  ╰─ new    8.2 ±0.0ms  [+0.9%–+1.4%]    1.90G [1]
+  idat/pngsuite (174 streams)  110 rounds × 18 calls
+  ╰─ new    276.4 ±4.4µs  [-0.6%–+0.6%]       1.76G [1]
+  idat/gb82 (25 streams)  30 rounds × 1 calls
+  ╰─ new    24.8 ±0.2ms  [+1.0%–+2.2%]    956M
+  total: 383.6s  (941 noisy rounds)

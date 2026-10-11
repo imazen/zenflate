@@ -2,8 +2,10 @@
 //! libdeflate's deflate_decompress.c and decompress_template.h. gzip/zlib
 //! wrapper handling and error types are Rust-specific.
 
+mod scan;
 #[cfg(feature = "alloc")]
 pub mod streaming;
+pub use scan::{ScanError, ScanOutcome, deflate_scan, zlib_scan};
 
 use crate::checksum;
 use crate::error::DecompressionError;
