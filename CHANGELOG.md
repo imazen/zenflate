@@ -8,7 +8,7 @@
 
 ### Added
 
-- `deflate_scan` / `zlib_scan`: where a DEFLATE (zlib) stream ends, or where its first `N` output bytes end, without producing output (matches counted, no window). Runs the one-shot inflate loop through a `const COUNT` parameter; decode speed unchanged within noise (`benchmarks/inflate_ab_scan_2026-10-10.txt`). a7c256bb
+- `deflate_scan` / `zlib_scan`: where a DEFLATE (zlib) stream ends, or where its first `N` output bytes end, without producing output (matches counted, no window). A count-only copy of the generic inflate loop on the decoder's table builders; the decode loop is unchanged (identical machine code to main). a7c256bb
 
 ## [0.4.1] - 2026-10-10
 

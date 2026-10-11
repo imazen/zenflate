@@ -1057,24 +1057,16 @@ impl Decompressor {
                 return oneshot_v4::core_v4(token, self, input, output, stop);
             }
         }
-        self.deflate_decompress_core_impl::<false>(input, output, usize::MAX, &mut (0, 0), stop)
-            .map(|(i, o, _)| (i, o))
+        self.deflate_decompress_core_impl(input, output, stop)
     }
 
-    /// The inflate loop. `COUNT` is the count-only scan ([`deflate_scan`]): nothing is written
-    /// (`output` is unused), double-literal entries are off so each symbol's bits are
-    /// known, the loop returns `(consumed, out, true)` once `stop_at` output bytes exist,
-    /// and an error records the input loaded and the output produced in `fail_at`. The decode instantiation
-    /// (`COUNT = false`, `stop_at = usize::MAX`) compiles to the plain loop.
     #[inline(always)]
-    pub(crate) fn deflate_decompress_core_impl<const COUNT: bool>(
+    fn deflate_decompress_core_impl(
         &mut self,
         input: &[u8],
         output: &mut [u8],
-        stop_at: usize,
-        fail_at: &mut (usize, usize),
         stop: &impl enough::Stop,
-    ) -> Result<(usize, usize, bool), DecompressionError> {
+    ) -> Result<(usize, usize), DecompressionError> {
         // No x86-64-v3 build of this loop (unlike the streaming decoder):
         // measured 1.8-2.5% slower on Core Ultra 7 265K, while streaming
         // gained 3.5%. v4 is above.
@@ -1085,48 +1077,11 @@ impl Decompressor {
         let mut overread_count: usize = 0;
 
         let bad = DecompressionError::BadData;
-        // Count mode records (input loaded, output produced) where an error is detected.
-        macro_rules! fail {
-            () => {{
-                if COUNT {
-                    *fail_at = (in_pos, out_pos);
-                }
-                return Err(bad);
-            }};
-        }
-        macro_rules! refill {
-            () => {
-                if let Err(e) = refill_bits(
-                    &mut bitbuf,
-                    &mut bitsleft,
-                    input,
-                    &mut in_pos,
-                    &mut overread_count,
-                ) {
-                    if COUNT {
-                        *fail_at = (input.len(), out_pos);
-                    }
-                    return Err(e);
-                }
-            };
-        }
-        // Count mode: `stop_at` output bytes exist; report the input through the last
-        // whole byte holding bits of the symbol that produced them.
-        macro_rules! stopped {
-            () => {{
-                let held = (bitsleft / 8) as usize;
-                if overread_count > held {
-                    fail!();
-                }
-                return Ok((in_pos + overread_count - held, out_pos, true));
-            }};
-        }
 
         // When max_output_size is set and is smaller than the output buffer,
         // use OutputLimitExceeded instead of InsufficientSpace. The effective
         // output limit is the smaller of the buffer and the policy limit.
         let (out_limit, no_space) = match self.max_output_size {
-            _ if COUNT => (usize::MAX, DecompressionError::OutputLimitExceeded),
             Some(max) if max < output.len() => (max, DecompressionError::OutputLimitExceeded),
             _ => (output.len(), DecompressionError::InsufficientSpace),
         };
@@ -1137,7 +1092,13 @@ impl Decompressor {
             stop.check()?;
 
             // --- Read block header ---
-            refill!();
+            refill_bits(
+                &mut bitbuf,
+                &mut bitsleft,
+                input,
+                &mut in_pos,
+                &mut overread_count,
+            )?;
 
             let is_final = (bitbuf & 1) != 0;
             let block_type = ((bitbuf >> 1) & 3) as u32;
@@ -1156,7 +1117,13 @@ impl Decompressor {
                 bitbuf >>= 20;
                 bitsleft -= 20;
 
-                refill!();
+                refill_bits(
+                    &mut bitbuf,
+                    &mut bitsleft,
+                    input,
+                    &mut in_pos,
+                    &mut overread_count,
+                )?;
 
                 // Remaining precode lens (3 bits each, max 18 more)
                 for &perm in &DEFLATE_PRECODE_LENS_PERMUTATION[1..num_explicit_precode_lens] {
@@ -1181,7 +1148,7 @@ impl Decompressor {
                     &mut self.sorted_syms,
                     None,
                 ) {
-                    fail!();
+                    return Err(bad);
                 }
 
                 // Decode litlen + offset codeword lengths
@@ -1189,7 +1156,13 @@ impl Decompressor {
                 let mut i = 0usize;
                 while i < total_syms {
                     if bitsleft < DEFLATE_MAX_PRE_CODEWORD_LEN + 7 {
-                        refill!();
+                        refill_bits(
+                            &mut bitbuf,
+                            &mut bitsleft,
+                            input,
+                            &mut in_pos,
+                            &mut overread_count,
+                        )?;
                     }
 
                     let entry = self.precode_decode_table
@@ -1207,7 +1180,7 @@ impl Decompressor {
                     if presym == 16 {
                         // Repeat previous 3-6 times
                         if i == 0 {
-                            fail!();
+                            return Err(bad);
                         }
                         let rep_val = self.lens[i - 1];
                         let rep_count = 3 + (bitbuf & 3) as usize;
@@ -1238,7 +1211,7 @@ impl Decompressor {
                 }
 
                 if i != total_syms {
-                    fail!();
+                    return Err(bad);
                 }
 
                 // Build offset table first (uses lens[num_litlen_syms..])
@@ -1252,7 +1225,7 @@ impl Decompressor {
                     &mut self.sorted_syms,
                     None,
                 ) {
-                    fail!();
+                    return Err(bad);
                 }
                 // Build litlen table (may overwrite lens via aliasing in C,
                 // but in Rust they're separate arrays so no issue)
@@ -1266,9 +1239,9 @@ impl Decompressor {
                     &mut self.sorted_syms,
                     Some(&mut self.litlen_tablebits),
                 ) {
-                    fail!();
+                    return Err(bad);
                 }
-                self.litlen_doubles = !COUNT && wants_double_literals(input.len() - in_pos);
+                self.litlen_doubles = wants_double_literals(input.len() - in_pos);
                 if self.litlen_doubles {
                     add_double_literals(&mut self.litlen_decode_table, self.litlen_tablebits);
                 }
@@ -1279,7 +1252,7 @@ impl Decompressor {
                 // Align to byte boundary: rewind input past unconsumed bytes
                 let extra_bytes = (bitsleft / 8) as usize;
                 if overread_count > extra_bytes {
-                    fail!();
+                    return Err(bad);
                 }
                 in_pos -= extra_bytes - overread_count;
                 overread_count = 0;
@@ -1288,33 +1261,23 @@ impl Decompressor {
 
                 // Read LEN and NLEN
                 if in_pos + 4 > input.len() {
-                    fail!();
+                    return Err(bad);
                 }
                 let len = u16::from_le_bytes([input[in_pos], input[in_pos + 1]]) as usize;
                 let nlen = u16::from_le_bytes([input[in_pos + 2], input[in_pos + 3]]);
                 in_pos += 4;
 
                 if len != (!nlen) as usize {
-                    fail!();
+                    return Err(bad);
                 }
                 if len > out_limit - out_pos {
                     return Err(no_space);
                 }
-                if COUNT && len >= stop_at - out_pos && stop_at - out_pos <= input.len() - in_pos {
-                    return Ok((in_pos + (stop_at - out_pos), stop_at, true));
-                }
                 if len > input.len() - in_pos {
-                    if COUNT {
-                        // the stored bytes present are output a streaming decoder delivers
-                        out_pos += input.len() - in_pos;
-                        in_pos = input.len();
-                    }
-                    fail!();
+                    return Err(bad);
                 }
 
-                if !COUNT {
-                    output[out_pos..out_pos + len].copy_from_slice(&input[in_pos..in_pos + len]);
-                }
+                output[out_pos..out_pos + len].copy_from_slice(&input[in_pos..in_pos + len]);
                 in_pos += len;
                 out_pos += len;
 
@@ -1331,23 +1294,22 @@ impl Decompressor {
                     self.static_codes_loaded = true;
 
                     if !self.load_static_tables() {
-                        fail!();
+                        return Err(bad);
                     }
-                    self.litlen_doubles = !COUNT && wants_double_literals(input.len() - in_pos);
+                    self.litlen_doubles = wants_double_literals(input.len() - in_pos);
                     if self.litlen_doubles {
                         add_double_literals(&mut self.litlen_decode_table, self.litlen_tablebits);
                     }
                 }
             } else {
-                fail!();
+                return Err(bad);
             }
 
             // --- Fastloop + generic decode loop (literals and matches) ---
             let litlen_tablemask = bitmask(self.litlen_tablebits);
             let doubles = self.litlen_doubles;
             let in_fastloop_end = input.len().saturating_sub(FASTLOOP_MAX_BYTES_READ);
-            let out_fastloop_end =
-                if COUNT { stop_at } else { out_limit }.saturating_sub(FASTLOOP_MAX_BYTES_WRITTEN);
+            let out_fastloop_end = out_limit.saturating_sub(FASTLOOP_MAX_BYTES_WRITTEN);
 
             // The fastloop processes the bulk of data without per-item bounds
             // checks. It exits when input/output margins are exhausted or
@@ -1373,11 +1335,7 @@ impl Decompressor {
                         saved_bitbuf = bitbuf;
                         bitbuf >>= (entry & 0xFF) as u64;
                         bitsleft -= entry & 0xFF;
-                        out_pos += if COUNT {
-                            1
-                        } else {
-                            put_lits(output, out_pos, lits, doubles)
-                        };
+                        out_pos += put_lits(output, out_pos, lits, doubles);
 
                         if entry & HUFFDEC_LITERAL != 0 {
                             // 2nd entry
@@ -1387,19 +1345,11 @@ impl Decompressor {
                             saved_bitbuf = bitbuf;
                             bitbuf >>= (entry & 0xFF) as u64;
                             bitsleft -= entry & 0xFF;
-                            out_pos += if COUNT {
-                                1
-                            } else {
-                                put_lits(output, out_pos, lits, doubles)
-                            };
+                            out_pos += put_lits(output, out_pos, lits, doubles);
 
                             if entry & HUFFDEC_LITERAL != 0 {
                                 // 3rd entry (replaces primary for next iter)
-                                out_pos += if COUNT {
-                                    1
-                                } else {
-                                    put_lits(output, out_pos, entry, doubles)
-                                };
+                                out_pos += put_lits(output, out_pos, entry, doubles);
                                 entry = table_lookup(
                                     &self.litlen_decode_table,
                                     bitbuf & litlen_tablemask,
@@ -1431,9 +1381,7 @@ impl Decompressor {
 
                         if entry & HUFFDEC_LITERAL != 0 {
                             // Literal from subtable (never a double)
-                            if !COUNT {
-                                output[out_pos] = (entry >> 16) as u8;
-                            }
+                            output[out_pos] = (entry >> 16) as u8;
                             out_pos += 1;
                             entry =
                                 table_lookup(&self.litlen_decode_table, bitbuf & litlen_tablemask);
@@ -1488,7 +1436,7 @@ impl Decompressor {
                             >> ((oentry >> 8) as u8 as u64)) as usize;
 
                     if offset == 0 || offset > out_pos {
-                        fail!();
+                        return Err(bad);
                     }
 
                     // Refill BEFORE preload: after a multi-literal + match path,
@@ -1499,9 +1447,7 @@ impl Decompressor {
                     entry = table_lookup(&self.litlen_decode_table, bitbuf & litlen_tablemask);
 
                     // Copy match data
-                    if !COUNT {
-                        fastloop_match_copy(output, out_pos, out_pos - offset, length, offset);
-                    }
+                    fastloop_match_copy(output, out_pos, out_pos - offset, length, offset);
                     out_pos += length;
 
                     if in_pos >= in_fastloop_end || out_pos >= out_fastloop_end {
@@ -1515,21 +1461,19 @@ impl Decompressor {
                 stop.check()?;
                 // Periodic stop check interval (output bytes). 16KB at 600+ MiB/s ≈ <0.03ms.
                 const DECOMPRESS_STOP_INTERVAL: usize = 16384;
-                // (count mode on 32-bit targets can approach usize::MAX)
-                let next = |p: usize| {
-                    if COUNT {
-                        p.saturating_add(DECOMPRESS_STOP_INTERVAL)
-                    } else {
-                        p + DECOMPRESS_STOP_INTERVAL
-                    }
-                };
-                let mut next_stop_check = next(out_pos);
+                let mut next_stop_check = out_pos + DECOMPRESS_STOP_INTERVAL;
                 loop {
                     if out_pos >= next_stop_check {
                         stop.check()?;
-                        next_stop_check = next(out_pos);
+                        next_stop_check = out_pos + DECOMPRESS_STOP_INTERVAL;
                     }
-                    refill!();
+                    refill_bits(
+                        &mut bitbuf,
+                        &mut bitsleft,
+                        input,
+                        &mut in_pos,
+                        &mut overread_count,
+                    )?;
 
                     let mut entry =
                         table_lookup(&self.litlen_decode_table, bitbuf & litlen_tablemask);
@@ -1558,21 +1502,14 @@ impl Decompressor {
                         if out_pos >= out_limit {
                             return Err(no_space);
                         }
-                        if !COUNT {
-                            output[out_pos] = value as u8;
-                        }
+                        output[out_pos] = value as u8;
                         out_pos += 1;
                         if entry & HUFFDEC_DOUBLE_LITERAL != 0 {
                             if out_pos >= out_limit {
                                 return Err(no_space);
                             }
-                            if !COUNT {
-                                output[out_pos] = (entry >> 8) as u8;
-                            }
+                            output[out_pos] = (entry >> 8) as u8;
                             out_pos += 1;
-                        }
-                        if COUNT && out_pos >= stop_at {
-                            stopped!();
                         }
                         continue;
                     }
@@ -1616,18 +1553,11 @@ impl Decompressor {
 
                     // Validate offset
                     if offset == 0 || offset > out_pos {
-                        fail!();
+                        return Err(bad);
                     }
 
                     // Copy match data (may overlap when offset < length)
                     let src_start = out_pos - offset;
-                    if COUNT {
-                        out_pos += length;
-                        if out_pos >= stop_at {
-                            stopped!();
-                        }
-                        continue;
-                    }
                     if offset >= length {
                         output.copy_within(src_start..src_start + length, out_pos);
                     } else if offset == 1 {
@@ -1658,13 +1588,13 @@ impl Decompressor {
         // Verify we didn't consume implicit zero bytes
         let final_bitsleft = bitsleft;
         if overread_count > (final_bitsleft / 8) as usize {
-            fail!();
+            return Err(bad);
         }
 
         // Compute actual input consumed
         let actual_in = in_pos - ((final_bitsleft / 8) as usize - overread_count);
 
-        Ok((actual_in, out_pos, false))
+        Ok((actual_in, out_pos))
     }
 }
 
@@ -3174,7 +3104,6 @@ mod oneshot_v4 {
         output: &mut [u8],
         stop: &impl enough::Stop,
     ) -> Result<(usize, usize), DecompressionError> {
-        d.deflate_decompress_core_impl::<false>(input, output, usize::MAX, &mut (0, 0), stop)
-            .map(|(i, o, _)| (i, o))
+        d.deflate_decompress_core_impl(input, output, stop)
     }
 }
