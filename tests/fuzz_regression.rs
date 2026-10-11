@@ -37,11 +37,13 @@ use zenutils_fuzz::RegressionSuite;
 /// into an 8- or 12-byte buffer pushed the bit buffer past 64 bits (debug
 /// assertion / shift overflow) before 4a17814. `fuzz_scan/miniz-rejects-zenflate-accepts.bin`: a stream miniz_oxide
 /// rejects and zenflate decodes; the scan check used miniz as its stop-position
-/// oracle anyway (test harness bug, fixed with the target). Bugs whose
+/// oracle anyway (test harness bug, fixed with the target).
+/// `fuzz_scan/error-past-decode-buffer.bin`: bad data past 1 MiB of output, where the
+/// harness's decode buffer is already full (harness bug). Bugs whose
 /// reproducers exceed the 8 KB seed ceiling are gated by unit tests instead:
 /// #7's 19 MB literal run (`full_optimal.rs`), incremental calls past one
 /// sequence store and parallel full-optimal (`compress/mod.rs`).
-const EXPECTED_SEEDS: usize = 8;
+const EXPECTED_SEEDS: usize = 9;
 
 /// Count the files `RegressionSuite::run` will actually replay, using its own
 /// filters: recurse into subdirectories, skip dotfiles, `*.md` and `*.txt`.

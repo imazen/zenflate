@@ -71,11 +71,14 @@ pub fn check_scan(stream: &[u8], stops: &[usize]) {
                 assert_eq!(used, s.input_consumed, "miniz_oxide consumed differs");
             }
         }
+        // The decode buffer ran out before the decoder reached data the scan rejects
+        // (a stored block can stop it up to 65535 bytes short of the limit).
+        (Err(zenflate::DecompressionError::InsufficientSpace), Err(s)) => {
+            assert!(s.output_len + 65_535 >= SCAN_LIMIT, "{s:?}")
+        }
         (Err(e), Err(s)) => {
             assert_eq!(*e, s.error, "scan and decode fail differently");
-            if *e != zenflate::DecompressionError::InsufficientSpace {
-                assert_eq!(s.output_len, stream_produced(stream), "output before the error");
-            }
+            assert_eq!(s.output_len, stream_produced(stream), "output before the error");
         }
         (Err(zenflate::DecompressionError::InsufficientSpace), Ok(s)) => {
             assert!(s.output_len > SCAN_LIMIT)
