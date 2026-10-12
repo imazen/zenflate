@@ -527,6 +527,11 @@ compressor) and the cross-API matrix (`just conformance-full` in release).
 
 ## Known Bugs
 
+- Fixed 2026-10-12: the scanner test eagerly initialized codec-corpus even
+  with `ZENFLATE_SCAN_CORPUS` set. The i686 cross job failed before testing
+  input because its cache path was not writable. The cache is now initialized
+  only when the caller requests automatic corpus retrieval.
+
 - Fixed during scan integration (2026-10-12): count-only scan cancellation and
   count overflow returned stale progress fields. Failure sites now record the
   input/output positions before returning. `tests/scan.rs` checks cancellation

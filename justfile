@@ -196,3 +196,7 @@ metadata-scan-portability:
 metadata-scan-api:
     just api-doc
     cargo semver-checks check-release -p zenflate --baseline-version 0.4.0 --all-features
+
+# Explicit corpus paths work even when the automatic cache is unavailable.
+metadata-scan-cross-corpus corpus:
+    CODEC_CORPUS_CACHE=/proc/zenflate-cache-unwritable ZENFLATE_SCAN_CORPUS="{{corpus}}" CARGO_TARGET_I686_UNKNOWN_LINUX_GNU_RUNNER=env cargo test --features scan --target i686-unknown-linux-gnu --test scan scan_matches_decode_on_corpus_idat -- --nocapture

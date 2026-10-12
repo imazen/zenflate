@@ -11,6 +11,12 @@
 - Scan errors implement core Error and retain cancellation reason and progress.
   Existing fuzz regressions are retained as lossless text with source hashes.
 
+### Fixed
+
+- Scanner corpus tests use a caller-provided directory without initializing
+  the optional download cache, allowing the same coverage in cross containers
+  whose home directory is not writable.
+
 ### QUEUED BREAKING CHANGES
 
 (none)

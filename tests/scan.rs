@@ -136,12 +136,16 @@ fn pngs(dir: &Path, out: &mut Vec<Vec<u8>>) {
 #[test]
 fn scan_matches_decode_on_corpus_idat() {
     let corpus_root = std::env::var_os("ZENFLATE_SCAN_CORPUS").map(std::path::PathBuf::from);
-    let corpus = codec_corpus::Corpus::new().expect("codec-corpus cache");
+    // An explicit caller-provided corpus must not initialize a writable cache
+    // (cross containers may expose an unwritable home directory).
+    let corpus = corpus_root
+        .is_none()
+        .then(|| codec_corpus::Corpus::new().expect("codec-corpus cache"));
     let mut files = Vec::new();
     for set in ["pngsuite", "png-conformance"] {
         let path = match &corpus_root {
             Some(root) => root.join(set),
-            None => corpus.get(set).expect("fetch corpus set"),
+            None => corpus.as_ref().unwrap().get(set).expect("fetch corpus set"),
         };
         pngs(&path, &mut files);
     }
