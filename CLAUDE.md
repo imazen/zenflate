@@ -527,6 +527,11 @@ compressor) and the cross-API matrix (`just conformance-full` in release).
 
 ## Known Bugs
 
+- Fixed during scan integration (2026-10-12): count-only scan cancellation and
+  count overflow returned stale progress fields. Failure sites now record the
+  input/output positions before returning. `tests/scan.rs` checks cancellation
+  between stored blocks with a one-shot timeout token.
+
 Review regressions (2026-10-08):
 - The unchecked matchfinder import regression was fixed in `eb17f1de`;
   no_std+compress+unchecked is now in `just check-features`.
@@ -592,3 +597,18 @@ checks, safe and unchecked suites, doctests, feature matrix, Clippy, rustdoc,
 API snapshots, and semver-checks against 0.4.0 passed. `cargo package` verified
 the 0.4.1 archive. Publication still requires README approval and green CI on
 the exact release commit; no tag, GitHub release or crate publication was made.
+
+## Metadata inventory integration
+
+The optional `scan` feature reuses the count-only loop from `0fa809a9`. It shares
+Huffman tables/builders with decode; the hot decode loop stays as in main.
+`just metadata-scan-check` compares generated streams, damaged variants and
+codec-corpus PNG IDAT against decode and miniz's independent prefix oracle.
+`just metadata-scan-portability` runs those checks on i686 and compiles the fuzz
+target. `tests/support/scan-regressions/README.md` records exact fixture hashes.
+The new API is absent without `scan` and works without std or alloc.
+
+Published API verification: `just metadata-scan-api` passes all 196 enabled
+semver checks against zenflate 0.4.0 (58 skipped), and regenerates the feature
+surface snapshot. Native and i686 differential suites pass; no_std scanner
+checks pass on native and WASI. No decode-loop performance claim is made.

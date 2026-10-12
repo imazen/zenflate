@@ -1,5 +1,5 @@
 # zenflate public API — additions from non-default features
-# features: alloc,avx512,compress,simd,std,threads,unchecked
+# features: alloc,avx512,compress,scan,simd,std,threads,unchecked
 # (regenerated on every `cargo test` by zenutils-apidoc; ZEN_API_DOC=check verifies, =off skips).
 # Encodings: crate-name prefix stripped; auto traits collapse to a
 # count + exceptions; trait impls collapse to one roster line per
@@ -7,4 +7,42 @@
 # impls omitted; re-export duplicates annotated `[also: path]`.
 # DO NOT EDIT BY HAND — commit regenerated changes with the code.
 
-(no additional public surface)
+## summary
+#
+#   pub types (struct/enum/trait/alias)         4
+#   free functions                              4
+#   struct fields                              12
+#   trait roster entries (type × trait)        13
+#   auto-trait-complete types                   2
+#
+# per-module pub lines:
+#   (root)                           10
+#   decompress                       10
+
+## items (16 lines)
+
+pub decompress::ScanError::error: error::DecompressionError
+pub decompress::ScanError::input_pos: usize
+pub decompress::ScanError::output_len: usize
+pub decompress::ScanOutcome::input_consumed: usize
+pub decompress::ScanOutcome::output_len: usize
+pub decompress::ScanOutcome::stopped: bool
+#[non_exhaustive] pub struct ScanError [also: decompress]
+pub ScanError::error: error::DecompressionError
+pub ScanError::input_pos: usize
+pub ScanError::output_len: usize
+#[non_exhaustive] pub struct ScanOutcome [also: decompress]
+pub ScanOutcome::input_consumed: usize
+pub ScanOutcome::output_len: usize
+pub ScanOutcome::stopped: bool
+pub fn deflate_scan(&[u8], core::option::Option<usize>, impl enough::Stop) -> core::result::Result<ScanOutcome, ScanError> [also: decompress]
+pub fn zlib_scan(&[u8], core::option::Option<usize>, impl enough::Stop) -> core::result::Result<ScanOutcome, ScanError> [also: decompress]
+
+## trait impls (2 types)
+
+ScanError: Clone, Copy, Debug, Display, Eq, Error, PartialEq
+ScanOutcome: Clone, Copy, Debug, Eq, Hash, PartialEq
+
+## auto traits
+
+2 types implement all of: Freeze, RefUnwindSafe, Send, Sync, Unpin, UnwindSafe

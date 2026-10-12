@@ -35,6 +35,8 @@ exclude = [
 ]
 
 [features]
+# Count-only stream inspection, used by opt-in codec inventories.
+scan = []
 default = ["std", "simd", "avx512", "threads", "compress"]
 std = ["alloc", "archmage?/std"]
 alloc = []

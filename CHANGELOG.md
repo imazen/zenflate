@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Added
+
+- Default-off `scan`: `deflate_scan`, `zlib_scan`, `ScanOutcome`, and `ScanError`,
+  reused from `0fa809a9` for codec inventory. Shared Huffman tables plus retained
+  decoder/miniz differential checks keep framing behavior synchronized.
+  No zencodec, zenmeta, zencodecs or zenpipe dependency is introduced.
+- Scan errors implement core Error and retain cancellation reason and progress.
+  Existing fuzz regressions are retained as lossless text with source hashes.
+
 ### QUEUED BREAKING CHANGES
 
 (none)

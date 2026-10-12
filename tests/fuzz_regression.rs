@@ -14,6 +14,11 @@ mod inflate_diff {
     #![allow(dead_code)]
     include!("../fuzz/fuzz_targets/inflate_diff_check.rs");
 }
+#[cfg(feature = "scan")]
+mod scan {
+    #![allow(dead_code)]
+    include!("../fuzz/fuzz_targets/scan_check.rs");
+}
 use zenutils_fuzz::RegressionSuite;
 
 /// Exact number of replayable seeds committed under `fuzz/regression/`.
@@ -103,7 +108,7 @@ fn assert_corpus_present() {
 #[test]
 fn fuzz_regression() {
     assert_corpus_present();
-    RegressionSuite::new("fuzz/regression")
+    let suite = RegressionSuite::new("fuzz/regression")
         .target("decompress", |data| {
             let mut d = Decompressor::new();
             let mut output = vec![0u8; 64 * 1024];
@@ -117,6 +122,45 @@ fn fuzz_regression() {
             if let Ok(input) = api::Input::arbitrary_take_rest(arbitrary::Unstructured::new(data)) {
                 api::check(&input);
             }
-        })
-        .run();
+        });
+    #[cfg(feature = "scan")]
+    let suite = suite.target("fuzz_scan", scan::check);
+    suite.run();
+}
+
+/// Lossless text copies of the two existing scan-target regressions.
+#[cfg(feature = "scan")]
+#[test]
+fn scan_regressions_replay_every_check() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/support/scan-regressions");
+    let files: Vec<_> = std::fs::read_dir(&dir)
+        .expect("scan regression directory")
+        .map(|e| e.expect("scan regression entry").path())
+        .filter(|p| p.extension().is_some_and(|e| e == "hex"))
+        .collect();
+    assert_eq!(
+        files.len(),
+        2,
+        "both source regressions must remain present"
+    );
+    for path in files {
+        let text = std::fs::read_to_string(&path).expect("scan regression hex");
+        let hex: String = text.split_whitespace().collect();
+        assert_eq!(hex.len() % 2, 0);
+        let data: Vec<u8> = (0..hex.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).expect("valid hex"))
+            .collect();
+        scan::check(&data);
+        inflate_diff::check(&data);
+        let mut decoder = Decompressor::new();
+        let mut output = vec![0u8; 64 * 1024];
+        let _ = decoder.deflate_decompress(&data, &mut output, Unstoppable);
+        let _ = decoder.zlib_decompress(&data, &mut output, Unstoppable);
+        let _ = decoder.gzip_decompress(&data, &mut output, Unstoppable);
+        use arbitrary::Arbitrary;
+        if let Ok(input) = api::Input::arbitrary_take_rest(arbitrary::Unstructured::new(&data)) {
+            api::check(&input);
+        }
+    }
 }

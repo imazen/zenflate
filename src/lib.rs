@@ -184,6 +184,8 @@ pub use decompress::streaming::BufReadSource;
 #[cfg(feature = "alloc")]
 pub use decompress::streaming::{DEFAULT_CAPACITY, InputSource, StreamDecompressor};
 pub use decompress::{ChecksumPolicy, DecompressOutcome, Decompressor};
+#[cfg(feature = "scan")]
+pub use decompress::{ScanError, ScanOutcome, deflate_scan, zlib_scan};
 pub use enough::{Stop, StopReason, Unstoppable};
 #[cfg(feature = "alloc")]
 pub use error::StreamError;

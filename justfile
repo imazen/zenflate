@@ -180,3 +180,19 @@ compare-unchecked inputs results:
 # Aggregate paired timings and verify every expected input and encoded size.
 summarize-unchecked results:
     python3 scripts/summarize-unchecked.py {{results}}
+
+# Shared table builders; independent miniz stop-position oracle and original regressions.
+metadata-scan-check:
+    cargo test --features scan --test scan --test fuzz_regression -- --nocapture
+    cargo test --features scan --doc
+    cargo check --no-default-features --features scan
+    cargo check --no-default-features --features scan --target wasm32-wasip1
+    cargo clippy --all-targets --features scan -- -D warnings
+
+metadata-scan-portability:
+    CARGO_TARGET_I686_UNKNOWN_LINUX_GNU_RUNNER=env cargo test --features scan --target i686-unknown-linux-gnu --test scan --test fuzz_regression
+    cargo check --manifest-path fuzz/Cargo.toml --bin fuzz_scan
+
+metadata-scan-api:
+    just api-doc
+    cargo semver-checks check-release -p zenflate --baseline-version 0.4.0 --all-features
