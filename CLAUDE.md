@@ -527,6 +527,14 @@ compressor) and the cross-API matrix (`just conformance-full` in release).
 
 ## Known Bugs
 
+- Released 0.3.6 triggers an LLVM 23 InstCombine SIGSEGV in the WASM
+  Adler-32 SIMD function under optimized atomics/relaxed-SIMD flags.
+  The existing SIMD module restructuring in a720edf eliminates this
+  source-layout trigger with identical arithmetic. Current 0.4.1 passes
+  executable scalar-byte parity and independent-oracle checks; see
+  `docs/wasm-compiler-regression.md`. Consumers still resolving registry 0.3.6 must
+  explicitly upgrade that dependency; a sibling 0.4.x alone is insufficient.
+
 - Fixed 2026-10-12: the scanner test eagerly initialized codec-corpus even
   with `ZENFLATE_SCAN_CORPUS` set. The i686 cross job failed before testing
   input because its cache path was not writable. The cache is now initialized

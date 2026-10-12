@@ -4,6 +4,9 @@
 
 ### Added
 
+- Reproducible optimized WASM compiler-crash investigation for released 0.3.6,
+  including validation of the existing SIMD module workaround (a720edf).
+
 - Default-off `scan`: `deflate_scan`, `zlib_scan`, `ScanOutcome`, and `ScanError`,
   reused from `0fa809a9` for codec inventory. Shared Huffman tables plus retained
   decoder/miniz differential checks keep framing behavior synchronized.

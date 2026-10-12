@@ -68,6 +68,9 @@ pub fn adler32_combine(adler1: u32, adler2: u32, len2: usize) -> u32 {
 /// SIMD implementations (AVX-512 VNNI / AVX-512 / AVX2 / NEON / WASM SIMD128),
 /// runtime-dispatched via archmage. Compiled only with the `simd` feature;
 /// without it, [`adler32`] calls [`adler32_scalar`] directly.
+// Keep dispatch and SIMD implementations in this module. The equivalent
+// top-level layout shipped in 0.3.6 triggers an LLVM 23 InstCombine crash on
+// optimized wasm32 with atomics and relaxed SIMD. See docs/wasm-compiler-regression.md.
 #[cfg(feature = "simd")]
 mod simd {
     use archmage::prelude::*;

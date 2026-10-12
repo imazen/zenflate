@@ -200,3 +200,7 @@ metadata-scan-api:
 # Explicit corpus paths work even when the automatic cache is unavailable.
 metadata-scan-cross-corpus corpus:
     CODEC_CORPUS_CACHE=/proc/zenflate-cache-unwritable ZENFLATE_SCAN_CORPUS="{{corpus}}" CARGO_TARGET_I686_UNKNOWN_LINUX_GNU_RUNNER=env cargo test --features scan --target i686-unknown-linux-gnu --test scan scan_matches_decode_on_corpus_idat -- --nocapture
+
+# Expected compiler failure in the unmodified released source; never a CI correctness gate.
+reproduce-wasm-036 scratch toolchain="1.99.0" workaround="original":
+    bash scripts/reproduce-wasm-036.sh {{scratch}} {{toolchain}} {{workaround}}
