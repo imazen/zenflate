@@ -4,6 +4,9 @@
 
 ### Added
 
+- Optimized browser-target WASM execution in CI, including shared-memory SIMD,
+  independent codec/checksum oracles and exact scalar encoded-byte parity.
+
 - Reproducible optimized WASM compiler-crash investigation for released 0.3.6,
   including validation of the existing SIMD module workaround (a720edf).
 

@@ -155,6 +155,34 @@ jobs:
       - name: Check WASM (simd128, no threads)
         run: RUSTFLAGS="-C target-feature=+simd128" cargo check --target wasm32-wasip1 --no-default-features --features std,compress,simd,avx512
 
+  wasm-execute:
+    name: Execute WASM (${{ matrix.toolchain }}, ${{ matrix.mode }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { toolchain: stable, mode: normal }
+          - { toolchain: 1.99.0, mode: normal }
+          - { toolchain: nightly-2026-10-12, mode: shared }
+          - { toolchain: nightly, mode: shared }
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.toolchain }}
+          targets: wasm32-unknown-unknown
+          components: rust-src
+      - uses: actions/setup-node@v7.1.0
+        with:
+          node-version: 24.18.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: . -> tools/wasm-check/target
+          key: wasm-${{ matrix.toolchain }}-${{ matrix.mode }}
+      - name: Optimized library build and actual WASM execution
+        run: bash scripts/test-wasm.sh '${{ matrix.toolchain }}' '${{ matrix.mode }}'
+
   # ==========================================================================
   # Clippy
   # ==========================================================================

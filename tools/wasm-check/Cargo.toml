@@ -1,0 +1,21 @@
+[package]
+name = "zenflate-wasm-check"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[features]
+default = ["simd"]
+simd = ["zenflate/simd", "zenflate/avx512"]
+
+[dependencies]
+zenflate = { path = "../..", default-features = false, features = ["std", "compress"] }
+miniz_oxide = "=0.9.1"
+crc32fast = "=1.5.2"
+simd-adler32 = "=0.3.10"
+
+[profile.release]
+opt-level = 3
+panic = "abort"

@@ -204,3 +204,7 @@ metadata-scan-cross-corpus corpus:
 # Expected compiler failure in the unmodified released source; never a CI correctness gate.
 reproduce-wasm-036 scratch toolchain="1.99.0" workaround="original":
     bash scripts/reproduce-wasm-036.sh {{scratch}} {{toolchain}} {{workaround}}
+
+# Execute optimized browser-target WASM against independent oracles and scalar bytes.
+test-wasm toolchain="stable" mode="normal":
+    bash scripts/test-wasm.sh {{toolchain}} {{mode}}
