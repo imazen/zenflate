@@ -9,21 +9,20 @@
 
 ## summary
 #
-#   inherent methods                            7
+#   inherent methods                            6
 #   trait roster entries (type × trait)         7
 #
 # per-module pub lines:
 #   (root)                            2
 #   compress                          1
-#   decompress                        2
+#   decompress                        1
 #   error                             2
 
-## items (7 lines)
+## items (6 lines)
 
 pub fn ScanError::assert_fields_are_eq(&self)
 pub fn ScanOutcome::assert_fields_are_eq(&self)
 pub fn compress::CompressionLevel::assert_fields_are_eq(&self)
-pub fn decompress::ChecksumPolicy::assert_fields_are_eq(&self)
 pub fn decompress::DecompressOutcome::assert_fields_are_eq(&self)
 pub fn error::CompressionError::assert_fields_are_eq(&self)
 pub fn error::DecompressionError::assert_fields_are_eq(&self)
