@@ -2,35 +2,17 @@
 
 ## [Unreleased]
 
-### Added
-
-- Optimized browser-target WASM execution in CI, including shared-memory SIMD,
-  independent codec/checksum oracles and exact scalar encoded-byte parity.
-
-- Reproducible optimized WASM compiler-crash investigation for released 0.3.6,
-  including validation of the existing SIMD module workaround (a720edf).
-
-- Default-off `scan`: `deflate_scan`, `zlib_scan`, `ScanOutcome`, and `ScanError`,
-  reused from `0fa809a9` for codec inventory. Shared Huffman tables plus retained
-  decoder/miniz differential checks keep framing behavior synchronized.
-  No zencodec, zenmeta, zencodecs or zenpipe dependency is introduced.
-- Scan errors implement core Error and retain cancellation reason and progress.
-  Existing fuzz regressions are retained as lossless text with source hashes.
-
-### Fixed
-
-- Scanner corpus tests use a caller-provided directory without initializing
-  the optional download cache, allowing the same coverage in cross containers
-  whose home directory is not writable.
-
 ### QUEUED BREAKING CHANGES
 
 (none)
 
-## [0.4.1] - 2026-10-10
+## [0.4.1] - 2026-10-13
 
 ### Added
 
+- Optimized browser-target WASM execution in CI, including shared-memory SIMD, independent codec/checksum oracles and exact scalar encoded-byte parity (71ee10b).
+- Reproducible optimized WASM compiler-crash investigation for released 0.3.6, including validation of the existing SIMD module workaround (223fc30, a720edf).
+- Default-off `scan`: `deflate_scan`, `zlib_scan`, `ScanOutcome`, and `ScanError` for codec inventory; shared Huffman tables and decoder/miniz differential checks synchronize framing, and errors retain cancellation reason and progress (acc7080).
 - PNG-specific compression effort ladder via `CompressionLevel::png`, with runs-only guards and input-derived block boundaries (3f4fd61).
 - Independent PNG strip compression and streaming decoding via `png::StripCompressor` and `png::StripDecoder`, for caller-scheduled iDOT processing (e961883).
 - `StripCompressor::compress_with_history` uses up to 32 KiB of preceding input; the resulting strips require sequential decoding and are unsuitable for independent iDOT decoding. Efforts above 30 ignore history (13dc0d5).
@@ -44,6 +26,7 @@
 
 ### Fixed
 
+- Scanner corpus tests accept a caller-provided directory without initializing the optional download cache, retaining cross-container coverage when home is not writable (acc7080).
 - Focus Miri on bounded unchecked-memory and caller tests so the soundness gate completes; broad native coverage remains unchanged (65534189).
 - Primed-strip and parallel-gzip near-optimal output no longer depends on compressor reuse (13dc0d5).
 - Reused decoders clear stale `checksum_matched()` results before raw decode and early wrapper errors (66e37b11).
