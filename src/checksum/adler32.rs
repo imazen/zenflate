@@ -732,15 +732,25 @@ mod simd {
             let mut p = chunk;
 
             if p.len() >= 2 * VL {
-                let mut v_s1 = zeroes;
-                let mut v_s1_sums = zeroes;
-                let mut v_byte_sums_a = i16x8_splat(0);
-                let mut v_byte_sums_b = i16x8_splat(0);
-                let mut v_byte_sums_c = i16x8_splat(0);
-                let mut v_byte_sums_d = i16x8_splat(0);
-
                 let vectorized_len = p.len() & !(2 * VL - 1);
                 s2 += s1 * vectorized_len as u32;
+
+                // Seed the position sums from the first pair rather than a zero
+                // vector PHI. This source shape avoids the LLVM 23 InstCombine
+                // crash after loop rotation; see docs/wasm-compiler-regression.md.
+                let data_a: &[u8; 16] = p[..16].try_into().unwrap();
+                let data_b: &[u8; 16] = p[16..32].try_into().unwrap();
+                let va = v128_load(data_a);
+                let vb = v128_load(data_b);
+                let mut v_byte_sums_a = i16x8_extend_low_u8x16(va);
+                let mut v_byte_sums_b = i16x8_extend_high_u8x16(va);
+                let mut v_byte_sums_c = i16x8_extend_low_u8x16(vb);
+                let mut v_byte_sums_d = i16x8_extend_high_u8x16(vb);
+                let sum_a = i32x4_extadd_pairwise_i16x8(i16x8_extadd_pairwise_u8x16(va));
+                let sum_b = i32x4_extadd_pairwise_i16x8(i16x8_extadd_pairwise_u8x16(vb));
+                let mut v_s1 = i32x4_add(sum_a, sum_b);
+                let mut v_s1_sums = zeroes;
+                p = &p[2 * VL..];
 
                 while p.len() >= 2 * VL {
                     let data_a: &[u8; 16] = p[..16].try_into().unwrap();

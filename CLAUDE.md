@@ -527,6 +527,12 @@ compressor) and the cross-API matrix (`just conformance-full` in release).
 
 ## Known Bugs
 
+- Fixed 2026-10-13: rolling nightly e9bbadf68 reintroduced the optimized
+  shared-memory WASM Adler-32 InstCombine crash on main. Seed the vector sums
+  from the first 32-byte pair instead of zero; the SIMD arithmetic and native
+  implementations are retained. Current-nightly executable oracle and parity
+  checks pass. See `docs/wasm-compiler-regression.md`.
+
 - Released 0.3.6 triggers an LLVM 23 InstCombine SIGSEGV in the WASM
   Adler-32 SIMD function under optimized atomics/relaxed-SIMD flags.
   The existing SIMD module restructuring in a720edf eliminates this
