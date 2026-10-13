@@ -26,6 +26,7 @@
 
 ### Fixed
 
+- Seed WASM Adler-32 SIMD sums from the first input pair to avoid the current-nightly LLVM InstCombine crash while retaining optimized shared-memory SIMD and exact output (ba436c7).
 - Scanner corpus tests accept a caller-provided directory without initializing the optional download cache, retaining cross-container coverage when home is not writable (acc7080).
 - Focus Miri on bounded unchecked-memory and caller tests so the soundness gate completes; broad native coverage remains unchanged (65534189).
 - Primed-strip and parallel-gzip near-optimal output no longer depends on compressor reuse (13dc0d5).
