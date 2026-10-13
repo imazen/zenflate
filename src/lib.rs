@@ -4,13 +4,13 @@
 //! [Zopfli](https://github.com/google/zopfli), and
 //! [Brotli](https://github.com/google/brotli).
 //!
-//! - **Compression** ([`Compressor`][Compressor]) — buffer-to-buffer. Effort 0-200 with named
+//! - **Compression** ([`Compressor` type][Compressor]) — buffer-to-buffer. Effort 0-200 with named
 //!   presets ([`CompressionLevel::balanced()`][CompressionLevel-balanced], etc.). Parallel gzip via
 //!   [`Compressor::gzip_compress_parallel()`][Compressor-gzip_compress_parallel].
 //! - **Decompression** ([`Decompressor`]) — buffer-to-buffer, fastest mode.
-//! - **Streaming decompression** ([`StreamDecompressor`][StreamDecompressor]) — pull-based, works
-//!   with any [`InputSource`][InputSource] including `&[u8]` (zero-cost) and
-//!   [`BufReadSource`][BufReadSource] for `std::io::BufRead`.
+//! - **Streaming decompression** ([`StreamDecompressor` type][StreamDecompressor]) — pull-based, works
+//!   with any [`InputSource` trait][InputSource] including `&[u8]` (zero-cost) and
+//!   [`BufReadSource` adapter][BufReadSource] for `std::io::BufRead`.
 //!
 //! All three DEFLATE-based formats (raw DEFLATE, zlib, gzip) are supported for
 //! both compression and decompression.
@@ -65,7 +65,7 @@
 //! |---------|---------|--------|
 //! | `std` | yes | `std::io::{Read, BufRead}` integration (`BufReadSource`) |
 //! | `alloc` | yes (via `std`) | Streaming decompression |
-//! | `compress` | yes | [`Compressor`][Compressor] / [`CompressionLevel`][CompressionLevel] (implies `alloc`) |
+//! | `compress` | yes | [`Compressor` type][Compressor] / [`CompressionLevel` type][CompressionLevel] (implies `alloc`) |
 //! | `simd` | yes | Runtime-dispatched SIMD checksums + matchfinder multiversioning |
 //! | `avx512` | yes | AVX-512 SIMD tiers (implies `simd`) |
 //! | `threads` | yes | [`Compressor::gzip_compress_parallel()`][Compressor-gzip_compress_parallel] (implies `compress`) |
