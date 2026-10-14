@@ -401,11 +401,11 @@ with zero `unsafe`.
   decompressor, matchfinders (hash table, hash chains, binary trees), Huffman
   construction, block splitting, near-optimal parser, checksum implementations
 - [Zopfli](https://github.com/google/zopfli) by Lode Vandevenne and
-  Jyrki Rissanen (Google) — full-optimal parsing concept, iterative cost
+  Jyrki Alakuijala — full-optimal parsing concept, iterative cost
   refinement, `optimize_huffman_for_rle` (Zopfli-style variant)
 - [zenzop](https://github.com/imazen/zenzop) — Rust Zopfli port used as the
   source for katajainen, squeeze, and block splitter modules
-- [Brotli](https://github.com/google/brotli) (Google) — frequency smoothing
+- [Brotli](https://github.com/google/brotli) by Jyrki Alakuijala and Zoltán Szabadka — frequency smoothing
   algorithm for Huffman RLE encoding
 - [pigz](https://zlib.net/pigz/) by Mark Adler — parallel gzip chunking
   strategy with dictionary overlap
