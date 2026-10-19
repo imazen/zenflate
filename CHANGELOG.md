@@ -6,6 +6,10 @@
 
 (none)
 
+### Changed
+
+- Require archmage 0.9.31-beta.1 for SIMD dispatch; existing compression library tests and strict library lint pass (0e0268ce).
+
 ## [0.4.1] - 2026-10-13
 
 ### Added
