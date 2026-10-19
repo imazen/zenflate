@@ -208,3 +208,9 @@ reproduce-wasm-036 scratch toolchain="1.99.0" workaround="original":
 # Execute optimized browser-target WASM against independent oracles and scalar bytes.
 test-wasm toolchain="stable" mode="normal":
     bash scripts/test-wasm.sh {{toolchain}} {{mode}}
+
+# Validate the owner-requested archmage beta constraint update.
+beta-check:
+    cargo fmt --check
+    cargo clippy --locked --lib -- -D warnings
+    cargo test --locked --lib
