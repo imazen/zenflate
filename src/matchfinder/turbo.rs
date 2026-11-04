@@ -7,7 +7,9 @@
 //!
 //! Used by the `StaticTurbo` (effort 1-2) and `Turbo` (effort 3-4) strategies.
 
-use super::{MATCHFINDER_WINDOW_SIZE, lz_extend, lz_hash, matchfinder_init, matchfinder_rebase};
+use super::{
+    MATCHFINDER_WINDOW_SIZE, boxed_array, lz_extend, lz_hash, matchfinder_init, matchfinder_rebase,
+};
 
 /// Hash order for the turbo matchfinder.
 const TURBO_HASH_ORDER: u32 = 15;
@@ -34,25 +36,25 @@ pub(crate) const TURBO_MATCHFINDER_HASH_ORDER: u32 = TURBO_HASH_ORDER;
 /// Match skips only update a limited number of hash entries for speed.
 #[derive(Clone)]
 pub(crate) struct TurboMatchfinder {
-    hash_tab: [i16; TURBO_NUM_BUCKETS],
+    hash_tab: alloc::boxed::Box<[i16; TURBO_NUM_BUCKETS]>,
 }
 
 impl TurboMatchfinder {
     /// Create and initialize a new TurboMatchfinder.
     pub fn new() -> Self {
         Self {
-            hash_tab: [super::MATCHFINDER_INITVAL; TURBO_NUM_BUCKETS],
+            hash_tab: boxed_array(super::MATCHFINDER_INITVAL),
         }
     }
 
     /// Initialize (reset) the matchfinder.
     pub fn init(&mut self) {
-        matchfinder_init(&mut self.hash_tab);
+        matchfinder_init(&mut self.hash_tab[..]);
     }
 
     /// Slide the window by MATCHFINDER_WINDOW_SIZE.
     fn slide_window(&mut self) {
-        matchfinder_rebase(&mut self.hash_tab);
+        matchfinder_rebase(&mut self.hash_tab[..]);
     }
 
     /// Find the longest match at position `in_next`.

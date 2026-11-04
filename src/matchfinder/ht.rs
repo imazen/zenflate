@@ -5,7 +5,9 @@
 //! Stores hash chains inline in the hash table (2 entries per bucket).
 //! Optimized for speed over compression ratio. Does not support length-3 matches.
 
-use super::{MATCHFINDER_WINDOW_SIZE, lz_extend, lz_hash, matchfinder_init, matchfinder_rebase};
+use super::{
+    MATCHFINDER_WINDOW_SIZE, boxed_array, lz_extend, lz_hash, matchfinder_init, matchfinder_rebase,
+};
 
 /// Hash table order (log2 of number of buckets).
 const HT_MATCHFINDER_HASH_ORDER: u32 = 15;
@@ -26,14 +28,14 @@ const HT_NUM_BUCKETS: usize = 1 << HT_MATCHFINDER_HASH_ORDER;
 /// Hash Table matchfinder: 32K buckets × 2 entries (i16 positions).
 #[derive(Clone)]
 pub(crate) struct HtMatchfinder {
-    hash_tab: [[i16; HT_MATCHFINDER_BUCKET_SIZE]; HT_NUM_BUCKETS],
+    hash_tab: alloc::boxed::Box<[[i16; HT_MATCHFINDER_BUCKET_SIZE]; HT_NUM_BUCKETS]>,
 }
 
 impl HtMatchfinder {
     /// Create and initialize a new HtMatchfinder.
     pub fn new() -> Self {
         Self {
-            hash_tab: [[super::MATCHFINDER_INITVAL; HT_MATCHFINDER_BUCKET_SIZE]; HT_NUM_BUCKETS],
+            hash_tab: boxed_array([super::MATCHFINDER_INITVAL; HT_MATCHFINDER_BUCKET_SIZE]),
         }
     }
 
