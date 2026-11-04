@@ -10,7 +10,9 @@
 //!
 //! Used by the `FastHt` strategy (effort 5-7).
 
-use super::{MATCHFINDER_WINDOW_SIZE, lz_extend, lz_hash, matchfinder_init, matchfinder_rebase};
+use super::{
+    MATCHFINDER_WINDOW_SIZE, boxed_array, lz_extend, lz_hash, matchfinder_init, matchfinder_rebase,
+};
 
 /// Hash order for the fast_ht matchfinder.
 const FAST_HT_HASH_ORDER: u32 = 14;
@@ -41,14 +43,14 @@ pub(crate) const FAST_HT_MATCHFINDER_HASH_ORDER: u32 = FAST_HT_HASH_ORDER;
 /// due to limited hash updates on skips.
 #[derive(Clone)]
 pub(crate) struct FastHtMatchfinder {
-    hash_tab: [[i16; BUCKET_SIZE]; NUM_BUCKETS],
+    hash_tab: alloc::boxed::Box<[[i16; BUCKET_SIZE]; NUM_BUCKETS]>,
 }
 
 impl FastHtMatchfinder {
     /// Create and initialize a new FastHtMatchfinder.
     pub fn new() -> Self {
         Self {
-            hash_tab: [[super::MATCHFINDER_INITVAL; BUCKET_SIZE]; NUM_BUCKETS],
+            hash_tab: boxed_array([super::MATCHFINDER_INITVAL; BUCKET_SIZE]),
         }
     }
 

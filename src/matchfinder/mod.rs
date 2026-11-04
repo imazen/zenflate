@@ -22,6 +22,19 @@ pub(crate) const MATCHFINDER_WINDOW_SIZE: u32 = 1 << MATCHFINDER_WINDOW_ORDER;
 /// Initial value for matchfinder position entries (= -WINDOW_SIZE as i16).
 pub(crate) const MATCHFINDER_INITVAL: i16 = i16::MIN;
 
+/// Allocate a fixed-size array directly on the heap, filled with `elem`.
+///
+/// `Box::new([elem; N])` materializes the whole array on the stack before
+/// moving it to the heap; the matchfinder tables are 64–256 KiB, which
+/// overflows bounded caller stacks (e.g. rayon workers at 512 KiB). Going
+/// through `Vec` + `into_boxed_slice` allocates on the heap first.
+pub(crate) fn boxed_array<T: Clone, const N: usize>(elem: T) -> alloc::boxed::Box<[T; N]> {
+    alloc::vec![elem; N]
+        .into_boxed_slice()
+        .try_into()
+        .unwrap_or_else(|_| unreachable!())
+}
+
 /// Multiplicative hash function for LZ77 matchfinding.
 ///
 /// Takes a sequence prefix as a 32-bit value and returns the top `num_bits` bits

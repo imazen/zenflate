@@ -6,7 +6,9 @@
 //! and a hash table of linked lists for length-4+ matches (`hash4_tab`, 64K entries).
 //! Chain links are stored in `next_tab` (32K entries, indexed by position mod window).
 
-use super::{MATCHFINDER_WINDOW_SIZE, lz_extend, lz_hash, matchfinder_init, matchfinder_rebase};
+use super::{
+    MATCHFINDER_WINDOW_SIZE, boxed_array, lz_extend, lz_hash, matchfinder_init, matchfinder_rebase,
+};
 
 /// Hash order for length 3 matches.
 const HC_MATCHFINDER_HASH3_ORDER: u32 = 15;
@@ -27,20 +29,20 @@ const WINDOW_MASK: usize = MATCHFINDER_WINDOW_SIZE as usize - 1;
 #[derive(Clone)]
 pub(crate) struct HcMatchfinder {
     /// Hash table for length 3 matches (singleton entries).
-    hash3_tab: [i16; HC_HASH3_SIZE],
+    hash3_tab: alloc::boxed::Box<[i16; HC_HASH3_SIZE]>,
     /// Hash table for length 4+ matches (chain heads).
-    hash4_tab: [i16; HC_HASH4_SIZE],
+    hash4_tab: alloc::boxed::Box<[i16; HC_HASH4_SIZE]>,
     /// Chain links: next_tab[pos & WINDOW_MASK] = next position in chain.
-    next_tab: [i16; MATCHFINDER_WINDOW_SIZE as usize],
+    next_tab: alloc::boxed::Box<[i16; MATCHFINDER_WINDOW_SIZE as usize]>,
 }
 
 impl HcMatchfinder {
     /// Create and initialize a new HcMatchfinder.
     pub fn new() -> Self {
         Self {
-            hash3_tab: [super::MATCHFINDER_INITVAL; HC_HASH3_SIZE],
-            hash4_tab: [super::MATCHFINDER_INITVAL; HC_HASH4_SIZE],
-            next_tab: [super::MATCHFINDER_INITVAL; MATCHFINDER_WINDOW_SIZE as usize],
+            hash3_tab: boxed_array(super::MATCHFINDER_INITVAL),
+            hash4_tab: boxed_array(super::MATCHFINDER_INITVAL),
+            next_tab: boxed_array(super::MATCHFINDER_INITVAL),
         }
     }
 
@@ -48,15 +50,15 @@ impl HcMatchfinder {
     pub fn init(&mut self) {
         // Only hash tables need initialization; next_tab entries are written before read.
         // But rebasing touches next_tab too, so we init everything for safety.
-        matchfinder_init(&mut self.hash3_tab);
-        matchfinder_init(&mut self.hash4_tab);
+        matchfinder_init(&mut self.hash3_tab[..]);
+        matchfinder_init(&mut self.hash4_tab[..]);
     }
 
     /// Slide the window by MATCHFINDER_WINDOW_SIZE.
     fn slide_window(&mut self) {
-        matchfinder_rebase(&mut self.hash3_tab);
-        matchfinder_rebase(&mut self.hash4_tab);
-        matchfinder_rebase(&mut self.next_tab);
+        matchfinder_rebase(&mut self.hash3_tab[..]);
+        matchfinder_rebase(&mut self.hash4_tab[..]);
+        matchfinder_rebase(&mut self.next_tab[..]);
     }
 
     /// Find the longest match longer than `best_len` bytes.
