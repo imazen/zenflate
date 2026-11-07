@@ -196,3 +196,9 @@ metadata-scan-portability:
 metadata-scan-api:
     just api-doc
     cargo semver-checks check-release -p zenflate --baseline-version 0.4.0 --all-features
+
+# Stable SIMD qualification for the frozen consumer revision.
+stable-cohort-check:
+    cargo fmt --check
+    cargo test --lib --tests
+    cargo clippy --lib --tests -- -D warnings
