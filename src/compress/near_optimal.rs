@@ -399,8 +399,8 @@ fn set_default_costs(costs: &mut DeflateCosts, lit_cost: u32, len_sym_cost: u32)
     for i in DEFLATE_MIN_MATCH_LEN..=DEFLATE_MAX_MATCH_LEN {
         costs.length[i as usize] = default_length_cost(i, len_sym_cost);
     }
-    for i in 0..30 {
-        costs.offset_slot[i] = default_offset_slot_cost(i);
+    for (i, slot) in costs.offset_slot.iter_mut().enumerate().take(30) {
+        *slot = default_offset_slot_cost(i);
     }
 }
 
@@ -432,12 +432,8 @@ fn adjust_costs_impl(
             change_amount,
         );
     }
-    for i in 0..30 {
-        adjust_cost(
-            &mut costs.offset_slot[i],
-            default_offset_slot_cost(i),
-            change_amount,
-        );
+    for (i, slot) in costs.offset_slot.iter_mut().enumerate().take(30) {
+        adjust_cost(slot, default_offset_slot_cost(i), change_amount);
     }
 }
 
@@ -962,8 +958,13 @@ pub(crate) fn optimize_and_flush_block(
     // Force the block to end at the desired length (prevent match overshoot)
     let sentinel_end =
         (block_length as usize + DEFLATE_MAX_MATCH_LEN as usize).min(ns.optimum_nodes.len() - 1);
-    for i in block_length as usize..=sentinel_end {
-        ns.optimum_nodes[i].cost_to_end = 0x80000000;
+    for node in ns
+        .optimum_nodes
+        .iter_mut()
+        .take(sentinel_end + 1)
+        .skip(block_length as usize)
+    {
+        node.cost_to_end = 0x80000000;
     }
 
     // Consider static Huffman for small blocks
@@ -1050,18 +1051,29 @@ pub(crate) fn optimize_and_flush_block(
 
                 // Perturb ~33% of symbol costs with random other symbol costs
                 let saved = ns.costs_saved.clone();
-                for i in 0..DEFLATE_NUM_LITERALS as usize {
+                for lit in ns
+                    .costs
+                    .literal
+                    .iter_mut()
+                    .take(DEFLATE_NUM_LITERALS as usize)
+                {
                     if rng.next_u32().is_multiple_of(3) {
                         let other = rng.next_u32() as usize % DEFLATE_NUM_LITERALS as usize;
-                        ns.costs.literal[i] = saved.literal[other];
+                        *lit = saved.literal[other];
                     }
                 }
-                for i in DEFLATE_MIN_MATCH_LEN as usize..=DEFLATE_MAX_MATCH_LEN as usize {
+                for len in ns
+                    .costs
+                    .length
+                    .iter_mut()
+                    .take(DEFLATE_MAX_MATCH_LEN as usize + 1)
+                    .skip(DEFLATE_MIN_MATCH_LEN as usize)
+                {
                     if rng.next_u32().is_multiple_of(3) {
                         let other = DEFLATE_MIN_MATCH_LEN as usize
                             + rng.next_u32() as usize
                                 % (DEFLATE_MAX_MATCH_LEN - DEFLATE_MIN_MATCH_LEN + 1) as usize;
-                        ns.costs.length[i] = saved.length[other];
+                        *len = saved.length[other];
                     }
                 }
 

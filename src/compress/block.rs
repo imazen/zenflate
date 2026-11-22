@@ -622,10 +622,7 @@ impl PrecodeFlags {
     /// Check if this flag combination is valid.
     /// fuse_7/fuse_8 require use_16.
     pub fn is_valid(self) -> bool {
-        if (self.fuse_7 || self.fuse_8) && !self.use_16 {
-            return false;
-        }
-        true
+        !((self.fuse_7 || self.fuse_8) && !self.use_16)
     }
 }
 
