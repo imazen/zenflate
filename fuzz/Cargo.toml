@@ -10,7 +10,7 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4.13"
 arbitrary = { version = "1.4.2", features = ["derive"] }
-enough = "0.4.4"
+enough = "0.4.5"
 miniz_oxide = "0.9.1"
 
 [dependencies.zenflate]

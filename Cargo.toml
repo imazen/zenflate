@@ -57,7 +57,7 @@ threads = ["std", "compress"]
 
 [dependencies]
 archmage = { version = "0.9.32", default-features = false, features = ["macros"], optional = true }
-enough = { version = "0.4.4", default-features = false }
+enough = { version = "0.4.5", default-features = false }
 
 
 [dev-dependencies]
@@ -73,7 +73,7 @@ simd-adler32 = "0.3.10"
 # Comparison benchmarks and bench harness — native only.
 # libdeflate-sys requires C compilation (needs WASI SDK for wasm32).
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
-zenbench = { version = "0.1.10", features = ["criterion-compat"] }
+zenbench = { version = "0.1.11", features = ["criterion-compat"] }
 # DEV-only: lets benches/checksum_tiers.rs disable the baseline SIMD token
 # (NEON on aarch64) so the "scalar" arm is real rather than a second
 # measurement of the SIMD path. Feature unification keeps this to test/bench

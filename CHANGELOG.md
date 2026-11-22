@@ -8,6 +8,8 @@
 
 ### Changed
 
+- Update dependency floors (`enough` 0.4.5, `zenbench` 0.1.11, `zenutils-apidoc` 0.1.1) and pass `CROSS_CONTAINER_OPTS: --security-opt seccomp=unconfined` in the CI `test-i686` job.
+
 - Accept the archmage and magetypes 0.9.31 stable release.
 
 - Require archmage 0.9.31-beta.1 for SIMD dispatch; existing compression library tests and strict library lint pass (0e0268ce).
