@@ -894,14 +894,9 @@ impl NearOptGuard<'_> {
         let main_bits = encoded_bits(freqs, codes, static_codes);
         // The caller checks the stop token per block; this parse is bounded
         // by one block.
-        let runs_win = self.guard.runs_beat(
-            self.input,
-            begin,
-            end,
-            main_bits,
-            static_codes,
-            &enough::Unstoppable,
-        );
+        let runs_win = self
+            .guard
+            .runs_beat(self.input, begin, end, main_bits, static_codes, None);
         if !matches!(runs_win, Ok(true)) {
             return false;
         }

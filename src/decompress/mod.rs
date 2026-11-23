@@ -11,6 +11,7 @@ pub use scan::{ScanError, ScanOutcome, deflate_scan, zlib_scan};
 
 use crate::checksum;
 use crate::error::DecompressionError;
+use enough::Stop;
 
 // ---------------------------------------------------------------------------
 // Decode table constants
@@ -444,8 +445,8 @@ impl Decompressor {
         stop: impl enough::Stop,
     ) -> Result<DecompressOutcome, DecompressionError> {
         self.checksum_matched = None;
-        let (input_consumed, output_written) =
-            self.deflate_decompress_core(input, output, &stop)?;
+        let stop = (&stop as &dyn enough::Stop).live();
+        let (input_consumed, output_written) = self.deflate_decompress_core(input, output, stop)?;
         Ok(DecompressOutcome {
             input_consumed,
             output_written,
@@ -489,8 +490,9 @@ impl Decompressor {
         }
 
         let deflate_data = &input[2..input.len() - ZLIB_FOOTER_SIZE];
+        let stop = (&stop as &dyn enough::Stop).live();
         let (deflate_consumed, output_written) =
-            self.deflate_decompress_core(deflate_data, output, &stop)?;
+            self.deflate_decompress_core(deflate_data, output, stop)?;
 
         // Verify Adler-32 (big-endian, after DEFLATE data)
         let footer_start = 2 + deflate_consumed;
@@ -609,8 +611,9 @@ impl Decompressor {
         if pos > deflate_end {
             return Err(hdr_err);
         }
+        let stop = (&stop as &dyn enough::Stop).live();
         let (deflate_consumed, output_written) =
-            self.deflate_decompress_core(&input[pos..deflate_end], output, &stop)?;
+            self.deflate_decompress_core(&input[pos..deflate_end], output, stop)?;
 
         let footer_start = pos + deflate_consumed;
 
@@ -1043,7 +1046,7 @@ impl Decompressor {
         &mut self,
         input: &[u8],
         output: &mut [u8],
-        stop: &impl enough::Stop,
+        stop: Option<&dyn enough::Stop>,
     ) -> Result<(usize, usize), DecompressionError> {
         // x86-64-v4 (AVX-512) build of this loop for inputs of 16 KiB and up.
         // Time vs fdeflate on zenpng's 106 PNG streams, Ryzen 9 9950X3D (Zen
@@ -1067,11 +1070,13 @@ impl Decompressor {
         &mut self,
         input: &[u8],
         output: &mut [u8],
-        stop: &impl enough::Stop,
+        stop: Option<&dyn enough::Stop>,
     ) -> Result<(usize, usize), DecompressionError> {
         // No x86-64-v3 build of this loop (unlike the streaming decoder):
         // measured 1.8-2.5% slower on Core Ultra 7 265K, while streaming
         // gained 3.5%. v4 is above.
+        // `stop` is `Option<&dyn Stop>` from `live()` at the entry points: a
+        // stop that can never fire is `None`, whose `check()` is a branch.
         let mut in_pos: usize = 0;
         let mut out_pos: usize = 0;
         let mut bitbuf: u64 = 0;
@@ -3104,7 +3109,7 @@ mod oneshot_v4 {
         d: &mut Decompressor,
         input: &[u8],
         output: &mut [u8],
-        stop: &impl enough::Stop,
+        stop: Option<&dyn enough::Stop>,
     ) -> Result<(usize, usize), DecompressionError> {
         d.deflate_decompress_core_impl(input, output, stop)
     }

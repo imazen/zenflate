@@ -615,7 +615,7 @@ impl Lz77Store {
         in_data: &[u8],
         instart: usize,
         inend: usize,
-        stop: &impl enough::Stop,
+        stop: Option<&dyn enough::Stop>,
     ) -> Result<(), enough::StopReason> {
         if instart == inend {
             return Ok(());
@@ -635,7 +635,6 @@ impl Lz77Store {
         let mut match_available = false;
         let mut next_stop_check = i + super::STOP_CHECK_INTERVAL;
         let mut literal_tail = false;
-        let stop_opt: Option<&dyn enough::Stop> = if stop.may_stop() { Some(stop) } else { None };
         let mut chain_work = 0usize;
 
         while i < inend {
@@ -649,7 +648,7 @@ impl Lz77Store {
             h.update(arr, i);
             // A deadline inside the chain search returns the best match so far.
             let (leng, dist, steps) =
-                find_longest_match_no_cache(&h, arr, i, inend, MAX_MATCH, stop_opt)?;
+                find_longest_match_no_cache(&h, arr, i, inend, MAX_MATCH, stop)?;
             chain_work += steps;
             if chain_work >= CHAIN_WORK_BUDGET {
                 chain_work = 0;
@@ -1052,7 +1051,7 @@ fn get_best_lengths(
     dist_array: &mut Vec<u16>,
     sublen: &mut Vec<u16>,
     skip_hash: bool,
-    stop: &impl enough::Stop,
+    stop: Option<&dyn enough::Stop>,
 ) -> Result<f64, enough::StopReason> {
     let blocksize = inend - instart;
     length_array.clear();
@@ -1082,7 +1081,6 @@ fn get_best_lengths(
     }
     costs[0] = 0.0;
 
-    let stop_opt: Option<&dyn enough::Stop> = if stop.may_stop() { Some(stop) } else { None };
     let mut i = instart;
     sublen.resize(MAX_MATCH + 1, 0);
     let mincost = get_cost_model_min_cost(cost_model);
@@ -1127,7 +1125,7 @@ fn get_best_lengths(
             instart,
             MAX_MATCH,
             &mut Some(sublen.as_mut_slice()),
-            stop_opt,
+            stop,
         )?;
         chain_work += steps;
         if chain_work >= CHAIN_WORK_BUDGET {
@@ -1413,12 +1411,11 @@ fn blocksplit_lz77(
     lz77: &Lz77Store,
     maxblocks: u16,
     splitpoints: &mut Vec<usize>,
-    stop: &dyn Stop,
+    stop: Option<&dyn Stop>,
 ) -> Result<(), StopReason> {
     if lz77.size() < 10 {
         return Ok(());
     }
-    let stop = stop.may_stop().then_some(stop);
 
     // Precompute symbol arrays and chunked prefix histograms for O(CHUNK) range queries.
     // On a deadline: no splits (one block is a valid encoding).
@@ -1492,7 +1489,7 @@ fn blocksplit(
     inend: usize,
     maxblocks: u16,
     splitpoints: &mut Vec<usize>,
-    stop: &impl enough::Stop,
+    stop: Option<&dyn enough::Stop>,
 ) -> Result<(), enough::StopReason> {
     splitpoints.clear();
     let mut store = Lz77Store::with_capacity(inend - instart);
@@ -1526,7 +1523,7 @@ fn lz77_optimal(
     instart: usize,
     inend: usize,
     iterations: u64,
-    stop: &impl enough::Stop,
+    stop: Option<&dyn enough::Stop>,
 ) -> Result<Lz77Store, CompressionError> {
     let blocksize = inend - instart;
     let mut lmc = MatchCache::new(blocksize);
@@ -1758,7 +1755,7 @@ pub(crate) fn compress_full_optimal(
     input: &[u8],
     iterations: u64,
     is_final: bool,
-    stop: &impl enough::Stop,
+    stop: Option<&dyn enough::Stop>,
 ) -> Result<(), CompressionError> {
     if input.is_empty() {
         return Ok(());
@@ -1815,19 +1812,18 @@ pub(crate) fn compress_full_optimal(
 
         // Compare costs of both splits
         let mut scratch = HuffmanScratch::new();
-        let stop_opt: Option<&dyn Stop> = if stop.may_stop() { Some(stop) } else { None };
         // On a deadline the costs come back as None and the phase-2 split stays.
         let cost1 = soft(calculate_split_cost(
             &combined_lz77,
             &lz77_splitpoints,
             &mut scratch,
-            stop_opt,
+            stop,
         ))?;
         let cost2 = soft(calculate_split_cost(
             &combined_lz77,
             &splitpoints2,
             &mut scratch,
-            stop_opt,
+            stop,
         ))?;
         if let (Some(cost1), Some(cost2)) = (cost1, cost2)
             && cost2 < cost1
@@ -2128,7 +2124,7 @@ mod tests {
         let data: Vec<u8> = (0..256 * 1024).map(|i| (i % 251) as u8).collect();
         let mut store = super::Lz77Store::with_capacity(data.len());
         let stop = FailAfter::new(5, enough::StopReason::Cancelled);
-        let res = store.greedy(&data, 0, data.len(), &stop);
+        let res = store.greedy(&data, 0, data.len(), Some(&stop));
         assert_eq!(
             res,
             Err(enough::StopReason::Cancelled),
@@ -2146,7 +2142,7 @@ mod tests {
         let mut store = super::Lz77Store::with_capacity(data.len());
         let stop = FailAfter::new(5, enough::StopReason::TimedOut);
         store
-            .greedy(&data, 0, data.len(), &stop)
+            .greedy(&data, 0, data.len(), Some(&stop))
             .expect("timeout must produce a completed store");
         let covered: usize = store.litlens.iter().map(|ll| ll.size()).sum();
         assert_eq!(covered, data.len(), "store does not cover the input range");
@@ -2162,7 +2158,7 @@ mod tests {
     fn lz77_optimal_polls_inside_dp_pass() {
         let data: Vec<u8> = (0..256 * 1024).map(|i| (i % 251) as u8).collect();
         let stop = FailAfter::new(60, enough::StopReason::Cancelled);
-        let res = super::lz77_optimal(&data, 0, data.len(), 8, &stop);
+        let res = super::lz77_optimal(&data, 0, data.len(), 8, Some(&stop));
         assert!(
             matches!(
                 res,
@@ -2181,7 +2177,7 @@ mod tests {
     fn lz77_optimal_timeout_returns_covering_store() {
         let data: Vec<u8> = (0..256 * 1024).map(|i| (i % 251) as u8).collect();
         let stop = FailAfter::new(40, enough::StopReason::TimedOut);
-        let store = super::lz77_optimal(&data, 0, data.len(), 8, &stop)
+        let store = super::lz77_optimal(&data, 0, data.len(), 8, Some(&stop))
             .expect("timeout must return best-so-far");
         let covered: usize = store.litlens.iter().map(|ll| ll.size()).sum();
         assert_eq!(covered, data.len(), "best-so-far store has gaps");

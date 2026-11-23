@@ -38,6 +38,7 @@
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
+use enough::Stop as _;
 
 use super::bitstream::OutputBitstream;
 use super::block::{
@@ -373,7 +374,7 @@ fn parse_block(
     cfg: &ParseCfg,
     seqs: &mut [Sequence],
     freqs: &mut DeflateFreqs,
-    stop: &impl enough::Stop,
+    stop: Option<&dyn enough::Stop>,
 ) -> Result<usize, CompressionError> {
     let max_len = DEFLATE_MAX_MATCH_LEN as usize;
     // The parse reads only before `end`: bounding the slice once lets the
@@ -492,7 +493,7 @@ impl RunsGuard {
         freqs: &DeflateFreqs,
         main_codes: &mut DeflateCodes,
         static_codes: &DeflateCodes,
-        stop: &impl enough::Stop,
+        stop: Option<&dyn enough::Stop>,
     ) -> Result<Option<bool>, CompressionError> {
         if self.skip > 0 {
             self.skip -= 1;
@@ -515,7 +516,7 @@ impl RunsGuard {
         end: usize,
         main_bits: u32,
         static_codes: &DeflateCodes,
-        stop: &impl enough::Stop,
+        stop: Option<&dyn enough::Stop>,
     ) -> Result<bool, CompressionError> {
         if self.skip > 0 {
             self.skip -= 1;
@@ -532,7 +533,7 @@ impl RunsGuard {
         begin: usize,
         end: usize,
         static_codes: &DeflateCodes,
-        stop: &impl enough::Stop,
+        stop: Option<&dyn enough::Stop>,
     ) -> Result<u32, CompressionError> {
         let r = &mut self.parse;
         r.n = parse_block(
@@ -600,7 +601,7 @@ impl Compressor {
         os: &mut OutputBitstream<'_>,
         input: &[u8],
         params: PngParams,
-        stop: &impl enough::Stop,
+        stop: Option<&dyn enough::Stop>,
     ) -> Result<(), CompressionError> {
         let mut mf = if params.hash {
             Some(self.png_mf.take().expect("png_mf is present between calls"))
@@ -622,7 +623,7 @@ impl Compressor {
         os: &mut OutputBitstream<'_>,
         input: &[u8],
         params: PngParams,
-        stop: &impl enough::Stop,
+        stop: Option<&dyn enough::Stop>,
     ) -> Result<(), CompressionError> {
         if let Some(mf) = mf.as_deref_mut() {
             mf.init(input.len() - self.chunk_start);

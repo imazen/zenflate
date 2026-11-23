@@ -97,7 +97,8 @@ pub fn deflate_scan(
     }
     let mut fail_at = (input.len(), 0);
     let mut d = Decompressor::new();
-    match scan_core(&mut d, input, stop_at, &mut fail_at, &stop) {
+    let stop = (&stop as &dyn enough::Stop).live();
+    match scan_core(&mut d, input, stop_at, &mut fail_at, stop) {
         Ok((input_consumed, output_len, stopped)) => Ok(ScanOutcome {
             input_consumed,
             output_len,
@@ -160,7 +161,7 @@ fn scan_core(
     input: &[u8],
     stop_at: usize,
     fail_at: &mut (usize, usize),
-    stop: &impl enough::Stop,
+    stop: Option<&dyn enough::Stop>,
 ) -> Result<(usize, usize, bool), DecompressionError> {
     let mut in_pos: usize = 0;
     let mut out_pos: usize = 0;

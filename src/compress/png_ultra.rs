@@ -21,6 +21,7 @@
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
+use enough::Stop as _;
 
 use super::Compressor;
 use super::bitstream::OutputBitstream;
@@ -431,7 +432,7 @@ impl Compressor {
         &mut self,
         os: &mut OutputBitstream<'_>,
         input: &[u8],
-        stop: &impl enough::Stop,
+        stop: Option<&dyn enough::Stop>,
     ) -> Result<(), CompressionError> {
         let data = &input[self.chunk_start..];
         let mut st = self.png_ultra.take().unwrap();
@@ -453,7 +454,7 @@ impl Compressor {
         os: &mut OutputBitstream<'_>,
         data: &[u8],
         st: &UltraState,
-        stop: &impl enough::Stop,
+        stop: Option<&dyn enough::Stop>,
     ) -> Result<(), CompressionError> {
         let mut begin = 0;
         while begin < data.len() && !os.overflow {

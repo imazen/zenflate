@@ -3,7 +3,7 @@
 //! Ported from libdeflate's `matchfinder_common.h`.
 
 #[cfg(feature = "simd")]
-use archmage::autoversion;
+use archmage::attune;
 
 pub(crate) mod bt;
 pub(crate) mod fast_ht;
@@ -146,7 +146,7 @@ fn lz_extend_word(strptr: &[u8], matchptr: &[u8], start_len: u32, max_len: u32) 
 }
 
 /// Initialize a matchfinder table to all MATCHFINDER_INITVAL.
-#[cfg_attr(feature = "simd", autoversion)]
+#[cfg_attr(feature = "simd", attune(dispatch))]
 pub(crate) fn matchfinder_init(data: &mut [i16]) {
     data.fill(MATCHFINDER_INITVAL);
 }
@@ -158,7 +158,7 @@ pub(crate) fn matchfinder_init(data: &mut [i16]) {
 ///
 /// Written as `saturating_add(i16::MIN)` so LLVM auto-vectorizes to `vpaddsw`
 /// (x86 AVX2), `sqadd` (NEON), or `i16x8_add_sat_s` (WASM simd128).
-#[cfg_attr(feature = "simd", autoversion)]
+#[cfg_attr(feature = "simd", attune(dispatch))]
 pub(crate) fn matchfinder_rebase(data: &mut [i16]) {
     for entry in data.iter_mut() {
         *entry = entry.saturating_add(i16::MIN);
