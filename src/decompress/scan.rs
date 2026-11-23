@@ -10,6 +10,7 @@ use super::{
     extract_varbits, extract_varbits8, refill_bits, table_lookup,
 };
 use crate::error::DecompressionError;
+use enough::Stop as _;
 
 /// Result of [`deflate_scan`] / [`zlib_scan`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
